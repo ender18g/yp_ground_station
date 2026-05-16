@@ -1,0 +1,110 @@
+services:
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: yp
+      DOCKER_INFLUXDB_INIT_PASSWORD: yp-ground-station
+      DOCKER_INFLUXDB_INIT_ORG: yp
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: yp-dev-token
+    volumes:
+      - influx-data:/var/lib/influxdb2
+
+  yp-server:
+    build:
+      context: ./services/server
+    ports:
+      - "8000:8000"
+    environment:
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_ORG: yp
+      INFLUX_BUCKET: telemetry
+      INFLUX_TOKEN: yp-dev-token
+      TILE_DIR: /data/tiles
+      VEHICLE_TTL_SECONDS: "30"
+    volumes:
+      - ./data/tiles:/data/tiles:ro
+    depends_on:
+      - influxdb
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "8080:80"
+    depends_on:
+      - yp-server
+
+  tileserver:
+    image: maptiler/tileserver-gl:latest
+    profiles:
+      - maps
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./data/maps:/data:ro
+    command: ["--file", "/data/usna.mbtiles"]
+
+  yp-gps:
+    build:
+      context: ./services/yp_gps
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      GPS_MODE: sim
+      VEHICLE_ID: yp
+      HOME_LAT: "38.9822"
+      HOME_LON: "-76.4819"
+      HOME_ALT: "2.0"
+      SEND_HZ: "5"
+      SERIAL_PORT: /dev/ttyUSB0
+      BAUD_RATE: "9600"
+    depends_on:
+      - yp-server
+    # For a real serial GPS, switch GPS_MODE to serial and uncomment:
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+
+  sim-uav:
+    build:
+      context: ./services/sim_vehicle
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_TYPE: uav
+      HOME_LAT: "38.9827"
+      HOME_LON: "-76.4830"
+      HOME_ALT: "45.0"
+      SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+  sim-usv:
+    build:
+      context: ./services/sim_vehicle
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_TYPE: usv
+      HOME_LAT: "38.9818"
+      HOME_LON: "-76.4808"
+      HOME_ALT: "0.0"
+      SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+  sim-uuv:
+    build:
+      context: ./services/sim_vehicle
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_TYPE: uuv
+      HOME_LAT: "38.9808"
+      HOME_LON: "-76.4820"
+      HOME_ALT: "-6.0"
+      SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+volumes:
+  influx-data:

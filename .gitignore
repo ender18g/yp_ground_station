@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local ground-station artifacts
+.DS_Store
+node_modules/
+web/node_modules/
+web/dist/
+data/tiles/
+data/influx/

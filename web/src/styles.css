@@ -1,0 +1,428 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #14202b;
+  background: #0f1720;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app,
+.map {
+  width: 100%;
+  height: 100%;
+}
+
+.app.picking .map {
+  cursor: crosshair;
+}
+
+.topbar {
+  position: absolute;
+  z-index: 900;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.brand,
+.status,
+.settings-panel,
+.target-banner,
+.fit-control {
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 230px;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand span {
+  margin-top: 1px;
+  color: #526172;
+  font-size: 12px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.status.online {
+  color: #126736;
+}
+
+.status.offline {
+  color: #b42318;
+}
+
+.topbar > * {
+  pointer-events: auto;
+}
+
+.topbar .icon-button {
+  margin-left: auto;
+}
+
+.icon-button,
+.fit-control,
+.target-banner button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #17202a;
+  cursor: pointer;
+}
+
+.settings-panel {
+  position: absolute;
+  z-index: 900;
+  top: 72px;
+  right: 16px;
+  width: min(300px, calc(100vw - 32px));
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.settings-panel label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #334155;
+  font-size: 14px;
+}
+
+.settings-panel input {
+  width: 100%;
+}
+
+.target-banner {
+  position: absolute;
+  z-index: 910;
+  bottom: 24px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 10px 10px 10px 14px;
+  border-radius: 8px;
+  transform: translateX(-50%);
+}
+
+.target-banner span {
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.target-banner button {
+  width: 32px;
+  height: 32px;
+}
+
+.fit-control {
+  position: absolute;
+  z-index: 800;
+  top: 88px;
+  left: 16px;
+}
+
+.marker-wrap {
+  position: relative;
+  width: 92px;
+  height: 50px;
+  transform: translateY(-8px);
+}
+
+.vehicle-marker {
+  position: absolute;
+  top: 0;
+  left: 24px;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 2px solid #fff;
+  border-radius: 8px;
+  box-shadow: 0 7px 16px rgba(15, 23, 32, 0.28);
+  color: #fff;
+}
+
+.vehicle-marker.uav {
+  background: #f97316;
+}
+
+.vehicle-marker.usv {
+  background: #16a34a;
+}
+
+.vehicle-marker.uuv {
+  background: #d6a100;
+}
+
+.vehicle-marker.yp {
+  background: #2563eb;
+}
+
+.marker-arrow {
+  position: absolute;
+  top: -17px;
+  color: #17202a;
+  font-size: 18px;
+  line-height: 18px;
+  text-shadow: 0 1px 2px #fff;
+  transform-origin: 50% 70%;
+}
+
+.marker-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.alt-label {
+  position: absolute;
+  top: 29px;
+  left: 50px;
+  min-width: 42px;
+  padding: 2px 5px;
+  border: 1px solid rgba(15, 23, 32, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #14202b;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.tooltip-data {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+}
+
+.tooltip-data strong {
+  font-size: 13px;
+}
+
+.tooltip-data span {
+  color: #425466;
+  font-size: 12px;
+}
+
+.battery-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 32, 0.3);
+}
+
+.vehicle-modal {
+  width: min(460px, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 30px 90px rgba(15, 23, 32, 0.35);
+}
+
+.modal-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.modal-header p {
+  margin: 3px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.type-chip {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 36px;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.type-chip.uav {
+  background: #f97316;
+}
+
+.type-chip.usv {
+  background: #16a34a;
+}
+
+.type-chip.uuv {
+  background: #d6a100;
+}
+
+.type-chip.yp {
+  background: #2563eb;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 16px;
+}
+
+.metric {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.metric span,
+.metric strong {
+  display: block;
+}
+
+.metric span {
+  margin-bottom: 5px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.metric strong {
+  font-size: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 0 16px 16px;
+}
+
+.modal-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.modal-actions .danger {
+  background: #dc2626;
+}
+
+.modal-actions .primary {
+  background: #2563eb;
+}
+
+.leaflet-container {
+  background: #cbd5e1;
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    align-items: stretch;
+  }
+
+  .brand {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .brand span,
+  .status span {
+    display: none;
+  }
+
+  .settings-panel {
+    top: 70px;
+  }
+
+  .target-banner {
+    left: 16px;
+    right: 16px;
+    transform: none;
+  }
+
+  .target-banner span {
+    white-space: normal;
+  }
+
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+}
