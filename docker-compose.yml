@@ -24,9 +24,17 @@ services:
       INFLUX_BUCKET: telemetry
       INFLUX_TOKEN: yp-dev-token
       TILE_DIR: /data/tiles
+      TILE_CACHE_DIR: /data/tile-cache
+      OSM_TILE_URL: https://tile.openstreetmap.org/{z}/{x}/{y}.png
+      OSM_USER_AGENT: YPGroundStation/0.1
+      OSM_REFERER: http://localhost:8080/
+      EARTH_TILE_URL: https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+      EARTH_USER_AGENT: YPGroundStation/0.1
+      EARTH_REFERER: http://localhost:8080/
       VEHICLE_TTL_SECONDS: "30"
     volumes:
       - ./data/tiles:/data/tiles:ro
+      - ./data/tile-cache:/data/tile-cache
     depends_on:
       - influxdb
 
@@ -38,16 +46,6 @@ services:
     depends_on:
       - yp-server
 
-  tileserver:
-    image: maptiler/tileserver-gl:latest
-    profiles:
-      - maps
-    ports:
-      - "8081:8080"
-    volumes:
-      - ./data/maps:/data:ro
-    command: ["--file", "/data/usna.mbtiles"]
-
   yp-gps:
     build:
       context: ./services/yp_gps
@@ -55,9 +53,11 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       GPS_MODE: sim
       VEHICLE_ID: yp
-      HOME_LAT: "38.9822"
-      HOME_LON: "-76.4819"
+      HOME_LAT: "38.984764"
+      HOME_LON: "-76.478643"
       HOME_ALT: "2.0"
+      HEADING_DEG: "330"
+      SPEED_KNOTS: "3"
       SEND_HZ: "5"
       SERIAL_PORT: /dev/ttyUSB0
       BAUD_RATE: "9600"
@@ -73,9 +73,12 @@ services:
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
-      HOME_LAT: "38.9827"
-      HOME_LON: "-76.4830"
+      VEHICLE_ID: sim-uav
+      HOME_LAT: "38.98490"
+      HOME_LON: "-76.47880"
       HOME_ALT: "45.0"
+      SPAWN_JITTER_DEG: "0.0003"
+      TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
       - yp-server
@@ -86,9 +89,12 @@ services:
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: usv
-      HOME_LAT: "38.9818"
-      HOME_LON: "-76.4808"
+      VEHICLE_ID: sim-usv
+      HOME_LAT: "38.98465"
+      HOME_LON: "-76.47845"
       HOME_ALT: "0.0"
+      SPAWN_JITTER_DEG: "0.0003"
+      TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
       - yp-server
@@ -99,9 +105,12 @@ services:
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uuv
-      HOME_LAT: "38.9808"
-      HOME_LON: "-76.4820"
+      VEHICLE_ID: sim-uuv
+      HOME_LAT: "38.98455"
+      HOME_LON: "-76.47875"
       HOME_ALT: "-6.0"
+      SPAWN_JITTER_DEG: "0.0003"
+      TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
       - yp-server

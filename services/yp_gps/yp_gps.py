@@ -16,10 +16,13 @@ VEHICLE_ID = os.getenv("VEHICLE_ID", "yp")
 GPS_MODE = os.getenv("GPS_MODE", "sim").lower()
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyUSB0")
 BAUD_RATE = int(os.getenv("BAUD_RATE", "9600"))
-HOME_LAT = float(os.getenv("HOME_LAT", "38.9822"))
-HOME_LON = float(os.getenv("HOME_LON", "-76.4819"))
+HOME_LAT = float(os.getenv("HOME_LAT", "38.984764"))
+HOME_LON = float(os.getenv("HOME_LON", "-76.478643"))
 HOME_ALT = float(os.getenv("HOME_ALT", "2.0"))
+HEADING_DEG = float(os.getenv("HEADING_DEG", "330"))
+SPEED_KNOTS = float(os.getenv("SPEED_KNOTS", "3"))
 SEND_HZ = float(os.getenv("SEND_HZ", "5"))
+KNOTS_TO_MPS = 0.514444
 
 
 async def main() -> None:
@@ -38,10 +41,17 @@ async def main() -> None:
 
 
 async def sim_loop(ws: websockets.WebSocketClientProtocol) -> None:
-    heading = 40.0
+    lat = HOME_LAT
+    lon = HOME_LON
+    alt = HOME_ALT
+    heading = HEADING_DEG % 360
+    last_step = time.time()
     while True:
-        await send_fix(ws, HOME_LAT, HOME_LON, HOME_ALT, heading)
-        heading = (heading + 0.02) % 360
+        now = time.time()
+        dt = max(0.001, now - last_step)
+        last_step = now
+        lat, lon = destination_point(lat, lon, heading, SPEED_KNOTS * KNOTS_TO_MPS * dt)
+        await send_fix(ws, lat, lon, alt, heading)
         await asyncio.sleep(1.0 / SEND_HZ)
 
 
@@ -146,6 +156,17 @@ def ros_stamp() -> tuple[int, int, float]:
 def yaw_to_quaternion(yaw_deg: float) -> dict[str, float]:
     half = math.radians(yaw_deg) / 2.0
     return {"x": 0.0, "y": 0.0, "z": math.sin(half), "w": math.cos(half)}
+
+
+def destination_point(lat: float, lon: float, bearing: float, distance_m: float) -> tuple[float, float]:
+    radius = 6_371_000.0
+    brng = math.radians(bearing)
+    p1 = math.radians(lat)
+    l1 = math.radians(lon)
+    dr = distance_m / radius
+    p2 = math.asin(math.sin(p1) * math.cos(dr) + math.cos(p1) * math.sin(dr) * math.cos(brng))
+    l2 = l1 + math.atan2(math.sin(brng) * math.sin(dr) * math.cos(p1), math.cos(dr) - math.sin(p1) * math.sin(p2))
+    return math.degrees(p2), math.degrees(l2)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,9 @@ KNOWN_BLOCKED_TILE_SHA1 = {
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download slippy-map tiles for offline YP ground station use.")
+    parser = argparse.ArgumentParser(
+        description="Download slippy-map tiles from a provider that explicitly permits prefetch/offline caching."
+    )
     parser.add_argument("--bbox", nargs=4, type=float, metavar=("WEST", "SOUTH", "EAST", "NORTH"), required=True)
     parser.add_argument("--zoom-min", type=int, required=True)
     parser.add_argument("--zoom-max", type=int, required=True)

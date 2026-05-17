@@ -223,4 +223,5 @@ node_modules/
 web/node_modules/
 web/dist/
 data/tiles/
+data/tile-cache/
 data/influx/

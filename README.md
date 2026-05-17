@@ -1,16 +1,16 @@
 # YP Ground Station
 
+![YP Ground Station screenshot](screenshots/screen1.png)
+
 Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects vehicle telemetry from USVs, UAVs, UUVs, and the YP GPS feed, logs ROS2-shaped messages to InfluxDB, and serves a local-first React map interface for monitoring and command.
 
 ## What Is Included
 
-- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, offline tile serving, command routing, and InfluxDB logging.
+- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand OpenStreetMap tile caching, command routing, and InfluxDB logging.
 - `web`: React + TypeScript + Leaflet UI with a full-screen map, vehicle markers, altitude labels, headings, recent trails, hover data, RTB commands, and click-to-waypoint commands.
 - `sim-vehicle`: Configurable simulated UAV, USV, or UUV container that publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz and accepts commands.
 - `yp-gps`: YP GPS publisher. It can run in simulated mode near the US Naval Academy or read NMEA GPS data from a serial port.
 - `influxdb`: Time-series storage for all telemetry and command messages.
-- `tileserver`: Optional local TileServer GL service for offline `.mbtiles` maps.
-- `scripts/download_tiles.py`: Offline OpenStreetMap tile preloader.
 
 ## Quick Start
 
@@ -167,6 +167,10 @@ The default compose file runs:
 
 ```yaml
 GPS_MODE: sim
+HOME_LAT: "38.984764"
+HOME_LON: "-76.478643"
+HEADING_DEG: "330"
+SPEED_KNOTS: "3"
 ```
 
 To use a real serial GPS, change the `yp-gps` service:
@@ -182,74 +186,54 @@ devices:
 
 The GPS container publishes the YP as a `yp` vehicle with `NavSatFix`, `Pose`, `BatteryState`, and heartbeat messages so the map can center on the ship.
 
-## Offline Maps
+In simulated mode, the YP starts at latitude `38.984764`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
 
-Tiles are served from:
+## Map Tiles
 
-```text
-data/tiles/<z>/<x>/<y>.png
-```
+The web UI has two map modes:
 
-The compose file mounts that directory into both `yp-server` and `web` through the server API. The frontend first tries local tiles at `/tiles/{z}/{x}/{y}.png`. If internet access exists, the UI also has an online OpenStreetMap layer.
+- `Auto`: default street map. Serve from the street-map cache when present; otherwise fetch the visible tile from OpenStreetMap and cache it.
+- `Earth View`: satellite/earth imagery. Serve from the earth-view cache when present; otherwise fetch the visible tile from Esri World Imagery and cache it.
 
-### The Local Tile Server URL
-
-If you are running everything locally, `your-tile-server.example` should be a tile server running on your own machine or on the YP server. The compose file includes an optional TileServer GL service for this.
-
-Put an MBTiles file here:
+The map modes use:
 
 ```text
-data/maps/usna.mbtiles
+http://localhost:8000/tiles/osm/<z>/<x>/<y>.png
+http://localhost:8000/tiles/earth/<z>/<x>/<y>.png
 ```
 
-Then start the local tile server:
+When the operator views or pans the map, Leaflet requests only the tiles needed for the current viewport. The server fetches missing tiles from the configured sources:
+
+```text
+https://tile.openstreetmap.org/{z}/{x}/{y}.png
+https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+```
+
+Fetched tiles are cached on the server in:
+
+```text
+data/tile-cache/
+```
+
+That folder is mounted into Docker as `/data/tile-cache`, so cached map tiles persist across container restarts and rebuilds.
+
+If a tile is not cached and the server cannot reach the internet, the server returns a plain light-blue tile instead of a broken tile/error image.
+
+Check cache status:
 
 ```bash
-docker compose --profile maps up -d tileserver
+curl http://localhost:8000/api/tile-cache
 ```
 
-Open `http://localhost:8081` to confirm the map loads. TileServer GL exposes rendered raster tiles at:
-
-```text
-http://localhost:8081/styles/<style-id>/{z}/{x}/{y}.png
-```
-
-The style id is listed at `http://localhost:8081/styles.json`. For many OpenMapTiles-compatible files the preview style is `basic-preview`, so the downloader URL is often:
+Clear the cache:
 
 ```bash
---url-template "http://localhost:8081/styles/basic-preview/{z}/{x}/{y}.png"
+rm -rf data/tile-cache
 ```
 
-If `basic-preview` is not listed in `styles.json`, replace it with the actual style id from your server.
+The app does not bulk download, pre-seed, or scan map areas. It caches only tiles requested by the active map viewport. The server stores per-source cache metadata and uses conditional requests when cached tiles expire.
 
-### Preload US Naval Academy Tiles
-
-Run this before deploying to the YP using a tile provider, internal tile server, or purchased/offline tile source that permits bulk download and offline caching:
-
-```bash
-python3 scripts/download_tiles.py \
-  --bbox -76.505 38.965 -76.455 39.005 \
-  --zoom-min 12 \
-  --zoom-max 17 \
-  --out data/tiles \
-  --url-template "http://localhost:8081/styles/basic-preview/{z}/{x}/{y}.png"
-```
-
-The bbox format is:
-
-```text
-west south east north
-```
-
-For additional operating areas, run the script again with a different bounding box. The script keeps the standard `{z}/{x}/{y}.png` layout, so new areas can be mixed in the same `data/tiles` directory.
-
-Do not use the public `tile.openstreetmap.org` endpoint for offline preloading. It is intended for interactive map browsing, not bulk caching, and it can return blocked placeholder tiles. If blocked placeholder images were already cached, remove `data/tiles` and rerun the downloader with an approved tile source.
-
-You still need a real offline map file. Good sources are:
-
-- A purchased/offline `.mbtiles` package from a map provider.
-- An internally generated OpenMapTiles-compatible `.mbtiles` file from OSM data.
-- A locally hosted raster tile service approved for caching.
+OpenStreetMap's public tile service allows normal interactive viewing and local caching according to HTTP cache headers, but prohibits bulk downloads and offline prefetch features. Earth View uses Esri World Imagery by default. If this system later needs guaranteed offline maps for large areas, use a self-hosted tile server or a provider that explicitly allows offline packages.
 
 ## Configuration
 
@@ -261,13 +245,22 @@ Useful environment variables:
 | `yp-server` | `INFLUX_ORG` | `yp` | InfluxDB org |
 | `yp-server` | `INFLUX_BUCKET` | `telemetry` | InfluxDB bucket |
 | `yp-server` | `INFLUX_TOKEN` | `yp-dev-token` | InfluxDB token |
-| `yp-server` | `TILE_DIR` | `/data/tiles` | Offline tile directory |
+| `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent on-demand map tile cache |
+| `yp-server` | `OSM_TILE_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Tile source URL template |
+| `yp-server` | `OSM_USER_AGENT` | `YPGroundStation/0.1` | Identifying user agent for OSM tile requests |
+| `yp-server` | `OSM_REFERER` | `http://localhost:8080/` | Referer sent with OSM tile requests |
+| `yp-server` | `EARTH_TILE_URL` | `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` | Earth View tile source URL template |
+| `yp-server` | `EARTH_USER_AGENT` | `YPGroundStation/0.1` | Identifying user agent for Earth View tile requests |
+| `yp-server` | `EARTH_REFERER` | `http://localhost:8080/` | Referer sent with Earth View tile requests |
+| `yp-server` | `MIN_TILE_TTL_SECONDS` | `604800` | Fallback cache TTL when headers are unavailable |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `usv`, or `uuv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
 | `sim-*` | `HOME_LON` | `-76.4819` | RTB/home longitude |
 | `yp-gps` | `GPS_MODE` | `sim` | `sim` or `serial` |
 | `yp-gps` | `SERIAL_PORT` | `/dev/ttyUSB0` | NMEA GPS serial device |
+| `yp-gps` | `HEADING_DEG` | `330` | Simulated YP heading in degrees |
+| `yp-gps` | `SPEED_KNOTS` | `3` | Simulated YP speed |
 
 ## Development
 

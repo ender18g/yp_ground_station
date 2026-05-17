@@ -19,15 +19,17 @@ HOME_LAT = float(os.getenv("HOME_LAT", "38.9822"))
 HOME_LON = float(os.getenv("HOME_LON", "-76.4819"))
 HOME_ALT = float(os.getenv("HOME_ALT", "45.0" if VEHICLE_TYPE == "uav" else "0.0"))
 SEND_HZ = float(os.getenv("SEND_HZ", "5"))
+SPAWN_JITTER_DEG = float(os.getenv("SPAWN_JITTER_DEG", "0.004"))
+TARGET_JITTER_DEG = float(os.getenv("TARGET_JITTER_DEG", "0.006"))
 
 SPEED_MPS = {"uav": 9.0, "usv": 2.8, "uuv": 1.3}.get(VEHICLE_TYPE, 5.0)
 
 
 class VehicleSim:
     def __init__(self) -> None:
-        jitter = random.uniform(-0.004, 0.004)
+        jitter = random.uniform(-SPAWN_JITTER_DEG, SPAWN_JITTER_DEG)
         self.lat = HOME_LAT + jitter
-        self.lon = HOME_LON + random.uniform(-0.004, 0.004)
+        self.lon = HOME_LON + random.uniform(-SPAWN_JITTER_DEG, SPAWN_JITTER_DEG)
         self.alt = HOME_ALT
         self.heading = random.uniform(0, 360)
         self.battery = random.uniform(0.72, 1.0)
@@ -39,8 +41,8 @@ class VehicleSim:
 
     def random_target(self) -> dict[str, float]:
         return {
-            "latitude": HOME_LAT + random.uniform(-0.006, 0.006),
-            "longitude": HOME_LON + random.uniform(-0.006, 0.006),
+            "latitude": HOME_LAT + random.uniform(-TARGET_JITTER_DEG, TARGET_JITTER_DEG),
+            "longitude": HOME_LON + random.uniform(-TARGET_JITTER_DEG, TARGET_JITTER_DEG),
             "altitude": HOME_ALT,
         }
 
