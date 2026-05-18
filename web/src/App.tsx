@@ -100,6 +100,7 @@ export function App() {
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
+  const localVehicleColorsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     if (!DEMO_MODE || !("serviceWorker" in navigator)) {
@@ -126,11 +127,12 @@ export function App() {
         const payload = JSON.parse(event.data);
         if (payload.op === "snapshot") {
           const snapshotVehicles = payload.vehicles as Vehicle[];
-          setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, vehicle])));
+          setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
           setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
         }
         if (payload.op === "vehicle_update") {
-          setVehicles((current) => ({ ...current, [payload.vehicle.vehicle_id]: payload.vehicle }));
+          const vehicle = withLocalVehicleColor(payload.vehicle, localVehicleColorsRef.current);
+          setVehicles((current) => ({ ...current, [vehicle.vehicle_id]: vehicle }));
           if (payload.message) {
             setMessageLog((current) => [streamMessageFromPayload(payload.message), ...current].slice(0, MAX_MESSAGE_LOG));
           }
@@ -252,6 +254,10 @@ export function App() {
   };
 
   const setVehicleColor = (vehicleId: string, color: string) => {
+    localVehicleColorsRef.current = {
+      ...localVehicleColorsRef.current,
+      [vehicleId]: color,
+    };
     updateDemoVehicleColor(demoSimsRef.current, vehicleId, color);
     setVehicles((current) => ({
       ...current,
@@ -624,7 +630,7 @@ function MapActionMenu({
       </div>
       {preferredVehicle && (
         <button className="map-action-preferred" onClick={() => onSend(preferredVehicle.vehicle_id)}>
-          <span className={`vehicle-dot ${preferredVehicle.vehicle_type}`} />
+          <span className={`vehicle-dot ${preferredVehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(preferredVehicle) }} />
           Send {preferredVehicle.vehicle_id}
         </button>
       )}
@@ -635,7 +641,7 @@ function MapActionMenu({
       {showVehicles &&
         commandableVehicles.map((vehicle) => (
           <button key={vehicle.vehicle_id} className="map-action-child" onClick={() => onSend(vehicle.vehicle_id)}>
-            <span className={`vehicle-dot ${vehicle.vehicle_type}`} />
+            <span className={`vehicle-dot ${vehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(vehicle) }} />
             {vehicle.vehicle_id}
           </button>
         ))}
@@ -833,7 +839,7 @@ function VehicleLayer({
   const trail = (vehicle.history ?? [])
     .filter((point) => !point.stamp || point.stamp >= cutoff)
     .map((point) => [point.latitude, point.longitude] as [number, number]);
-  const color = (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type);
+  const color = vehicleMarkerColor(vehicle);
 
   return (
     <>
@@ -963,7 +969,7 @@ function WaypointCrosshair({
   onDragEnd: () => void;
   onMove: (lat: number, lon: number) => void;
 }) {
-  const color = vehicle ? (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type) : "#0f172a";
+  const color = vehicle ? vehicleMarkerColor(vehicle) : "#0f172a";
   const position = useMemo<[number, number]>(() => [waypoint.latitude, waypoint.longitude], [waypoint.latitude, waypoint.longitude]);
   const icon = useMemo(() => waypointIcon(color), [color]);
   return (
@@ -1016,7 +1022,7 @@ function VehicleModal({
 }) {
   const position = vehicle.position;
   const [showColorPalette, setShowColorPalette] = useState(false);
-  const [draftColor, setDraftColor] = useState((vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type));
+  const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="vehicle-modal" onMouseDown={(event) => event.stopPropagation()}>
@@ -1429,7 +1435,7 @@ function vehicleIcon(vehicle: Vehicle) {
   const type = vehicle.vehicle_type;
   const heading = vehicle.heading ?? 0;
   const altitude = vehicle.position?.altitude ?? 0;
-  const color = (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(type);
+  const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
   return L.divIcon({
     className: "",
@@ -1510,6 +1516,15 @@ function vehicleColor(type: VehicleType): string {
     uuv: "#eab308",
     yp: "#6b7280",
   }[type];
+}
+
+function vehicleMarkerColor(vehicle: Vehicle): string {
+  return (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type);
+}
+
+function withLocalVehicleColor(vehicle: Vehicle, localColors: Record<string, string>): Vehicle {
+  const color = localColors[vehicle.vehicle_id];
+  return color ? ({ ...vehicle, marker_color: color } as DemoVehicleWithStyle) : vehicle;
 }
 
 function vehicleZIndexOffset(type: VehicleType): number {
