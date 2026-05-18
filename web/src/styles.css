@@ -834,17 +834,38 @@ input {
   height: 13px;
   margin-left: 4px;
   color: #dc2626;
-  vertical-align: -2px;
+  vertical-align: -3px;
+}
+
+.video-stream-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 13px;
+  margin-left: 4px;
+  color: #16a34a;
+  vertical-align: -3px;
 }
 
 .low-battery-mark svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2.2;
+}
+
+.video-stream-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.1;
 }
 
 .tooltip-data {
@@ -964,23 +985,27 @@ input {
 }
 
 .modal-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  justify-content: flex-end;
   padding: 0 16px 16px;
 }
 
 .modal-actions button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  min-width: 0;
   min-height: 40px;
-  padding: 0 14px;
+  padding: 0 10px;
   border: 0;
   border-radius: 8px;
   color: #fff;
   cursor: pointer;
+  font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .modal-actions .danger {
@@ -993,6 +1018,10 @@ input {
 
 .modal-actions .secondary {
   background: #475569;
+}
+
+.modal-actions .stream {
+  background: #16a34a;
 }
 
 .color-panel {
@@ -1019,6 +1048,74 @@ input {
   box-shadow:
     0 0 0 2px #0f172a,
     0 0 0 5px #bfdbfe;
+}
+
+.video-viewer {
+  position: absolute;
+  z-index: 1300;
+  display: grid;
+  grid-template-rows: 42px 1fr;
+  min-width: 280px;
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.28);
+  border-radius: 8px;
+  background: #0b1118;
+  box-shadow: 0 24px 70px rgba(15, 23, 32, 0.38);
+}
+
+.video-viewer-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 7px 6px 12px;
+  background: #ffffff;
+  color: #14202b;
+  cursor: move;
+  user-select: none;
+}
+
+.video-viewer-header > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #126736;
+}
+
+.video-viewer-header strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-viewer-header .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.video-viewer-media {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #000000;
+  object-fit: contain;
+}
+
+.video-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: rgba(255, 255, 255, 0.88);
+  color: #14202b;
+  cursor: nwse-resize;
 }
 
 .leaflet-container {
@@ -1064,5 +1161,14 @@ input {
 
   .metrics {
     grid-template-columns: 1fr;
+  }
+
+  .modal-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .video-viewer {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
   }
 }

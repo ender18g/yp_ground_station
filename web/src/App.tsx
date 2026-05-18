@@ -6,11 +6,13 @@ import {
   EthernetPort,
   Layers,
   LocateFixed,
+  Maximize2,
   MessageSquare,
   RotateCcw,
   Route,
   Settings,
   Ship,
+  Video,
   Wifi,
   WifiOff,
   X,
@@ -29,6 +31,7 @@ const YP_DEMO_HEADING = 330;
 const DEMO_KEEP_IN_RANGE_M = 200;
 const LOW_BATTERY_THRESHOLD = 0.25;
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
+const USV_STREAM_URL = `${import.meta.env.BASE_URL}media/usv-stream.mp4`;
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
@@ -96,6 +99,7 @@ export function App() {
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
+  const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
   const [preferredWaypointVehicleId, setPreferredWaypointVehicleId] = useState<string | null>(null);
   const [waypointMarkers, setWaypointMarkers] = useState<Record<string, WaypointMarker>>({});
   const followBeforeWaypointDragRef = useRef(false);
@@ -421,7 +425,19 @@ export function App() {
             setPreferredWaypointVehicleId(selected.vehicle_id);
             setSelected(null);
           }}
+          onStreamVideo={() => {
+            setStreamVehicleId(selected.vehicle_id);
+            setSelected(null);
+          }}
           onColorSave={(color) => setVehicleColor(selected.vehicle_id, color)}
+        />
+      )}
+
+      {streamVehicleId && (
+        <UsvVideoViewer
+          vehicleId={streamVehicleId}
+          src={USV_STREAM_URL}
+          onClose={() => setStreamVehicleId(null)}
         />
       )}
     </div>
@@ -1043,12 +1059,14 @@ function VehicleModal({
   onClose,
   onRtb,
   onWaypoint,
+  onStreamVideo,
   onColorSave,
 }: {
   vehicle: Vehicle;
   onClose: () => void;
   onRtb: () => void;
   onWaypoint: () => void;
+  onStreamVideo: () => void;
   onColorSave: (color: string) => void;
 }) {
   const position = vehicle.position;
@@ -1083,6 +1101,12 @@ function VehicleModal({
             <Brush size={18} />
             Color
           </button>
+          {vehicle.vehicle_type === "usv" && (
+            <button className="stream" onClick={onStreamVideo}>
+              <Video size={18} />
+              Stream Video
+            </button>
+          )}
           <button className="primary" onClick={onWaypoint}>
             <Route size={18} />
             Waypoint
@@ -1108,6 +1132,104 @@ function VehicleModal({
         )}
       </div>
     </div>
+  );
+}
+
+function UsvVideoViewer({
+  vehicleId,
+  src,
+  onClose,
+}: {
+  vehicleId: string;
+  src: string;
+  onClose: () => void;
+}) {
+  const [frame, setFrame] = useState(() => ({
+    x: Math.max(16, window.innerWidth - 456),
+    y: 120,
+    width: Math.min(420, window.innerWidth - 32),
+    height: 320,
+  }));
+  const dragRef = useRef<{
+    mode: "move" | "resize";
+    pointerId: number;
+    startX: number;
+    startY: number;
+    frame: typeof frame;
+  } | null>(null);
+
+  const updateFrame = (next: typeof frame) => {
+    const maxWidth = Math.max(280, window.innerWidth - 24);
+    const maxHeight = Math.max(220, window.innerHeight - 24);
+    const width = Math.min(maxWidth, Math.max(280, next.width));
+    const height = Math.min(maxHeight, Math.max(220, next.height));
+    setFrame({
+      width,
+      height,
+      x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
+      y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
+    });
+  };
+
+  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      mode,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      frame,
+    };
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (drag.mode === "move") {
+      updateFrame({ ...drag.frame, x: drag.frame.x + dx, y: drag.frame.y + dy });
+      return;
+    }
+    updateFrame({ ...drag.frame, width: drag.frame.width + dx, height: drag.frame.height + dy });
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+    }
+  };
+
+  return (
+    <section
+      className="video-viewer"
+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
+        <div>
+          <Video size={16} />
+          <strong>{vehicleId}</strong>
+        </div>
+        <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
+          <X size={17} />
+        </button>
+      </header>
+      <video className="video-viewer-media" src={src} autoPlay muted loop playsInline controls />
+      <button
+        className="video-resize-handle"
+        title="Resize stream"
+        onPointerDown={(event) => startDrag("resize", event)}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+      >
+        <Maximize2 size={15} />
+      </button>
+    </section>
   );
 }
 
@@ -1468,6 +1590,7 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
+  const hasVideo = vehicle.vehicle_type === "usv";
   const iconScale = isPhoneViewer ? 0.5 : 1;
   const iconSize: [number, number] = [92 * iconScale, 50 * iconScale];
   return L.divIcon({
@@ -1481,6 +1604,11 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
         </div>
         <div class="alt-label">
           ${altitude.toFixed(0)} m
+          ${
+            hasVideo
+              ? `<span class="video-stream-mark" title="Video stream available"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5v3L21 17V7z"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg></span>`
+              : ""
+          }
           ${
             lowBattery
               ? `<span class="low-battery-mark" title="Low battery"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h15v8H3z"/><path d="M20 10v4"/><path d="M6 11v2"/></svg></span>`
