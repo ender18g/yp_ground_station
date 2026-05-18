@@ -79,6 +79,7 @@ const VEHICLE_COLOR_PALETTE = [
 ];
 
 export function App() {
+  const isPhoneViewer = useIsPhoneViewer();
   const [vehicles, setVehicles] = useState<Record<string, Vehicle>>({});
   const [connected, setConnected] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
@@ -302,6 +303,7 @@ export function App() {
             key={vehicle.vehicle_id}
             vehicle={vehicle}
             trailSeconds={trailSeconds}
+            isPhoneViewer={isPhoneViewer}
             onClick={() => {
               setMapActionMenu(null);
               if (vehicle.vehicle_type === "yp") {
@@ -551,6 +553,33 @@ function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribut
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
     },
   }[source];
+}
+
+function useIsPhoneViewer(): boolean {
+  const query = "(pointer: coarse)";
+  const getMatches = () => (typeof window === "undefined" ? false : isPhoneBrowser() && window.matchMedia(query).matches);
+  const [isPhoneViewer, setIsPhoneViewer] = useState(getMatches);
+
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = () => setIsPhoneViewer(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return isPhoneViewer;
+}
+
+function isPhoneBrowser(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  const userAgentData = (navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
+  if (typeof userAgentData?.mobile === "boolean") {
+    return userAgentData.mobile;
+  }
+  return /iPhone|iPod|Android.*Mobile|Windows Phone|Mobi/i.test(navigator.userAgent);
 }
 
 function MapMenu({
@@ -828,10 +857,12 @@ function jsonSyntaxHighlight(value: unknown): ReactNode {
 function VehicleLayer({
   vehicle,
   trailSeconds,
+  isPhoneViewer,
   onClick,
 }: {
   vehicle: Vehicle;
   trailSeconds: number;
+  isPhoneViewer: boolean;
   onClick: () => void;
 }) {
   const position = vehicle.position!;
@@ -846,7 +877,7 @@ function VehicleLayer({
       {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color, weight: 3, opacity: 0.75 }} />}
       <Marker
         position={[position.latitude, position.longitude]}
-        icon={vehicleIcon(vehicle)}
+        icon={vehicleIcon(vehicle, isPhoneViewer)}
         zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
         eventHandlers={{
           click: (event) => {
@@ -1431,18 +1462,20 @@ function yawToQuaternion(yawDeg: number): Record<string, number> {
   return { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) };
 }
 
-function vehicleIcon(vehicle: Vehicle) {
+function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
   const type = vehicle.vehicle_type;
   const heading = vehicle.heading ?? 0;
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
+  const iconScale = isPhoneViewer ? 0.5 : 1;
+  const iconSize: [number, number] = [92 * iconScale, 50 * iconScale];
   return L.divIcon({
     className: "",
-    iconSize: [92, 50],
-    iconAnchor: [46, 25],
+    iconSize,
+    iconAnchor: [iconSize[0] / 2, iconSize[1] / 2],
     html: `
-      <div class="marker-wrap">
+      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}">
         <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg)">
           ${vehicleGlyph(type)}
         </div>

@@ -587,6 +587,12 @@ input {
   transform: translateY(-8px);
 }
 
+.marker-wrap.phone {
+  width: 46px;
+  height: 25px;
+  transform: translateY(-4px);
+}
+
 .vehicle-marker {
   position: absolute;
   top: -14px;
@@ -600,10 +606,23 @@ input {
   transform-origin: 50% 50%;
 }
 
+.marker-wrap.phone .vehicle-marker {
+  top: -7px;
+  left: 10px;
+  width: 27px;
+  height: 35px;
+  filter: drop-shadow(0 4px 5px rgba(15, 23, 32, 0.35));
+}
+
 .vehicle-marker svg {
   width: 54px;
   height: 70px;
   overflow: visible;
+}
+
+.marker-wrap.phone .vehicle-marker svg {
+  width: 27px;
+  height: 35px;
 }
 
 .vehicle-marker.uav {
@@ -612,9 +631,20 @@ input {
   height: 62px;
 }
 
+.marker-wrap.phone .vehicle-marker.uav {
+  top: -3.5px;
+  width: 31px;
+  height: 31px;
+}
+
 .vehicle-marker.uav svg {
   width: 62px;
   height: 62px;
+}
+
+.marker-wrap.phone .vehicle-marker.uav svg {
+  width: 31px;
+  height: 31px;
 }
 
 .vehicle-marker.uuv {
@@ -624,9 +654,21 @@ input {
   height: 82px;
 }
 
+.marker-wrap.phone .vehicle-marker.uuv {
+  top: -10px;
+  left: 12px;
+  width: 22px;
+  height: 41px;
+}
+
 .vehicle-marker.uuv svg {
   width: 44px;
   height: 82px;
+}
+
+.marker-wrap.phone .vehicle-marker.uuv svg {
+  width: 22px;
+  height: 41px;
 }
 
 .vehicle-marker.yp {
@@ -635,9 +677,20 @@ input {
   height: 76px;
 }
 
+.marker-wrap.phone .vehicle-marker.yp {
+  left: 8px;
+  width: 31px;
+  height: 38px;
+}
+
 .vehicle-marker.yp svg {
   width: 62px;
   height: 76px;
+}
+
+.marker-wrap.phone .vehicle-marker.yp svg {
+  width: 31px;
+  height: 38px;
 }
 
 .vehicle-marker.uav {
@@ -762,6 +815,15 @@ input {
   font-weight: 700;
   text-align: center;
   white-space: nowrap;
+}
+
+.marker-wrap.phone .alt-label {
+  top: 21px;
+  left: 26px;
+  min-width: 21px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  font-size: 9px;
 }
 
 .low-battery-mark {
