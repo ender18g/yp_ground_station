@@ -8,6 +8,7 @@ import math
 import os
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,9 +33,13 @@ EARTH_TILE_URL = os.getenv("EARTH_TILE_URL", "https://services.arcgisonline.com/
 EARTH_USER_AGENT = os.getenv("EARTH_USER_AGENT", OSM_USER_AGENT)
 EARTH_REFERER = os.getenv("EARTH_REFERER", OSM_REFERER)
 MIN_TILE_TTL_SECONDS = int(os.getenv("MIN_TILE_TTL_SECONDS", str(7 * 24 * 60 * 60)))
+TILE_MAX_CACHE_AGE_SECONDS = int(os.getenv("TILE_MAX_CACHE_AGE_SECONDS", str(365 * 24 * 60 * 60)))
 MAX_TILE_ZOOM = int(os.getenv("MAX_TILE_ZOOM", "19"))
 VEHICLE_TTL_SECONDS = float(os.getenv("VEHICLE_TTL_SECONDS", "30"))
 HISTORY_MAX_POINTS = int(os.getenv("HISTORY_MAX_POINTS", "5000"))
+MESSAGE_RETENTION_SECONDS = float(os.getenv("MESSAGE_RETENTION_SECONDS", str(10 * 60)))
+MESSAGE_CLEANUP_INTERVAL_SECONDS = float(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", str(10 * 60)))
+INFLUX_MAX_WRITE_HZ = float(os.getenv("INFLUX_MAX_WRITE_HZ", "5"))
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
@@ -59,6 +64,15 @@ tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 influx_client: Optional[InfluxDBClient] = None
 tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
+delete_api = None
+cleanup_task: Optional[asyncio.Task[None]] = None
+settings = {
+    "message_retention_seconds": MESSAGE_RETENTION_SECONDS,
+    "message_cleanup_interval_seconds": MESSAGE_CLEANUP_INTERVAL_SECONDS,
+    "influx_max_write_hz": INFLUX_MAX_WRITE_HZ,
+    "tile_max_cache_age_seconds": TILE_MAX_CACHE_AGE_SECONDS,
+}
+last_influx_write_at: dict[tuple[str, str], float] = {}
 
 
 @app.get("/")
@@ -76,18 +90,22 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global influx_client, tile_http_client, write_api
+    global cleanup_task, delete_api, influx_client, tile_http_client, write_api
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
         influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
+        delete_api = influx_client.delete_api()
     except Exception as exc:
         print(f"InfluxDB unavailable at startup: {exc}")
+    cleanup_task = asyncio.create_task(influx_retention_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    if cleanup_task:
+        cleanup_task.cancel()
     if tile_http_client:
         await tile_http_client.aclose()
     if influx_client:
@@ -103,6 +121,26 @@ async def health() -> dict[str, str]:
 async def get_vehicles() -> dict[str, Any]:
     async with state_lock:
         return {"vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]}
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict[str, Any]:
+    return dict(settings)
+
+
+@app.put("/api/settings")
+async def update_settings(payload: dict[str, Any]) -> JSONResponse:
+    retention = payload.get("message_retention_seconds")
+    if retention is None:
+        return JSONResponse({"error": "message_retention_seconds is required"}, status_code=400)
+    try:
+        retention_seconds = float(retention)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "message_retention_seconds must be a number"}, status_code=400)
+    if retention_seconds < 60 or retention_seconds > 30 * 24 * 60 * 60:
+        return JSONResponse({"error": "message_retention_seconds must be between 60 seconds and 30 days"}, status_code=400)
+    settings["message_retention_seconds"] = retention_seconds
+    return JSONResponse(dict(settings))
 
 
 @app.get("/api/vehicles/{vehicle_id}")
@@ -141,6 +179,7 @@ async def tile_cache_status() -> dict[str, Any]:
         "tiles": total_tiles,
         "bytes": total_bytes,
         "min_ttl_seconds": MIN_TILE_TTL_SECONDS,
+        "tile_max_cache_age_seconds": settings["tile_max_cache_age_seconds"],
     }
 
 
@@ -212,7 +251,7 @@ async def cached_provider_tile(
 
     async with lock:
         metadata = read_tile_metadata(metadata_path)
-        if is_usable_cached_tile(cache_path) and not tile_expired(metadata):
+        if is_usable_cached_tile(cache_path) and not tile_expired(metadata, cache_path):
             return tile_file_response(cache_path, metadata, cache_status="hit", source_name=source_name)
 
         result = await fetch_and_cache_tile(source_name, source_url, user_agent, referer, z, x, y, cache_path, metadata_path, metadata)
@@ -269,8 +308,17 @@ def write_tile_metadata(path: Path, metadata: dict[str, Any]) -> None:
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
 
-def tile_expired(metadata: dict[str, Any]) -> bool:
-    return time.time() >= float(metadata.get("expires_at", 0))
+def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
+    now = time.time()
+    fetched_at = metadata.get("fetched_at")
+    if fetched_at is None:
+        try:
+            fetched_at = cache_path.stat().st_mtime
+        except OSError:
+            fetched_at = 0
+    if now - float(fetched_at) < float(settings["tile_max_cache_age_seconds"]):
+        return False
+    return now >= float(metadata.get("expires_at", 0))
 
 
 def is_usable_cached_tile(path: Path) -> bool:
@@ -587,6 +635,8 @@ async def broadcast_ros(topic: str, msg: dict[str, Any], msg_type: str) -> None:
 def write_influx(payload: dict[str, Any]) -> None:
     if not write_api:
         return
+    if not should_write_influx(payload):
+        return
     try:
         point = (
             Point("yp_messages")
@@ -600,6 +650,48 @@ def write_influx(payload: dict[str, Any]) -> None:
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
     except Exception as exc:
         print(f"Influx write failed: {exc}")
+
+
+def should_write_influx(payload: dict[str, Any]) -> bool:
+    max_hz = float(settings.get("influx_max_write_hz") or 0)
+    if max_hz <= 0:
+        return True
+    vehicle_id = str(payload.get("vehicle_id", "unknown"))
+    msg_type = str(payload.get("type", "unknown"))
+    key = (vehicle_id, msg_type)
+    now = time.time()
+    last_write = last_influx_write_at.get(key)
+    if last_write is not None and now - last_write < 1.0 / max_hz:
+        return False
+    last_influx_write_at[key] = now
+    return True
+
+
+async def influx_retention_loop() -> None:
+    while True:
+        await asyncio.sleep(float(settings["message_cleanup_interval_seconds"]))
+        await delete_expired_influx_messages()
+
+
+async def delete_expired_influx_messages() -> None:
+    if not delete_api:
+        return
+    retention_seconds = float(settings["message_retention_seconds"])
+    stop = time.time() - retention_seconds
+    if stop <= 0:
+        return
+    try:
+        stop_time = datetime.fromtimestamp(stop, tz=timezone.utc)
+        await asyncio.to_thread(
+            delete_api.delete,
+            start="1970-01-01T00:00:00Z",
+            stop=stop_time,
+            predicate='_measurement="yp_messages"',
+            bucket=INFLUX_BUCKET,
+            org=INFLUX_ORG,
+        )
+    except Exception as exc:
+        print(f"Influx retention cleanup failed: {exc}")
 
 
 def add_fields(point: Point, value: Any, prefix: str = "") -> None:

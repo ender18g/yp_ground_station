@@ -32,6 +32,10 @@ services:
       EARTH_USER_AGENT: YPGroundStation/0.1
       EARTH_REFERER: http://localhost:8080/
       VEHICLE_TTL_SECONDS: "30"
+      MESSAGE_RETENTION_SECONDS: "600"
+      MESSAGE_CLEANUP_INTERVAL_SECONDS: "600"
+      INFLUX_MAX_WRITE_HZ: "5"
+      TILE_MAX_CACHE_AGE_SECONDS: "31536000"
     volumes:
       - ./data/tiles:/data/tiles:ro
       - ./data/tile-cache:/data/tile-cache
@@ -114,6 +118,82 @@ services:
       SEND_HZ: "5"
     depends_on:
       - yp-server
+
+  # px4-sitl-uav:
+  #   profiles: ["px4"]
+  #   build:
+  #     context: ./services/px4_sitl
+  #   environment:
+  #     PX4_HOME_LAT: "38.98490"
+  #     PX4_HOME_LON: "-76.47880"
+  #     PX4_HOME_ALT: "45.0"
+  #     PX4_SYS_AUTOSTART: "4001"
+  #     PX4_SIM_MODEL: gz_x500
+  #     PX4_GZ_MODEL: gz_x500
+  #     HEADLESS: "1"
+  #   ports:
+  #     - "14580:14580/udp"
+  #     - "18570:18570/udp"
+  #   depends_on:
+      # - yp-server
+
+  ros-master:
+    profiles: ["px4"]
+    image: ros:noetic-ros-core-focal
+    command: roscore
+
+  mavros:
+    profiles: ["px4"]
+    build:
+      context: ./services/mavros
+    environment:
+      ROS_MASTER_URI: http://ros-master:11311
+      ROS_HOSTNAME: mavros
+    command: >
+      bash -lc "source /opt/ros/noetic/setup.bash &&
+      until rostopic list >/dev/null 2>&1; do sleep 1; done &&
+      roslaunch mavros px4.launch
+      fcu_url:=udp://:14540@px4-sitl-uav:14580
+      gcs_url:=udp://@yp-server:14550
+      tgt_system:=1
+      tgt_component:=1"
+    depends_on:
+      - ros-master
+      - px4-sitl-uav
+
+  rosbridge:
+    profiles: ["px4"]
+    build:
+      context: ./services/mavros
+    environment:
+      ROS_MASTER_URI: http://ros-master:11311
+      ROS_HOSTNAME: rosbridge
+    command: >
+      bash -lc "source /opt/ros/noetic/setup.bash &&
+      until rostopic list >/dev/null 2>&1; do sleep 1; done &&
+      roslaunch rosbridge_server rosbridge_websocket.launch port:=9090"
+    ports:
+      - "9090:9090"
+    depends_on:
+      - ros-master
+      - mavros
+
+  px4-yp-bridge:
+    profiles: ["px4"]
+    build:
+      context: ./services/px4_mavros_bridge
+    environment:
+      VEHICLE_ID: px4-uav
+      VEHICLE_TYPE: uav
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      ROSBRIDGE_URL: ws://rosbridge:9090
+      SETPOINT_HZ: "5"
+      AUTO_ARM_OFFBOARD: "true"
+      GLOBAL_SETPOINT_FRAME: "6"
+      DISCOVER_MAVROS_TOPICS: "true"
+    depends_on:
+      - yp-server
+      - rosbridge
 
 volumes:
   influx-data:
