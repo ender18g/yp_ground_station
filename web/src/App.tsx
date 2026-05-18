@@ -1,5 +1,6 @@
 import L from "leaflet";
 import {
+  AlertTriangle,
   Battery,
   Crosshair,
   EthernetPort,
@@ -14,10 +15,11 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
+import { CircleMarker, MapContainer, Marker, Polyline, Popup, Rectangle, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { sendCommand, websocketUrl } from "./api";
-import type { Command, Vehicle, VehicleType } from "./types";
+import { sendCommand, sendLifeguardCommand, websocketUrl } from "./api";
+import BridgePanel from "./BridgePanel";
+import type { Command, LifeguardAgent, LifeguardConfig, LifeguardStatus, Vehicle, VehicleType } from "./types";
 
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
 const MAX_MESSAGE_LOG = 700;
@@ -50,6 +52,16 @@ export function App() {
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
   const [mapSource, setMapSource] = useState<MapSource>("auto");
   const [followYp, setFollowYp] = useState(true);
+
+  // Lifeguard / Bridge panel state
+  const [showBridgePanel, setShowBridgePanel] = useState(false);
+  const [lifeguardAgents, setLifeguardAgents] = useState<LifeguardAgent[]>([]);
+  const [lifeguardConfig, setLifeguardConfig] = useState<LifeguardConfig | null>(null);
+  const [lifeguardStatusLog, setLifeguardStatusLog] = useState<LifeguardStatus[]>([]);
+  const [bridgePickMode, setBridgePickMode] = useState<"corner1" | "corner2" | null>(null);
+  const [bridgeCorner1, setBridgeCorner1] = useState<[number, number] | null>(null);
+  const [bridgeCorner2, setBridgeCorner2] = useState<[number, number] | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -86,6 +98,16 @@ export function App() {
             },
           }));
         }
+        // Lifeguard events
+        if (payload.op === "lifeguard_agents") {
+          setLifeguardAgents(payload.agents ?? []);
+        }
+        if (payload.op === "lifeguard_status") {
+          setLifeguardStatusLog((prev) => [...prev, payload as LifeguardStatus].slice(-200));
+        }
+        if (payload.op === "lifeguard_config") {
+          setLifeguardConfig(payload.config ?? null);
+        }
       };
     };
 
@@ -105,17 +127,29 @@ export function App() {
 
   const command = (vehicleId: string, body: Command) => sendCommand(wsRef.current, vehicleId, body);
 
+  // When bridge pick mode is active, map clicks set corners instead of waypoints.
+  const handleMapClick = (lat: number, lon: number) => {
+    if (bridgePickMode === "corner1") {
+      setBridgeCorner1([lat, lon]);
+      setBridgePickMode("corner2");
+    } else if (bridgePickMode === "corner2") {
+      setBridgeCorner2([lat, lon]);
+      setBridgePickMode(null);
+    }
+  };
+
   return (
-    <div className={pendingWaypointFor ? "app picking" : "app"}>
+    <div className={pendingWaypointFor || bridgePickMode ? "app picking" : "app"}>
       <MapContainer center={center} zoom={15} minZoom={3} maxZoom={19} zoomControl className="map">
         <TileLayer key={`${mapBase}-${mapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
         <MapCommander
-          pendingWaypointFor={pendingWaypointFor}
-          selectedVehicle={pendingWaypointFor ? vehicles[pendingWaypointFor] : null}
+          pendingWaypointFor={bridgePickMode ? null : pendingWaypointFor}
+          selectedVehicle={pendingWaypointFor && !bridgePickMode ? vehicles[pendingWaypointFor] : null}
           onWaypoint={(vehicleId, lat, lon, altitude) => {
             command(vehicleId, { type: "waypoint", target: { latitude: lat, longitude: lon, altitude } });
             setPendingWaypointFor(null);
           }}
+          onMapClick={bridgePickMode ? handleMapClick : undefined}
         />
         <MapPanTracker onManualPan={() => setFollowYp(false)} />
         <FollowYpCenter yp={yp} enabled={followYp} />
@@ -133,6 +167,13 @@ export function App() {
             }}
           />
         ))}
+        {/* Grid-search rectangle preview */}
+        {bridgeCorner1 && bridgeCorner2 && (
+          <Rectangle
+            bounds={[bridgeCorner1, bridgeCorner2]}
+            pathOptions={{ color: "#f59e0b", weight: 2, fillOpacity: 0.1 }}
+          />
+        )}
       </MapContainer>
 
       <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
@@ -159,6 +200,13 @@ export function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button
+            className={showBridgePanel ? "icon-button active" : "icon-button"}
+            title="Bridge Panel — Lifeguard Control"
+            onClick={() => setShowBridgePanel((v) => !v)}
+          >
+            <AlertTriangle size={19} />
+          </button>
           <button className="icon-button" title="Settings" onClick={() => setShowSettings((value) => !value)}>
             <Settings size={19} />
           </button>
@@ -180,6 +228,33 @@ export function App() {
           </label>
           <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
         </div>
+      )}
+
+      {bridgePickMode && (
+        <div className="target-banner">
+          <Crosshair size={18} />
+          <span>
+            {bridgePickMode === "corner1" ? "Tap the map to set Corner 1" : "Tap the map to set Corner 2"}
+          </span>
+          <button title="Cancel" onClick={() => setBridgePickMode(null)}>
+            <X size={17} />
+          </button>
+        </div>
+      )}
+
+      {showBridgePanel && (
+        <BridgePanel
+          ws={wsRef.current}
+          agents={lifeguardAgents}
+          statusLog={lifeguardStatusLog}
+          config={lifeguardConfig}
+          corner1={bridgeCorner1}
+          corner2={bridgeCorner2}
+          pickMode={bridgePickMode}
+          onPickMode={setBridgePickMode}
+          onClearCorners={() => { setBridgeCorner1(null); setBridgeCorner2(null); setBridgePickMode(null); }}
+          onClose={() => setShowBridgePanel(false)}
+        />
       )}
 
       {pendingWaypointFor && (
@@ -547,13 +622,19 @@ function MapCommander({
   pendingWaypointFor,
   selectedVehicle,
   onWaypoint,
+  onMapClick,
 }: {
   pendingWaypointFor: string | null;
   selectedVehicle: Vehicle | null;
   onWaypoint: (vehicleId: string, lat: number, lon: number, altitude: number) => void;
+  onMapClick?: (lat: number, lon: number) => void;
 }) {
   useMapEvents({
     click(event) {
+      if (onMapClick) {
+        onMapClick(event.latlng.lat, event.latlng.lng);
+        return;
+      }
       if (!pendingWaypointFor) {
         return;
       }

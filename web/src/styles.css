@@ -788,3 +788,615 @@ input {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Bridge Panel – Lifeguard mission control overlay
+   --------------------------------------------------------------------------- */
+
+.bridge-panel {
+  position: absolute;
+  z-index: 1100;
+  top: 64px;
+  right: 16px;
+  width: 340px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  background: rgba(15, 23, 32, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #e0e8f0;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.bridge-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px 10px 0 0;
+}
+
+.bridge-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.bridge-close {
+  background: none;
+  border: none;
+  color: #8899aa;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+
+.bridge-close:hover {
+  color: #e0e8f0;
+}
+
+.bridge-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bridge-section:last-child {
+  border-bottom: none;
+}
+
+.bridge-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8899aa;
+  margin: 0 0 8px 0;
+}
+
+.bridge-mob-section {
+  padding: 14px;
+}
+
+.mob-button {
+  width: 100%;
+  padding: 14px;
+  background: #dc2626;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  letter-spacing: 0.03em;
+  transition: background 0.15s;
+}
+
+.mob-button:hover {
+  background: #b91c1c;
+}
+
+.mob-button:active {
+  background: #991b1b;
+}
+
+.bridge-hint {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: #8899aa;
+  line-height: 1.4;
+}
+
+.bridge-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.bridge-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #8899aa;
+}
+
+.bridge-inputs input,
+.bridge-inputs select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  color: #e0e8f0;
+  padding: 4px 7px;
+  font-size: 12px;
+  width: 90px;
+}
+
+.bridge-inputs select {
+  width: 160px;
+}
+
+.bridge-pick-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #c8d8e8;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.bridge-pick-btn.active {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: #f59e0b;
+  color: #fbbf24;
+}
+
+.bridge-pick-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.bridge-clear-btn {
+  padding: 5px 10px;
+  background: rgba(220, 38, 38, 0.15);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  border-radius: 6px;
+  color: #fca5a5;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bridge-clear-btn:hover {
+  background: rgba(220, 38, 38, 0.25);
+}
+
+.bridge-dispatch-btn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #2563eb;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bridge-dispatch-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.bridge-dispatch-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Agent list */
+
+.bridge-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bridge-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.agent-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-indicator.connected {
+  background: #22c55e;
+}
+
+.agent-indicator.disconnected {
+  background: #ef4444;
+}
+
+.agent-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.agent-type {
+  color: #8899aa;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.agent-mission {
+  font-size: 10px;
+  color: #f59e0b;
+  font-style: italic;
+}
+
+/* Status log */
+
+.bridge-log-section {
+  flex: 1;
+  min-height: 80px;
+}
+
+.bridge-status-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.bridge-status-entry {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+
+.bridge-status-info {
+  color: #94a3b8;
+}
+
+.bridge-status-warn {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.bridge-status-error {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.log-time {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Active state for Bridge toggle button */
+.icon-button.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+/* ---------------------------------------------------------------------------
+   Bridge Panel – Lifeguard mission control overlay
+   --------------------------------------------------------------------------- */
+
+.bridge-panel {
+  position: absolute;
+  z-index: 1100;
+  top: 64px;
+  right: 16px;
+  width: 340px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  background: rgba(15, 23, 32, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #e0e8f0;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.bridge-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px 10px 0 0;
+}
+
+.bridge-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.bridge-close {
+  background: none;
+  border: none;
+  color: #8899aa;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+
+.bridge-close:hover {
+  color: #e0e8f0;
+}
+
+.bridge-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bridge-section:last-child {
+  border-bottom: none;
+}
+
+.bridge-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8899aa;
+  margin: 0 0 8px 0;
+}
+
+.bridge-mob-section {
+  padding: 14px;
+}
+
+.mob-button {
+  width: 100%;
+  padding: 14px;
+  background: #dc2626;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  letter-spacing: 0.03em;
+  transition: background 0.15s;
+}
+
+.mob-button:hover {
+  background: #b91c1c;
+}
+
+.mob-button:active {
+  background: #991b1b;
+}
+
+.bridge-hint {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: #8899aa;
+  line-height: 1.4;
+}
+
+.bridge-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.bridge-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #8899aa;
+}
+
+.bridge-inputs input,
+.bridge-inputs select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  color: #e0e8f0;
+  padding: 4px 7px;
+  font-size: 12px;
+  width: 90px;
+}
+
+.bridge-inputs select {
+  width: 160px;
+}
+
+.bridge-pick-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #c8d8e8;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.bridge-pick-btn.active {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: #f59e0b;
+  color: #fbbf24;
+}
+
+.bridge-pick-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.bridge-clear-btn {
+  padding: 5px 10px;
+  background: rgba(220, 38, 38, 0.15);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  border-radius: 6px;
+  color: #fca5a5;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bridge-clear-btn:hover {
+  background: rgba(220, 38, 38, 0.25);
+}
+
+.bridge-dispatch-btn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #2563eb;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bridge-dispatch-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.bridge-dispatch-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Agent list */
+
+.bridge-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bridge-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.agent-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-indicator.connected {
+  background: #22c55e;
+}
+
+.agent-indicator.disconnected {
+  background: #ef4444;
+}
+
+.agent-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.agent-type {
+  color: #8899aa;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.agent-mission {
+  font-size: 10px;
+  color: #f59e0b;
+  font-style: italic;
+}
+
+/* Status log */
+
+.bridge-log-section {
+  flex: 1;
+  min-height: 80px;
+}
+
+.bridge-status-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.bridge-status-entry {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+
+.bridge-status-info {
+  color: #94a3b8;
+}
+
+.bridge-status-warn {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.bridge-status-error {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.log-time {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Active state for Bridge toggle button */
+.icon-button.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: #f59e0b;
+  color: #f59e0b;
+}

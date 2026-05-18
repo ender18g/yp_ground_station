@@ -2,12 +2,12 @@
 
 ![YP Ground Station screenshot](screenshots/screen1.png)
 
-Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects vehicle telemetry from USVs, UAVs, UUVs, and the YP GPS feed, logs ROS2-shaped messages to InfluxDB, and serves a local-first React map interface for monitoring and command.
+Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects vehicle telemetry from USVs, UAVs, UUVs, and the YP GPS feed, logs ROS2-shaped messages to InfluxDB, and serves a local-first React map interface for monitoring, command, and SAR mission control via the embedded Lifeguard system.
 
 ## What Is Included
 
-- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand OpenStreetMap tile caching, command routing, and InfluxDB logging.
-- `web`: React + TypeScript + Leaflet UI with a full-screen map, vehicle markers, altitude labels, headings, recent trails, hover data, RTB commands, and click-to-waypoint commands.
+- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand OpenStreetMap tile caching, command routing, InfluxDB logging, and the embedded Lifeguard MAVLink mission manager.
+- `web`: React + TypeScript + Leaflet UI with a full-screen map, vehicle markers, altitude labels, headings, recent trails, hover data, RTB commands, click-to-waypoint commands, and the Bridge Panel for Lifeguard SAR mission control.
 - `sim-vehicle`: Configurable simulated UAV, USV, or UUV container that publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz and accepts commands.
 - `yp-gps`: YP GPS publisher. It can run in simulated mode near the US Naval Academy or read NMEA GPS data from a serial port.
 - `influxdb`: Time-series storage for all telemetry and command messages.
@@ -52,6 +52,123 @@ The map shows:
 - Click modal with `RTB` and waypoint command actions
 
 To command a waypoint, click a vehicle, choose `Waypoint`, then click the map. The server sends a command message to that vehicle's WebSocket connection.
+
+## Bridge Panel — Lifeguard SAR Control
+
+The Bridge Panel is an overlay control surface intended for the ship's bridge display. It exposes Lifeguard mission control without voice commands.
+
+Open it with the warning-triangle button (⚠) in the top-right toolbar.
+
+### Grid Search
+
+1. Click **Tap Corner 1** then tap the map to pin the first corner of the search area.
+2. Click **Tap Corner 2** then tap the second corner.
+3. A yellow rectangle is drawn on the map showing the planned search boundary.
+4. Adjust **altitude** and **swath width** as needed, select the agent to dispatch, then click **Dispatch Grid Search**.
+
+The server computes the grid centre and size from the two corner coordinates, generates a lawnmower-pattern waypoint mission, uploads it to the drone via MAVLink, arms the vehicle, and starts the mission automatically.
+
+### MOB — Man Overboard
+
+Pressing the large red **MOB** button immediately dispatches the first idle aerial agent on a parallel-track search along the ship's recent GPS track. No configuration is required — the ship track is built automatically from the `yp` vehicle's live position feed.
+
+If a target is subsequently found, the searching agent returns to the ship and a second idle agent (if available) is dispatched to verify the position with a tight grid search.
+
+### Agent Status
+
+The panel lists each configured agent with its connection state and current mission. An agent is shown as idle, running a named mission (`grid_search`, `mob`), or offline.
+
+### Status Log
+
+A scrollable log shows the last 200 status messages from all agents including arming status, mission progress, and any errors.
+
+## Lifeguard Configuration
+
+Lifeguard agent connections and mission defaults are stored in a JSON config file on the server host. The path is set via the `LIFEGUARD_CONFIG_PATH` environment variable (default `/data/lifeguard_config.json`).
+
+Example config:
+
+```json
+{
+  "agents": [
+    {
+      "name": "Drone Junior",
+      "connection_string": "tcp:192.168.0.110:5760",
+      "frame_type": "UAV"
+    }
+  ],
+  "mission": {
+    "default_waypoint_altitude": 30.0,
+    "default_swath_width": 20.0
+  },
+  "mavlink": {
+    "baudrate": 57600,
+    "source_system_id": 252
+  },
+  "ship": {
+    "track_history_minutes": 30,
+    "mob_corridor_half_width_m": 50.0,
+    "mob_takeoff_altitude_m": 100.0,
+    "mob_climb_speed_ms": 8.0
+  }
+}
+```
+
+The config can also be read and updated at runtime via the REST API:
+
+```bash
+# Read current config
+curl http://localhost:8000/api/lifeguard/config
+
+# Write updated config
+curl -X POST http://localhost:8000/api/lifeguard/config \
+  -H "Content-Type: application/json" \
+  -d @lifeguard_config.json
+
+# List agent connection states
+curl http://localhost:8000/api/lifeguard/agents
+```
+
+Config changes take effect for subsequent missions without restarting the server. Agent reconnection requires a restart or a `connect_agent` WebSocket command.
+
+### Lifeguard WebSocket Commands
+
+Commands are sent from the browser (or any WebSocket client) to `ws://<host>:8000/ws/ui`:
+
+```json
+{ "op": "lifeguard_command", "command": "grid_search",
+  "agent_id": "Drone Junior", "lat": 38.9822, "lon": -76.4819,
+  "grid_size_m": 300, "swath_m": 20, "altitude_m": 30 }
+
+{ "op": "lifeguard_command", "command": "mob" }
+
+{ "op": "lifeguard_command", "command": "fly_to",
+  "agent_id": "Drone Junior", "lat": 38.9830, "lon": -76.4810, "altitude_m": 30 }
+
+{ "op": "lifeguard_command", "command": "rtb", "agent_id": "Drone Junior" }
+
+{ "op": "lifeguard_command", "command": "connect_agent",
+  "name": "Drone Junior", "connection_string": "tcp:192.168.0.110:5760", "frame_type": "UAV" }
+
+{ "op": "lifeguard_command", "command": "disconnect_agent", "agent_id": "Drone Junior" }
+```
+
+Server-to-client events:
+
+| `op` | Payload | Description |
+|---|---|---|
+| `lifeguard_agents` | `{ agents: [...] }` | Updated agent list after any state change |
+| `lifeguard_status` | `{ agent_id, message, level, stamp }` | Per-agent status message (`info`, `warn`, or `error`) |
+| `lifeguard_config` | `{ config: {...} }` | Full config object (sent on connect and after updates) |
+| `lifeguard_path` | `{ agent_id, path: [[lat,lon], ...] }` | Uploaded mission waypoints for map display |
+
+### How Ship GPS Feeds MOB
+
+The `yp` vehicle's live GPS (published by the `yp-gps` service) is automatically sampled by the server at ten-second intervals and appended to the Lifeguard ship track. No separate MAVLink connection to the ship is required. The track drives the MOB parallel-search corridor geometry.
+
+### Drone Positions on Map
+
+Drones managed by Lifeguard publish their `GLOBAL_POSITION_INT` positions into the shared vehicle tracking system at 5 Hz. They appear on the Leaflet map alongside all other vehicles — no extra configuration is needed.
 
 ## Message Transport
 
@@ -253,6 +370,8 @@ Useful environment variables:
 | `yp-server` | `EARTH_USER_AGENT` | `YPGroundStation/0.1` | Identifying user agent for Earth View tile requests |
 | `yp-server` | `EARTH_REFERER` | `http://localhost:8080/` | Referer sent with Earth View tile requests |
 | `yp-server` | `MIN_TILE_TTL_SECONDS` | `604800` | Fallback cache TTL when headers are unavailable |
+| `yp-server` | `LIFEGUARD_CONFIG_PATH` | `/data/lifeguard_config.json` | Path to the Lifeguard agent/mission config file |
+| `yp-server` | `YP_VEHICLE_ID` | `yp` | Vehicle ID used to feed ship GPS into the MOB track |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `usv`, or `uuv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
@@ -290,3 +409,5 @@ npm run dev
 - Add authentication before putting this on anything other than a trusted local shipboard network.
 - Validate waypoint commands on the vehicle side before forwarding to the Cube/Pixhawk.
 - Keep a manual RC/safety pilot path independent of the web UI.
+- Lifeguard connects to drone Cube/Pixhawk autopilots directly via pymavlink using TCP or UDP connection strings. Ensure the autopilot's MAVLink port is reachable from the server container (add the drone network to `docker-compose.yml` if needed).
+- The `LIFEGUARD_CONFIG_PATH` file is written inside the container. Mount a host path (e.g. `./data:/data`) so config persists across container rebuilds.

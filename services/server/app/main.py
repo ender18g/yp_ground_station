@@ -18,6 +18,8 @@ import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+from .lifeguard.manager import LifeguardManager
+
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
 INFLUX_ORG = os.getenv("INFLUX_ORG", "yp")
@@ -35,6 +37,8 @@ MIN_TILE_TTL_SECONDS = int(os.getenv("MIN_TILE_TTL_SECONDS", str(7 * 24 * 60 * 6
 MAX_TILE_ZOOM = int(os.getenv("MAX_TILE_ZOOM", "19"))
 VEHICLE_TTL_SECONDS = float(os.getenv("VEHICLE_TTL_SECONDS", "30"))
 HISTORY_MAX_POINTS = int(os.getenv("HISTORY_MAX_POINTS", "5000"))
+LIFEGUARD_CONFIG_PATH = Path(os.getenv("LIFEGUARD_CONFIG_PATH", "/data/lifeguard_config.json"))
+YP_VEHICLE_ID = os.getenv("YP_VEHICLE_ID", "yp")
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
@@ -60,6 +64,9 @@ influx_client: Optional[InfluxDBClient] = None
 tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
 
+lifeguard_manager: Optional[LifeguardManager] = None
+lifeguard_event_queue: asyncio.Queue = asyncio.Queue()
+
 
 @app.get("/")
 async def root() -> dict[str, Any]:
@@ -76,7 +83,7 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global influx_client, tile_http_client, write_api
+    global influx_client, tile_http_client, write_api, lifeguard_manager
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
@@ -85,9 +92,18 @@ async def startup() -> None:
     except Exception as exc:
         print(f"InfluxDB unavailable at startup: {exc}")
 
+    cfg = _load_lifeguard_config()
+    loop = asyncio.get_event_loop()
+    lifeguard_manager = LifeguardManager(cfg, lifeguard_event_queue, loop)
+    asyncio.create_task(_lifeguard_event_pump())
+    # Connect agents in a thread so blocking MAVLink calls don't stall the event loop.
+    asyncio.create_task(asyncio.to_thread(lifeguard_manager.start))
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    if lifeguard_manager:
+        await asyncio.to_thread(lifeguard_manager.stop)
     if tile_http_client:
         await tile_http_client.aclose()
     if influx_client:
@@ -97,6 +113,25 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/lifeguard/config")
+async def lifeguard_config_get() -> JSONResponse:
+    return JSONResponse(_load_lifeguard_config())
+
+
+@app.post("/api/lifeguard/config")
+async def lifeguard_config_set(body: dict) -> JSONResponse:
+    _save_lifeguard_config(body)
+    if lifeguard_manager:
+        lifeguard_manager._settings = body
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/lifeguard/agents")
+async def lifeguard_agents_get() -> JSONResponse:
+    agents = lifeguard_manager.get_agent_states() if lifeguard_manager else []
+    return JSONResponse({"agents": agents})
 
 
 @app.get("/api/vehicles")
@@ -433,10 +468,25 @@ async def ui_ws(websocket: WebSocket) -> None:
     try:
         async with state_lock:
             await websocket.send_json({"op": "snapshot", "vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]})
+        # Send current Lifeguard state to the newly connected client.
+        if lifeguard_manager:
+            await websocket.send_json({"op": "lifeguard_agents", "agents": lifeguard_manager.get_agent_states()})
+            await websocket.send_json({"op": "lifeguard_config", "config": _load_lifeguard_config()})
         while True:
             payload = await websocket.receive_json()
-            if payload.get("op") == "command":
+            op = payload.get("op")
+            if op == "command":
                 await route_command(payload.get("vehicle_id"), payload.get("command", {}), source="ui")
+            elif op == "lifeguard_command":
+                await _handle_lifeguard_command(payload)
+            elif op == "lifeguard_config_get":
+                await websocket.send_json({"op": "lifeguard_config", "config": _load_lifeguard_config()})
+            elif op == "lifeguard_config_set":
+                cfg = payload.get("config", {})
+                _save_lifeguard_config(cfg)
+                if lifeguard_manager:
+                    lifeguard_manager._settings = cfg
+                await broadcast_ui({"op": "lifeguard_config", "config": cfg})
     except WebSocketDisconnect:
         pass
     finally:
@@ -476,6 +526,19 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     topic = str(payload.get("topic") or f"/vehicles/{vehicle_id}/unknown")
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
+
+    # Feed ship GPS into the Lifeguard MOB track when the YP vehicle position updates.
+    if (
+        lifeguard_manager is not None
+        and vehicle_id == YP_VEHICLE_ID
+        and "NavSatFix" in msg_type
+        and isinstance(msg, dict)
+        and "latitude" in msg
+        and "longitude" in msg
+    ):
+        lifeguard_manager.update_ship_position(
+            float(msg["latitude"]), float(msg["longitude"])
+        )
 
     update: dict[str, Any] = {
         "vehicle_id": vehicle_id,
@@ -559,6 +622,97 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
     await broadcast_ui({"op": "command_ack", **payload})
     await broadcast_ros(f"/vehicles/{vehicle_id}/commands", command, "yp_ground_station/Command")
 
+
+# ---------------------------------------------------------------------------
+# Lifeguard helpers
+# ---------------------------------------------------------------------------
+
+_DEFAULT_LIFEGUARD_CFG: dict[str, Any] = {
+    "agents": [],
+    "mission": {"default_waypoint_altitude": 30.0, "default_swath_width": 20.0},
+    "mavlink": {"baudrate": 57600, "source_system_id": 252},
+    "ship": {
+        "track_history_minutes": 30,
+        "mob_corridor_half_width_m": 50.0,
+        "mob_takeoff_altitude_m": 100.0,
+        "mob_climb_speed_ms": 8.0,
+    },
+}
+
+
+def _load_lifeguard_config() -> dict[str, Any]:
+    """Load Lifeguard config from disk; return defaults when the file is absent."""
+    try:
+        if LIFEGUARD_CONFIG_PATH.exists():
+            raw = LIFEGUARD_CONFIG_PATH.read_text()
+            return json.loads(raw)
+    except Exception as exc:
+        print(f"Lifeguard config read error: {exc}")
+    return _DEFAULT_LIFEGUARD_CFG.copy()
+
+
+def _save_lifeguard_config(cfg: dict[str, Any]) -> None:
+    try:
+        LIFEGUARD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LIFEGUARD_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except Exception as exc:
+        print(f"Lifeguard config write error: {exc}")
+
+
+async def _handle_lifeguard_command(payload: dict[str, Any]) -> None:
+    """Dispatch a lifeguard command received from a browser client."""
+    if not lifeguard_manager:
+        return
+    cmd = payload.get("command", "")
+    if cmd == "grid_search":
+        await asyncio.to_thread(
+            lifeguard_manager.execute_grid_search,
+            payload["agent_id"],
+            float(payload["lat"]),
+            float(payload["lon"]),
+            float(payload.get("grid_size_m", 200.0)),
+            float(payload.get("swath_m", 20.0)),
+            float(payload.get("altitude_m", 30.0)),
+        )
+    elif cmd == "mob":
+        await asyncio.to_thread(lifeguard_manager.execute_mob)
+    elif cmd == "fly_to":
+        await asyncio.to_thread(
+            lifeguard_manager.execute_fly_to,
+            payload["agent_id"],
+            float(payload["lat"]),
+            float(payload["lon"]),
+            float(payload.get("altitude_m", 30.0)),
+        )
+    elif cmd == "rtb":
+        await asyncio.to_thread(lifeguard_manager.execute_rtb, payload["agent_id"])
+    elif cmd == "connect_agent":
+        await asyncio.to_thread(
+            lifeguard_manager.connect_agent,
+            payload["name"],
+            payload["connection_string"],
+            payload.get("frame_type", "UAV"),
+        )
+    elif cmd == "disconnect_agent":
+        await asyncio.to_thread(lifeguard_manager.disconnect_agent, payload["agent_id"])
+
+
+async def _lifeguard_event_pump() -> None:
+    """Drain the LifeguardManager's event queue and forward events to the UI."""
+    while True:
+        try:
+            event = await lifeguard_event_queue.get()
+            op = event.get("op", "")
+            if op == "lifeguard_vehicle_update":
+                # Route drone positions through the shared vehicle tracking machinery.
+                await ingest_vehicle_message(event["payload"])
+            else:
+                await broadcast_ui(event)
+        except Exception as exc:
+            print(f"Lifeguard event pump error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 
 async def broadcast_ui(payload: dict[str, Any]) -> None:
     stale: list[WebSocket] = []

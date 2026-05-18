@@ -17,3 +17,13 @@ export function sendCommand(ws: WebSocket | null, vehicleId: string, command: Co
     }),
   );
 }
+
+export function sendLifeguardCommand(
+  ws: WebSocket | null,
+  payload: Record<string, unknown>,
+): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  ws.send(JSON.stringify({ op: "lifeguard_command", ...payload }));
+}
