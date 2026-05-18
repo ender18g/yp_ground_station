@@ -28,6 +28,7 @@ const YP_DEMO_SPEED_MPS = 5 * 0.514444;
 const YP_DEMO_HEADING = 330;
 const DEMO_KEEP_IN_RANGE_M = 200;
 const LOW_BATTERY_THRESHOLD = 0.25;
+const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
@@ -160,6 +161,13 @@ export function App() {
       return;
     }
     demoSimsRef.current = createDemoVehicles();
+    setWaypointMarkers(
+      Object.fromEntries(
+        demoSimsRef.current
+          .filter((vehicle) => vehicle.vehicle_type !== "yp")
+          .map((vehicle) => [vehicle.vehicle_id, { vehicle_id: vehicle.vehicle_id, latitude: vehicle.target.latitude, longitude: vehicle.target.longitude }]),
+      ),
+    );
     let lastStep = Date.now() / 1000;
     const tick = () => {
       const now = Date.now() / 1000;
@@ -306,7 +314,7 @@ export function App() {
 
       <div className="topbar">
         <div className="brand">
-          <img className="brand-logo" src="/logos/usna_crest_jhublue.png" alt="USNA crest" />
+          <img className="brand-logo" src={BRAND_LOGO_URL} alt="USNA crest" />
           <div className="brand-copy">
             <strong>YP Vehicle View</strong>
             <div className="brand-statuses">
@@ -1089,6 +1097,7 @@ function createDemoVehicles(): DemoVehicle[] {
     vehicle.marker_color = assignedVehicleColor(vehicle.vehicle_type, typeIndex);
     typeCounts[vehicle.vehicle_type] = typeIndex + 1;
   }
+  seedForwardDemoWaypoints(vehicles);
   return vehicles;
 }
 
@@ -1258,6 +1267,34 @@ function updateDemoVehicleColor(vehicles: DemoVehicle[], vehicleId: string, colo
   if (vehicle) {
     vehicle.marker_color = color;
   }
+}
+
+function seedForwardDemoWaypoints(vehicles: DemoVehicle[]): void {
+  const yp = vehicles.find((vehicle) => vehicle.vehicle_type === "yp");
+  if (!yp) {
+    return;
+  }
+  const offsets = [
+    { forward: 95, lateral: -70 },
+    { forward: 130, lateral: 55 },
+    { forward: 165, lateral: -25 },
+    { forward: 205, lateral: 85 },
+    { forward: 240, lateral: 5 },
+  ];
+  vehicles
+    .filter((vehicle) => vehicle.vehicle_type !== "yp")
+    .forEach((vehicle, index) => {
+      const offset = offsets[index % offsets.length];
+      const ahead = destinationPoint(yp.lat, yp.lon, yp.heading, offset.forward);
+      const target = destinationPoint(ahead.latitude, ahead.longitude, yp.heading + 90, offset.lateral);
+      vehicle.target = {
+        latitude: target.latitude,
+        longitude: target.longitude,
+        altitude: vehicle.vehicle_type === "uuv" ? -7 : vehicle.vehicle_type === "uav" ? vehicle.alt : 0,
+      };
+      vehicle.mode = "waypoint";
+      vehicle.manualWaypoint = true;
+    });
 }
 
 function randomDemoTarget(lat: number, lon: number, alt: number): DemoVehicle["target"] {
