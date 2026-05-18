@@ -659,11 +659,16 @@ input {
 .waypoint-crosshair {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   color: var(--waypoint-color, #0f172a);
+  cursor: grab;
   filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.45));
-  pointer-events: none;
+  pointer-events: auto;
+}
+
+.leaflet-dragging .waypoint-crosshair {
+  cursor: grabbing;
 }
 
 .waypoint-crosshair svg {

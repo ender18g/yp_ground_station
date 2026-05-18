@@ -97,6 +97,7 @@ export function App() {
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [preferredWaypointVehicleId, setPreferredWaypointVehicleId] = useState<string | null>(null);
   const [waypointMarkers, setWaypointMarkers] = useState<Record<string, WaypointMarker>>({});
+  const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
 
@@ -274,7 +275,21 @@ export function App() {
         <FitAllControl vehicles={vehicleList} />
         {showYpRangeRings && <YpRangeRings yp={yp} />}
         {Object.values(waypointMarkers).map((waypoint) => (
-          <WaypointCrosshair key={waypoint.vehicle_id} waypoint={waypoint} vehicle={vehicles[waypoint.vehicle_id]} />
+          <WaypointCrosshair
+            key={waypoint.vehicle_id}
+            waypoint={waypoint}
+            vehicle={vehicles[waypoint.vehicle_id]}
+            onDragStart={() => {
+              followBeforeWaypointDragRef.current = followYp;
+              setFollowYp(false);
+            }}
+            onMove={(lat, lon) => sendWaypoint(waypoint.vehicle_id, lat, lon)}
+            onDragEnd={() => {
+              if (followBeforeWaypointDragRef.current) {
+                window.setTimeout(() => setFollowYp(true), 250);
+              }
+            }}
+          />
         ))}
         {vehicleList.map((vehicle) => (
           <VehicleLayer
@@ -935,14 +950,37 @@ function YpRangeRings({ yp }: { yp?: Vehicle }) {
   );
 }
 
-function WaypointCrosshair({ waypoint, vehicle }: { waypoint: WaypointMarker; vehicle?: Vehicle }) {
+function WaypointCrosshair({
+  waypoint,
+  vehicle,
+  onDragStart,
+  onDragEnd,
+  onMove,
+}: {
+  waypoint: WaypointMarker;
+  vehicle?: Vehicle;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onMove: (lat: number, lon: number) => void;
+}) {
   const color = vehicle ? (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type) : "#0f172a";
+  const position = useMemo<[number, number]>(() => [waypoint.latitude, waypoint.longitude], [waypoint.latitude, waypoint.longitude]);
+  const icon = useMemo(() => waypointIcon(color), [color]);
   return (
     <Marker
-      position={[waypoint.latitude, waypoint.longitude]}
-      icon={waypointIcon(color)}
-      zIndexOffset={500}
-      interactive={false}
+      position={position}
+      icon={icon}
+      zIndexOffset={6000}
+      draggable
+      eventHandlers={{
+        click: (event) => L.DomEvent.stopPropagation(event.originalEvent),
+        dragstart: onDragStart,
+        dragend: (event) => {
+          const position = event.target.getLatLng();
+          onMove(position.lat, position.lng);
+          onDragEnd();
+        },
+      }}
     />
   );
 }
@@ -950,8 +988,8 @@ function WaypointCrosshair({ waypoint, vehicle }: { waypoint: WaypointMarker; ve
 function waypointIcon(color: string) {
   return L.divIcon({
     className: "",
-    iconSize: [34, 34],
-    iconAnchor: [17, 17],
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
     html: `
       <div class="waypoint-crosshair" style="--waypoint-color: ${color}">
         <svg viewBox="0 0 34 34" aria-hidden="true">
@@ -1274,19 +1312,30 @@ function seedForwardDemoWaypoints(vehicles: DemoVehicle[]): void {
   if (!yp) {
     return;
   }
-  const offsets = [
-    { forward: 95, lateral: -70 },
-    { forward: 130, lateral: 55 },
-    { forward: 165, lateral: -25 },
-    { forward: 205, lateral: 85 },
-    { forward: 240, lateral: 5 },
+  const forwardOffsets = [
+    { distance: 120, lateral: -65 },
+    { distance: 175, lateral: 55 },
   ];
+  const aftOffsets = [
+    { distance: 80, lateral: -45 },
+    { distance: 115, lateral: 45 },
+    { distance: 150, lateral: 0 },
+  ];
+  let forwardIndex = 0;
+  let aftIndex = 0;
   vehicles
     .filter((vehicle) => vehicle.vehicle_type !== "yp")
-    .forEach((vehicle, index) => {
-      const offset = offsets[index % offsets.length];
-      const ahead = destinationPoint(yp.lat, yp.lon, yp.heading, offset.forward);
-      const target = destinationPoint(ahead.latitude, ahead.longitude, yp.heading + 90, offset.lateral);
+    .forEach((vehicle) => {
+      const useForwardTarget = vehicle.vehicle_type === "uav";
+      const offset = useForwardTarget ? forwardOffsets[forwardIndex % forwardOffsets.length] : aftOffsets[aftIndex % aftOffsets.length];
+      if (useForwardTarget) {
+        forwardIndex += 1;
+      } else {
+        aftIndex += 1;
+      }
+      const axisBearing = useForwardTarget ? yp.heading : yp.heading + 180;
+      const axisPoint = destinationPoint(yp.lat, yp.lon, axisBearing, offset.distance);
+      const target = destinationPoint(axisPoint.latitude, axisPoint.longitude, yp.heading + 90, offset.lateral);
       vehicle.target = {
         latitude: target.latitude,
         longitude: target.longitude,
