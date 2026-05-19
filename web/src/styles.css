@@ -47,6 +47,7 @@ input {
 
 .brand,
 .map-menu,
+.map-menu-toggle,
 .settings-panel,
 .target-banner,
 .fit-control {
@@ -59,15 +60,15 @@ input {
 .brand {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  min-width: 250px;
-  padding: 9px 13px 10px 11px;
+  gap: 8px;
+  min-width: 306px;
+  padding: 9px 13px 10px 4px;
   border-radius: 8px;
 }
 
 .brand-logo {
-  width: 52px;
-  height: 42px;
+  width: 104px;
+  height: 84px;
   object-fit: contain;
 }
 
@@ -121,6 +122,7 @@ input {
 
 .icon-button,
 .fit-control,
+.map-menu-toggle,
 .target-banner button {
   display: inline-flex;
   align-items: center;
@@ -135,15 +137,21 @@ input {
 }
 
 .map-menu {
-  position: absolute;
-  z-index: 850;
-  bottom: 36px;
-  left: 16px;
   display: grid;
   gap: 10px;
   width: 224px;
   padding: 11px;
   border-radius: 8px;
+  pointer-events: auto;
+}
+
+.map-menu-shell {
+  position: absolute;
+  z-index: 850;
+  bottom: 36px;
+  left: 16px;
+  display: grid;
+  gap: 8px;
   pointer-events: auto;
 }
 
@@ -180,6 +188,89 @@ input {
   accent-color: #2563eb;
 }
 
+.map-action-menu {
+  position: absolute;
+  z-index: 920;
+  display: grid;
+  gap: 4px;
+  width: 220px;
+  padding: 8px;
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.2);
+  transform: translate(8px, 8px);
+}
+
+.map-action-title {
+  padding: 3px 4px 6px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.map-coordinates {
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.map-action-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #14202b;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 750;
+  text-align: left;
+}
+
+.map-action-menu button:hover {
+  background: #eff6ff;
+}
+
+.map-action-child {
+  padding-left: 18px;
+}
+
+.map-action-preferred {
+  background: #ecfeff !important;
+}
+
+.map-action-all {
+  margin-top: 3px;
+  border-top: 1px solid #e2e8f0 !important;
+}
+
+.vehicle-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.vehicle-dot.uav {
+  background: #dc2626;
+}
+
+.vehicle-dot.usv {
+  background: #16a34a;
+}
+
+.vehicle-dot.uuv {
+  background: #eab308;
+}
+
 .settings-panel {
   position: absolute;
   z-index: 900;
@@ -207,6 +298,18 @@ input {
 
 .settings-panel input {
   width: 100%;
+}
+
+.setting-toggle {
+  align-items: center;
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+.setting-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2563eb;
 }
 
 .message-drawer {
@@ -422,6 +525,30 @@ input {
   line-height: 1.45;
 }
 
+.json-view .json-key {
+  color: #93c5fd;
+}
+
+.json-view .json-string {
+  color: #86efac;
+}
+
+.json-view .json-number {
+  color: #fcd34d;
+}
+
+.json-view .json-boolean {
+  color: #f0abfc;
+}
+
+.json-view .json-null {
+  color: #cbd5e1;
+}
+
+.json-view .json-punctuation {
+  color: #dbeafe;
+}
+
 .target-banner {
   position: absolute;
   z-index: 910;
@@ -460,88 +587,223 @@ input {
   transform: translateY(-8px);
 }
 
+.marker-wrap.phone {
+  width: 46px;
+  height: 25px;
+  transform: translateY(-4px);
+}
+
 .vehicle-marker {
   position: absolute;
-  top: -6px;
+  top: -14px;
   left: 20px;
   display: grid;
   place-items: center;
   width: 54px;
-  height: 54px;
+  height: 70px;
   color: #ffffff;
   filter: drop-shadow(0 8px 9px rgba(15, 23, 32, 0.35));
   transform-origin: 50% 50%;
 }
 
+.marker-wrap.phone .vehicle-marker {
+  top: -7px;
+  left: 10px;
+  width: 27px;
+  height: 35px;
+  filter: drop-shadow(0 4px 5px rgba(15, 23, 32, 0.35));
+}
+
 .vehicle-marker svg {
   width: 54px;
-  height: 54px;
+  height: 70px;
   overflow: visible;
+}
+
+.marker-wrap.phone .vehicle-marker svg {
+  width: 27px;
+  height: 35px;
+}
+
+.vehicle-marker.uav {
+  top: -7px;
+  width: 62px;
+  height: 62px;
+}
+
+.marker-wrap.phone .vehicle-marker.uav {
+  top: -3.5px;
+  width: 31px;
+  height: 31px;
+}
+
+.vehicle-marker.uav svg {
+  width: 62px;
+  height: 62px;
+}
+
+.marker-wrap.phone .vehicle-marker.uav svg {
+  width: 31px;
+  height: 31px;
+}
+
+.vehicle-marker.uuv {
+  top: -20px;
+  left: 24px;
+  width: 44px;
+  height: 82px;
+}
+
+.marker-wrap.phone .vehicle-marker.uuv {
+  top: -10px;
+  left: 12px;
+  width: 22px;
+  height: 41px;
+}
+
+.vehicle-marker.uuv svg {
+  width: 44px;
+  height: 82px;
+}
+
+.marker-wrap.phone .vehicle-marker.uuv svg {
+  width: 22px;
+  height: 41px;
 }
 
 .vehicle-marker.yp {
   left: 16px;
   width: 62px;
-  height: 62px;
+  height: 76px;
+}
+
+.marker-wrap.phone .vehicle-marker.yp {
+  left: 8px;
+  width: 31px;
+  height: 38px;
 }
 
 .vehicle-marker.yp svg {
   width: 62px;
-  height: 62px;
+  height: 76px;
 }
 
-.glyph-fill {
-  fill: #ffffff;
-  stroke: #ffffff;
-  stroke-width: 4;
+.marker-wrap.phone .vehicle-marker.yp svg {
+  width: 31px;
+  height: 38px;
+}
+
+.vehicle-marker.uav {
+  color: var(--vehicle-color, #dc2626);
+}
+
+.vehicle-marker.usv {
+  color: var(--vehicle-color, #16a34a);
+}
+
+.vehicle-marker.uuv {
+  color: var(--vehicle-color, #eab308);
+}
+
+.vehicle-marker.yp {
+  color: var(--vehicle-color, #6b7280);
+}
+
+.waypoint-crosshair {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  color: var(--waypoint-color, #0f172a);
+  cursor: grab;
+  filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.45));
+  pointer-events: auto;
+}
+
+.leaflet-dragging .waypoint-crosshair {
+  cursor: grabbing;
+}
+
+.waypoint-crosshair svg {
+  width: 34px;
+  height: 34px;
+  overflow: visible;
+}
+
+.waypoint-crosshair circle,
+.waypoint-crosshair path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.waypoint-crosshair circle {
+  fill: rgba(255, 255, 255, 0.78);
+}
+
+.v-shadow {
+  fill: rgba(15, 23, 42, 0.28);
+  transform: translate(2px, 2px);
+}
+
+.v-hull,
+.v-deck,
+.v-fin,
+.v-rotor {
+  fill: currentColor;
+  stroke: #111827;
+  stroke-width: 2.4;
   stroke-linejoin: round;
 }
 
-.vehicle-marker.uav .glyph-fill {
-  fill: #f97316;
+.v-deck {
+  fill: color-mix(in srgb, currentColor 62%, #ffffff);
 }
 
-.vehicle-marker.usv .glyph-fill {
-  fill: #16a34a;
+.v-panel {
+  fill: rgba(255, 255, 255, 0.72);
+  stroke: #111827;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
 }
 
-.vehicle-marker.uuv .glyph-fill {
-  fill: #eab308;
+.v-window {
+  fill: #111827;
 }
 
-.glyph-stroke,
-.glyph-cut {
+.v-line,
+.v-arm,
+.v-blade {
   fill: none;
-  stroke: #ffffff;
+  stroke: #111827;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-.glyph-stroke {
-  stroke-width: 6;
+.v-line {
+  stroke-width: 1.9;
 }
 
-.glyph-cut {
-  stroke: rgba(15, 23, 32, 0.55);
+.v-arm {
+  stroke: currentColor;
+  stroke-width: 7;
+}
+
+.v-blade {
   stroke-width: 4;
 }
 
-.glyph-ring {
-  fill-opacity: 0.68;
-}
-
-.glyph-detail {
-  fill: rgba(15, 23, 32, 0.38);
-  stroke: none;
-}
-
-.glyph-fin {
-  stroke-width: 2;
+.v-rotor {
+  fill: #111827;
+  stroke: currentColor;
+  stroke-width: 4;
 }
 
 .alt-label {
   position: absolute;
-  top: 30px;
+  top: 42px;
   left: 52px;
   min-width: 42px;
   padding: 2px 5px;
@@ -553,6 +815,57 @@ input {
   font-weight: 700;
   text-align: center;
   white-space: nowrap;
+}
+
+.marker-wrap.phone .alt-label {
+  top: 21px;
+  left: 26px;
+  min-width: 21px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  font-size: 9px;
+}
+
+.low-battery-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 13px;
+  margin-left: 4px;
+  color: #dc2626;
+  vertical-align: -3px;
+}
+
+.video-stream-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 13px;
+  margin-left: 4px;
+  color: #16a34a;
+  vertical-align: -3px;
+}
+
+.low-battery-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.video-stream-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.1;
 }
 
 .tooltip-data {
@@ -627,7 +940,7 @@ input {
 }
 
 .type-chip.uav {
-  background: #f97316;
+  background: #dc2626;
 }
 
 .type-chip.usv {
@@ -640,50 +953,6 @@ input {
 
 .type-chip.yp {
   background: #6b7280;
-}
-
-.yp-hull,
-.yp-deck,
-.yp-bridge {
-  fill: #7a7f87;
-  stroke: #ffffff;
-  stroke-width: 3;
-  stroke-linejoin: round;
-}
-
-.yp-deck {
-  fill: #8d9299;
-}
-
-.yp-bridge {
-  fill: #a1a5ab;
-}
-
-.yp-window {
-  fill: #1f2937;
-  stroke: none;
-}
-
-.yp-mast,
-.yp-rail,
-.yp-bow-line {
-  fill: none;
-  stroke: #ffffff;
-  stroke-width: 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.yp-flag.red {
-  fill: #dc2626;
-  stroke: #ffffff;
-  stroke-width: 1.5;
-}
-
-.yp-flag.blue {
-  fill: #2563eb;
-  stroke: #ffffff;
-  stroke-width: 1.5;
 }
 
 .metrics {
@@ -716,23 +985,27 @@ input {
 }
 
 .modal-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  justify-content: flex-end;
   padding: 0 16px 16px;
 }
 
 .modal-actions button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  min-width: 0;
   min-height: 40px;
-  padding: 0 14px;
+  padding: 0 10px;
   border: 0;
   border-radius: 8px;
   color: #fff;
   cursor: pointer;
+  font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .modal-actions .danger {
@@ -741,6 +1014,108 @@ input {
 
 .modal-actions .primary {
   background: #2563eb;
+}
+
+.modal-actions .secondary {
+  background: #475569;
+}
+
+.modal-actions .stream {
+  background: #16a34a;
+}
+
+.color-panel {
+  display: block;
+  padding: 0 16px 16px;
+}
+
+.color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.color-swatch {
+  width: 30px;
+  height: 30px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px #cbd5e1;
+  cursor: pointer;
+}
+
+.color-swatch.selected {
+  box-shadow:
+    0 0 0 2px #0f172a,
+    0 0 0 5px #bfdbfe;
+}
+
+.video-viewer {
+  position: absolute;
+  z-index: 1300;
+  display: grid;
+  grid-template-rows: 42px 1fr;
+  min-width: 280px;
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.28);
+  border-radius: 8px;
+  background: #0b1118;
+  box-shadow: 0 24px 70px rgba(15, 23, 32, 0.38);
+}
+
+.video-viewer-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 7px 6px 12px;
+  background: #ffffff;
+  color: #14202b;
+  cursor: move;
+  user-select: none;
+}
+
+.video-viewer-header > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #126736;
+}
+
+.video-viewer-header strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-viewer-header .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.video-viewer-media {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #000000;
+  object-fit: contain;
+}
+
+.video-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: rgba(255, 255, 255, 0.88);
+  color: #14202b;
+  cursor: nwse-resize;
 }
 
 .leaflet-container {
@@ -758,8 +1133,8 @@ input {
   }
 
   .brand-logo {
-    width: 46px;
-    height: 38px;
+    width: 78px;
+    height: 64px;
   }
 
   .brand-copy strong {
@@ -786,5 +1161,14 @@ input {
 
   .metrics {
     grid-template-columns: 1fr;
+  }
+
+  .modal-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .video-viewer {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
   }
 }

@@ -1,0 +1,33 @@
+diff --git a/platforms/posix/src/px4/common/px4_daemon/server.cpp b/platforms/posix/src/px4/common/px4_daemon/server.cpp
+--- a/platforms/posix/src/px4/common/px4_daemon/server.cpp
++++ b/platforms/posix/src/px4/common/px4_daemon/server.cpp
+@@ -143,12 +143,14 @@ Server::_server_main()
+ 		int n_ready = poll(poll_fds.data(), poll_fds.size(), -1);
+ 
+ 		if (n_ready < 0) {
+-			// Reboot command causes System Interrupt to stop poll(). This is not an error
+-			if (errno != EINTR) {
+-				PX4_ERR("poll() failed: %s", strerror(errno));
++			// Startup scripts can interrupt poll() while child commands exit.
++			// Keep the daemon socket alive so px4-* client commands can connect.
++			if (errno == EINTR) {
++				continue;
+ 			}
+ 
++			PX4_ERR("poll() failed: %s", strerror(errno));
+ 			break;
+ 		}
+ 
+ 		_lock();
+diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+--- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
++++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink
+@@ -23,7 +23,7 @@ mavlink stream -r 20 -s RC_CHANNELS -u $udp_gcs_port_local
+ mavlink stream -r 10 -s OPTICAL_FLOW_RAD -u $udp_gcs_port_local
+ 
+ # API/Offboard link
+-mavlink start -x -u $udp_offboard_port_local -r 4000000 -f -m onboard -o $udp_offboard_port_remote
++mavlink start -x -u $udp_offboard_port_local -r 4000000 -f -m onboard -o $udp_offboard_port_remote -p
+ 
+ # Onboard link to camera
+ mavlink start -x -u $udp_onboard_payload_port_local -r 4000 -f -m onboard -o $udp_onboard_payload_port_remote
