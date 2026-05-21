@@ -255,31 +255,31 @@ export function App() {
   };
 
   const handleMobConfirm = async () => {
-    setMobSending(true);
-    try {
-      const result = await triggerMOB();
-      const vehicleId = result.vehicle_id ?? "unknown";
-      setMessageLog((current) => [
-        {
-          id: `mob-${Date.now()}`,
-          receivedAt: Date.now(),
-          vehicle_id: vehicleId,
-          vehicle_type: "uav",
-          topic: `/vehicles/${vehicleId}/commands`,
-          type: "yp_ground_station/MOBTriggered",
-          stamp: Date.now() / 1000,
-          msg: result.ok
-            ? { status: "dispatched", vehicle_id: vehicleId }
-            : { status: "failed", error: result.error },
-        },
-        ...current,
-      ].slice(0, MAX_MESSAGE_LOG));
-    } catch {
-      // swallow — error already logged via message log above
-    }
-    setMobSending(false);
-    setMobModalOpen(false);
-  };
+  setMobSending(true);
+  try {
+    const result = await triggerMOB();
+    const vehicleId = result.vehicle_id ?? "unknown";
+
+    const mobMessage: StreamMessage = {
+      id: `mob-${Date.now()}`,
+      receivedAt: Date.now(),
+      vehicle_id: vehicleId,
+      vehicle_type: "uav",
+      topic: `/vehicles/${vehicleId}/commands`,
+      type: "yp_ground_station/MOBTriggered",
+      stamp: Date.now() / 1000,
+      msg: result.ok
+        ? { status: "dispatched", vehicle_id: vehicleId }
+        : { status: "failed", error: result.error },
+    };
+
+    setMessageLog((current) => [mobMessage, ...current].slice(0, MAX_MESSAGE_LOG));
+  } catch {
+    // swallow — error already logged via message log above
+  }
+  setMobSending(false);
+  setMobModalOpen(false);
+};
 
   const sendAllToMapPoint = (lat: number, lon: number) => {
     const commandableVehicles = vehicleList.filter((candidate) => candidate.vehicle_type !== "yp");
