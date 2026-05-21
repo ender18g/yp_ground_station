@@ -98,36 +98,17 @@ async def telemetry_loop() -> None:
         async with websockets.connect(f"{SERVER_WS_URL.rstrip('/')}/{VEHICLE_ID}", ping_interval=10, ping_timeout=10) as ws:
             print("[SUCCESS] WebSocket connected!")
             counter = 0
+            last_send_time = time.time()
+            
             while True:
-                msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=5)
-                if msg is None:
-                    print("[WARNING] No GLOBAL_POSITION_INT received")
-                    continue
-
-                counter += 1
-                lat = msg.lat / 1e7
-                lon = msg.lon / 1e7
-                alt = msg.relative_alt / 1000.0
-                heading = getattr(msg, "hdg", None)
-                if heading is not None:
-                    heading = heading / 100.0
-
-                payload = create_navsatfix_message(lat, lon, alt, heading)
-                json_payload = json.dumps(payload)
-
-                print(f"[INFO] Sending websocket message #{counter}...")
-                await ws.send(json_payload)
-                print("[SUCCESS] Websocket message sent")
-
+                # 1. Listen for incoming WebSocket commands (short timeout to avoid blocking)
                 try:
-                    response = await asyncio.wait_for(ws.recv(), timeout=0.1)
+                    response = await asyncio.wait_for(ws.recv(), timeout=0.01)
                     print("[SERVER RESPONSE]", response)
                     
-                    # Parse the response and trigger the waypoint command
                     try:
                         server_msg = json.loads(response)
                         
-                        # Verify message intent and target vehicle
                         if (server_msg.get("op") == "command" and 
                             server_msg.get("vehicle_id") == VEHICLE_ID):
                             
@@ -139,7 +120,6 @@ async def telemetry_loop() -> None:
                                 target_lon = target.get("longitude")
                                 target_alt = target.get("altitude")
                                 
-                                # Ensure all coordinate data is present
                                 if None not in (target_lat, target_lon, target_alt):
                                     goto_waypoint(master, target_lat, target_lon, target_alt)
                                     print("[SUCCESS] Waypoint command routed to vehicle.")
@@ -150,9 +130,33 @@ async def telemetry_loop() -> None:
                         print("[WARNING] Server response was not valid JSON.")
 
                 except asyncio.TimeoutError:
-                    pass
+                    pass # Normal behavior, no incoming command this cycle
 
-                await asyncio.sleep(1.0 / SEND_HZ)
+                # 2. Check for MAVLink telemetry (non-blocking)
+                msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=False)
+                
+                # 3. Process and send telemetry at the specified SEND_HZ rate
+                now = time.time()
+                if msg is not None and (now - last_send_time) >= (1.0 / SEND_HZ):
+                    counter += 1
+                    lat = msg.lat / 1e7
+                    lon = msg.lon / 1e7
+                    alt = msg.relative_alt / 1000.0
+                    heading = getattr(msg, "hdg", None)
+                    if heading is not None:
+                        heading = heading / 100.0
+
+                    payload = create_navsatfix_message(lat, lon, alt, heading)
+                    json_payload = json.dumps(payload)
+
+                    await ws.send(json_payload)
+                    print(f"[INFO] Sent websocket message #{counter}")
+                    
+                    # Reset the timer
+                    last_send_time = now
+
+                # 4. Briefly yield control back to the asyncio event loop
+                await asyncio.sleep(0.01)
 
     except Exception as exc:
         print("\n[ERROR] Websocket connection failed!")
