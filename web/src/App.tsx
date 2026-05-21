@@ -1,9 +1,11 @@
 import L from "leaflet";
 import {
+  AlertTriangle,
   Battery,
   Brush,
   Crosshair,
   EthernetPort,
+  Grid3X3,
   Layers,
   LocateFixed,
   Maximize2,
@@ -20,7 +22,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { fetchSettings, sendCommand, updateSettings, websocketUrl } from "./api";
+import { fetchSettings, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
 import type { Command, Vehicle, VehicleType } from "./types";
 
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
@@ -102,6 +104,8 @@ export function App() {
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
   const [preferredWaypointVehicleId, setPreferredWaypointVehicleId] = useState<string | null>(null);
   const [waypointMarkers, setWaypointMarkers] = useState<Record<string, WaypointMarker>>({});
+  const [mobModalOpen, setMobModalOpen] = useState(false);
+  const [mobSending, setMobSending] = useState(false);
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
@@ -245,6 +249,38 @@ export function App() {
     }));
   };
 
+  const sendSearchGrid = (vehicleId: string, lat: number, lon: number, gridSizeM: number, swathM: number, altM: number) => {
+    command(vehicleId, { type: "search_grid", lat, lon, grid_size_m: gridSizeM, swath_m: swathM, altitude_m: altM });
+    setMapActionMenu(null);
+  };
+
+  const handleMobConfirm = async () => {
+    setMobSending(true);
+    try {
+      const result = await triggerMOB();
+      const vehicleId = result.vehicle_id ?? "unknown";
+      setMessageLog((current) => [
+        {
+          id: `mob-${Date.now()}`,
+          receivedAt: Date.now(),
+          vehicle_id: vehicleId,
+          vehicle_type: "uav",
+          topic: `/vehicles/${vehicleId}/commands`,
+          type: "yp_ground_station/MOBTriggered",
+          stamp: Date.now() / 1000,
+          msg: result.ok
+            ? { status: "dispatched", vehicle_id: vehicleId }
+            : { status: "failed", error: result.error },
+        },
+        ...current,
+      ].slice(0, MAX_MESSAGE_LOG));
+    } catch {
+      // swallow — error already logged via message log above
+    }
+    setMobSending(false);
+    setMobModalOpen(false);
+  };
+
   const sendAllToMapPoint = (lat: number, lon: number) => {
     const commandableVehicles = vehicleList.filter((candidate) => candidate.vehicle_type !== "yp");
     const nextMarkers: Record<string, WaypointMarker> = {};
@@ -334,6 +370,9 @@ export function App() {
             setPreferredWaypointVehicleId(null);
             setMapActionMenu(null);
           }}
+          onSearchGrid={(vehicleId, gridSizeM, swathM, altM) =>
+            sendSearchGrid(vehicleId, mapActionMenu.lat, mapActionMenu.lon, gridSizeM, swathM, altM)
+          }
         />
       )}
 
@@ -439,6 +478,50 @@ export function App() {
           src={USV_STREAM_URL}
           onClose={() => setStreamVehicleId(null)}
         />
+      )}
+
+      {/* Fixed red MOB button — always visible, bottom-right corner */}
+      <button
+        className="mob-button"
+        title="Man Overboard — dispatch SAR search"
+        onClick={(e) => {
+          e.stopPropagation();
+          setMobModalOpen(true);
+        }}
+      >
+        MAN<br />OVER<br />BOARD
+      </button>
+
+      {/* MOB confirmation modal */}
+      {mobModalOpen && (
+        <div className="mob-modal-overlay" onClick={() => !mobSending && setMobModalOpen(false)}>
+          <div className="mob-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="mob-modal-title">
+              <AlertTriangle size={22} />
+              Man Overboard
+            </div>
+            <div className="mob-modal-body">
+              This will immediately dispatch the nearest available vehicle to search
+              the YP vessel&apos;s recent track. Confirm only if a person is overboard.
+            </div>
+            <div className="mob-modal-actions">
+              <button
+                className="mob-cancel-btn"
+                onClick={() => setMobModalOpen(false)}
+                disabled={mobSending}
+              >
+                Cancel
+              </button>
+              <button
+                className="mob-confirm-btn"
+                onClick={handleMobConfirm}
+                disabled={mobSending}
+              >
+                {mobSending ? "Dispatching…" : "MAN OVERBOARD!"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -656,14 +739,20 @@ function MapActionMenu({
   preferredVehicleId,
   onSend,
   onSendAll,
+  onSearchGrid,
 }: {
   menu: MapActionMenuState;
   vehicles: Vehicle[];
   preferredVehicleId: string | null;
   onSend: (vehicleId: string) => void;
   onSendAll: () => void;
+  onSearchGrid: (vehicleId: string, gridSizeM: number, swathM: number, altM: number) => void;
 }) {
   const [showVehicles, setShowVehicles] = useState(false);
+  const [showSearchGrid, setShowSearchGrid] = useState(false);
+  const [gridSizeM, setGridSizeM] = useState(200);
+  const [swathM, setSwathM] = useState(20);
+  const [altM, setAltM] = useState(30);
   const commandableVehicles = vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp");
   const preferredVehicle = commandableVehicles.find((vehicle) => vehicle.vehicle_id === preferredVehicleId);
   return (
@@ -695,6 +784,60 @@ function MapActionMenu({
           All vehicles
         </button>
       )}
+
+      {/* Search Grid section */}
+      <div className="map-action-section">
+        <button onClick={() => setShowSearchGrid((v) => !v)}>
+          <Grid3X3 size={15} />
+          Search Grid Here
+        </button>
+        {showSearchGrid && commandableVehicles.length > 0 && (
+          <div className="search-grid-form">
+            <label>
+              Grid size
+              <span>{gridSizeM} m</span>
+            </label>
+            <input
+              type="range" min={50} max={500} step={25}
+              value={gridSizeM}
+              onChange={(e) => setGridSizeM(Number(e.target.value))}
+            />
+            <label>
+              Swath width
+              <span>{swathM} m</span>
+            </label>
+            <input
+              type="range" min={5} max={50} step={5}
+              value={swathM}
+              onChange={(e) => setSwathM(Number(e.target.value))}
+            />
+            <label>
+              Altitude
+              <span>{altM} m</span>
+            </label>
+            <input
+              type="range" min={10} max={100} step={5}
+              value={altM}
+              onChange={(e) => setAltM(Number(e.target.value))}
+            />
+            {commandableVehicles.map((vehicle) => (
+              <button
+                key={vehicle.vehicle_id}
+                className="search-grid-launch-btn"
+                onClick={() => onSearchGrid(vehicle.vehicle_id, gridSizeM, swathM, altM)}
+              >
+                <span className={`vehicle-dot ${vehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(vehicle) }} />
+                Launch on {vehicle.vehicle_id}
+              </button>
+            ))}
+          </div>
+        )}
+        {showSearchGrid && commandableVehicles.length === 0 && (
+          <div className="search-grid-form">
+            <span style={{ color: "#94a3b8", fontSize: 12 }}>No commandable vehicles connected</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

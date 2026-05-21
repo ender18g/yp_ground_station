@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 import httpx
@@ -43,6 +43,13 @@ INFLUX_MAX_WRITE_HZ = float(os.getenv("INFLUX_MAX_WRITE_HZ", "5"))
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
+
+# SAR defaults — override in docker-compose environment
+SAR_CORRIDOR_HALF_WIDTH_M = float(os.getenv("SAR_CORRIDOR_HALF_WIDTH_M", "50.0"))
+SAR_SWATH_M = float(os.getenv("SAR_SWATH_M", "20.0"))
+SAR_ALTITUDE_M = float(os.getenv("SAR_ALTITUDE_M", "30.0"))
+SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
+SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
@@ -150,6 +157,68 @@ async def get_vehicle(vehicle_id: str) -> JSONResponse:
     if not vehicle:
         return JSONResponse({"error": "vehicle not found"}, status_code=404)
     return JSONResponse(public_vehicle(vehicle))
+
+
+@app.post("/api/sar/mob")
+async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """
+    Trigger a Man Overboard search mission.
+
+    Reads the YP vessel's position history to build track points, selects the
+    first available non-YP connected vehicle, and routes a 'mob' command to its
+    bridge via the existing vehicle WebSocket queue.
+
+    Optional body: { "vehicle_id": "uav-001" } to target a specific vehicle.
+    """
+    async with state_lock:
+        # Find YP (ship) vehicle and extract track points from its position history
+        yp_vehicle = next(
+            (v for v in vehicles.values() if v.get("vehicle_type") == "yp"),
+            None,
+        )
+        if not yp_vehicle:
+            return JSONResponse({"error": "No YP vessel tracked"}, status_code=404)
+
+        yp_history = list(yp_vehicle.get("history", []))
+        if len(yp_history) < 2:
+            return JSONResponse(
+                {"error": "Insufficient YP track history for MOB search (need at least 2 position fixes)"},
+                status_code=409,
+            )
+
+        track_points = [[p["latitude"], p["longitude"]] for p in yp_history]
+
+        # Resolve target vehicle
+        requested_id: Optional[str] = payload.get("vehicle_id") if payload else None
+        if requested_id:
+            if requested_id not in vehicles:
+                return JSONResponse({"error": f"Vehicle '{requested_id}' not found"}, status_code=404)
+            target_vehicle_id = requested_id
+        else:
+            target = next(
+                (v for v in vehicles.values()
+                 if v.get("vehicle_type") != "yp" and v.get("connected")),
+                None,
+            )
+            if not target:
+                return JSONResponse(
+                    {"error": "No available connected vehicle for MOB search"},
+                    status_code=409,
+                )
+            target_vehicle_id = target["vehicle_id"]
+
+    mob_command: dict[str, Any] = {
+        "type": "mob",
+        "track_points": track_points,
+        "corridor_half_width_m": SAR_CORRIDOR_HALF_WIDTH_M,
+        "swath_m": SAR_SWATH_M,
+        "altitude_m": SAR_ALTITUDE_M,
+        "takeoff_altitude_m": SAR_TAKEOFF_ALT_M,
+        "climb_speed_ms": SAR_CLIMB_SPEED_MS,
+    }
+
+    await route_command(target_vehicle_id, mob_command, source="sar_api")
+    return JSONResponse({"ok": True, "vehicle_id": target_vehicle_id})
 
 
 @app.get("/api/tile-cache")

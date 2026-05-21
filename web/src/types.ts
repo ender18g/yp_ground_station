@@ -31,10 +31,16 @@ export interface Vehicle {
 }
 
 export interface Command {
-  type: "rtb" | "waypoint" | "trajectory";
+  type: "rtb" | "waypoint" | "trajectory" | "search_grid";
   target?: {
     latitude: number;
     longitude: number;
     altitude: number;
   };
+  // search_grid fields
+  lat?: number;
+  lon?: number;
+  grid_size_m?: number;
+  swath_m?: number;
+  altitude_m?: number;
 }

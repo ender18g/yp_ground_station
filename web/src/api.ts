@@ -44,3 +44,23 @@ export function sendCommand(ws: WebSocket | null, vehicleId: string, command: Co
     }),
   );
 }
+
+export interface MobResult {
+  ok: boolean;
+  vehicle_id?: string;
+  error?: string;
+}
+
+/** Trigger a Man Overboard search via the server's SAR endpoint. */
+export async function triggerMOB(vehicleId?: string): Promise<MobResult> {
+  const response = await fetch("/api/sar/mob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(vehicleId ? { vehicle_id: vehicleId } : {}),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    return { ok: false, error: err.error ?? `HTTP ${response.status}` };
+  }
+  return response.json();
+}
