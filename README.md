@@ -8,8 +8,9 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 
 - `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, and InfluxDB logging.
 - `web`: React + TypeScript + Leaflet UI with vehicle markers, headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, and a live message drawer.
-- `sim-vehicle`: Existing lightweight configurable simulated UAV, USV, or UUV container. This remains unchanged and publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz.
-- `yp-gps`: YP GPS publisher. It can run in simulated mode near the US Naval Academy or read NMEA GPS data from a serial port.
+- `sim-vehicle`: Lightweight configurable simulated UAV, USV, or UUV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz.
+- `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
+- `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
 - `px4-sitl-uav`: Optional profile-gated PX4 SITL multicopter simulation.
 - `mavros`, `ros-master`, and `rosbridge`: Optional ROS/MAVROS path used by the PX4 UAV simulation.
 - `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into the YP ground station, and translates YP waypoint/RTB commands back to MAVROS/PX4.
@@ -101,8 +102,90 @@ The map shows:
 - Hideable map layer/source menu opened with the layer icon
 - Optional YP range rings at 50 m, 100 m, and 200 m
 - Live message drawer opened with the message icon
+- SITL bridge panel (cable icon) to connect ArduPilot SITL instances by TCP/UDP address at runtime
+- SAR mission patterns overlaid on the map when a grid search or MOB mission is dispatched; click the filled start dot to open a popup and clear the pattern manually
 
 The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
+
+## ArduPilot SITL Bridge
+
+The ground station includes a built-in MAVLink bridge that connects directly to ArduPilot or ArduCopter SITL instances at runtime — no separate bridge container required. This is useful for testing SAR missions against a simulated vehicle without deploying hardware.
+
+### Connecting a SITL Instance
+
+Open the **SITL** panel in the UI (cable icon in the top bar), enter a pymavlink-compatible connection string, and click **Connect**:
+
+| Protocol | Example | Notes |
+| --- | --- | --- |
+| TCP client | `tcp:localhost:5760` | ArduPilot default SITL port |
+| TCP server | `tcpin:0.0.0.0:5760` | Server waits for SITL to connect |
+| UDP input | `udpin:0.0.0.0:14551` | Receive MAVLink datagrams |
+| UDP output | `udpout:192.168.1.100:14550` | Send MAVLink datagrams to host |
+
+Leave the **Vehicle ID** field empty to auto-derive an ID from the connection URL (e.g. `sitl-localhost-5760`), or enter a custom ID.
+
+The bridge detects the vehicle frame type from the first MAVLink heartbeat and updates the map marker style accordingly. Telemetry is streamed at 10 Hz. Multiple SITL instances can be connected simultaneously.
+
+### REST API
+
+```http
+GET  /api/sitl                      → list all active bridges
+POST /api/sitl  { url, vehicle_id } → open a new bridge
+DEL  /api/sitl/{vehicle_id}         → close and remove a bridge
+```
+
+### Supported Commands Over SITL Bridge
+
+| Command type | Behaviour |
+| --- | --- |
+| `waypoint` | Sets the target lat/lon/alt |
+| `rtb` | Commands RTL mode |
+| `search_grid` | Generates and uploads a boustrophedon lawnmower mission, arms, and starts AUTO mode |
+| `mob` | Generates and uploads a curved track-following MOB search mission, force-arms, and starts AUTO mode |
+
+For `search_grid` and `mob`, the server holds the MAVLink connection exclusively during mission upload and arms the vehicle. The IO telemetry thread is paused while the mission is being uploaded to prevent ACK races.
+
+## SAR Missions
+
+The ground station can generate and dispatch Search and Rescue missions to any connected vehicle — SITL bridge or real hardware bridge.
+
+### Search Grid
+
+Right-click anywhere on the map, select **Search Grid**, choose a vehicle and the optional parameters, then click **Send**.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| Grid size | 200 m | Side length of the square search area |
+| Swath width | 20 m | Track spacing (sensor coverage width) |
+| Altitude | 30 m | Search altitude above home |
+
+The server computes a boustrophedon (lawnmower) waypoint pattern centred on the clicked point, uploads the mission, arms the vehicle, and starts AUTO mode. The flight path is drawn on the map in the vehicle's colour as a dashed polyline.
+
+### Man Overboard (MOB)
+
+Click the **MOB** button in the top bar and confirm. The server:
+
+1. Reads the YP vessel's recent position history to reconstruct the ship's track.
+2. Generates a set of parallel lanes centred on the track and expanding outward — the number of lanes is determined by the corridor half-width divided by the swath width.
+3. Dispatches the mission to the best available connected vehicle (preferring UAV SITL bridges, then any SITL bridge, then hardware bridges).
+
+| Server variable | Default | Description |
+| --- | --- | --- |
+| `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | Half the total search corridor around the YP track |
+| `SAR_SWATH_M` | `20.0` | Lane spacing |
+| `SAR_ALTITUDE_M` | `30.0` | Search altitude |
+| `SAR_TAKEOFF_ALT_M` | `30.0` | Takeoff altitude before transitioning to search altitude |
+| `SAR_CLIMB_SPEED_MS` | `8.0` | Climb speed in m/s |
+
+If no SITL bridge or hardware bridge is connected, the MOB endpoint returns an error and the modal shows the reason inline — the YP GPS feed must also be running and have at least two position fixes.
+
+### Pattern Overlay
+
+When a SAR mission is dispatched the full flight path is broadcast to all connected UI clients and drawn on the map as a dashed polyline in the assigned vehicle colour. A filled dot marks the start waypoint and a hollow dot marks the end. The pattern persists until manually cleared: click the start dot and choose **Clear pattern** from the popup.
+
+### SAR With Hardware Bridges
+
+The `arducopter_ws_bridge` service supports the same `search_grid` and `mob` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over its WebSocket, pauses telemetry, uploads the mission via direct MAVLink, arms, and starts AUTO mode. The pattern overlay is shown on the map at dispatch time.
 
 ## Waypoint And RTB Commands
 
@@ -344,6 +427,13 @@ Useful environment variables:
 | `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent on-demand map tile cache |
 | `yp-server` | `OSM_TILE_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Street tile source URL template |
 | `yp-server` | `EARTH_TILE_URL` | `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` | Satellite tile source URL template |
+| `yp-server` | `VEHICLE_TTL_SECONDS` | `30` | Seconds before an unheard vehicle is considered stale |
+| `yp-server` | `HISTORY_MAX_POINTS` | `5000` | Maximum position history points kept per vehicle |
+| `yp-server` | `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | MOB search corridor half-width in metres |
+| `yp-server` | `SAR_SWATH_M` | `20.0` | SAR lane spacing in metres |
+| `yp-server` | `SAR_ALTITUDE_M` | `30.0` | SAR search altitude in metres |
+| `yp-server` | `SAR_TAKEOFF_ALT_M` | `30.0` | SAR takeoff altitude in metres |
+| `yp-server` | `SAR_CLIMB_SPEED_MS` | `8.0` | SAR climb speed in m/s |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `usv`, or `uuv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
