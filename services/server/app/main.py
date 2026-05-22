@@ -6,11 +6,24 @@ import hashlib
 import json
 import math
 import os
+import queue as _stdlib_queue
+import re
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    from pymavlink import mavutil as _mavutil
+except ImportError:  # pragma: no cover
+    _mavutil = None  # type: ignore[assignment]
+
+try:
+    import sar_missions as _sar_missions
+except ImportError:  # pragma: no cover
+    _sar_missions = None  # type: ignore[assignment]
 
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,6 +81,46 @@ ros_connections: dict[WebSocket, set[str]] = defaultdict(set)
 state_lock = asyncio.Lock()
 tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# SITL MAVLink bridge state
+sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
+sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
+
+# MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
+_MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
+    0: ("uav", "Generic"),
+    1: ("uav", "Fixed Wing"),
+    2: ("uav", "Quadrotor"),
+    3: ("uav", "Coaxial Helicopter"),
+    4: ("uav", "Helicopter"),
+    5: ("uav", "Antenna Tracker"),
+    7: ("uav", "Airship"),
+    8: ("uav", "Free Balloon"),
+    9: ("uav", "Rocket"),
+    10: ("usv", "Ground Rover"),
+    11: ("usv", "Surface Boat"),
+    12: ("uuv", "Submarine"),
+    13: ("uav", "Hexarotor"),
+    14: ("uav", "Octorotor"),
+    15: ("uav", "Tricopter"),
+    16: ("uav", "Flapping Wing"),
+    19: ("uav", "VTOL Duorotor"),
+    20: ("uav", "VTOL Quadrotor"),
+    21: ("uav", "VTOL Tiltrotor"),
+    29: ("uav", "Dodecarotor"),
+    35: ("uav", "Decarotor"),
+}
+_MAV_AUTOPILOT_NAMES: dict[int, str] = {
+    0: "Generic",
+    3: "ArduPilot",
+    8: "Invalid",
+    12: "PX4",
+}
+_VALID_MAVLINK_PREFIXES = (
+    "tcp:", "tcpin:", "tcpout:",
+    "udpin:", "udpout:", "udpbcast:",
+    "serial:",
+)
+
 influx_client: Optional[InfluxDBClient] = None
 tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
@@ -111,6 +164,8 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    for task in list(sitl_bridges.values()):
+        task.cancel()
     if cleanup_task:
         cleanup_task.cancel()
     if tile_http_client:
@@ -122,6 +177,404 @@ async def shutdown() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# SITL / MAVLink bridge endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sitl")
+async def list_sitl_bridges() -> dict[str, Any]:
+    """Return all active (and recently errored) SITL bridge connections."""
+    return {"bridges": list(sitl_bridge_info.values())}
+
+
+@app.post("/api/sitl")
+async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """
+    Open a new MAVLink bridge connection.
+
+    Body fields:
+      url        – pymavlink connection string, e.g. ``tcp:localhost:5760``,
+                   ``udpin:0.0.0.0:14551``, ``udpout:host:14550``.
+      vehicle_id – optional; derived from the URL if omitted.
+    """
+    if _mavutil is None:
+        return JSONResponse({"error": "pymavlink is not installed on this server"}, status_code=501)
+
+    mavlink_url: str = str(payload.get("url") or "").strip()
+    vehicle_id: str = re.sub(r"[^a-zA-Z0-9_-]", "-", str(payload.get("vehicle_id") or "").strip()).strip("-")
+
+    if not mavlink_url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+    if not any(mavlink_url.lower().startswith(p) for p in _VALID_MAVLINK_PREFIXES):
+        return JSONResponse(
+            {"error": f"url must start with one of: {', '.join(_VALID_MAVLINK_PREFIXES)}"},
+            status_code=400,
+        )
+
+    if not vehicle_id:
+        # Derive a stable ID from the URL: tcp:localhost:5760 -> sitl-localhost-5760
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", mavlink_url.split(":", 1)[-1]).strip("-")
+        vehicle_id = f"sitl-{slug}" if slug else f"sitl-{len(sitl_bridges) + 1}"
+
+    existing_task = sitl_bridges.get(vehicle_id)
+    if existing_task and not existing_task.done():
+        return JSONResponse({"error": f"A bridge for '{vehicle_id}' is already running"}, status_code=409)
+
+    task = asyncio.create_task(_run_mavlink_bridge(vehicle_id, mavlink_url))
+    sitl_bridges[vehicle_id] = task
+    return JSONResponse({"ok": True, "vehicle_id": vehicle_id, "url": mavlink_url})
+
+
+@app.delete("/api/sitl/{vehicle_id}")
+async def disconnect_sitl(vehicle_id: str) -> JSONResponse:
+    """Cancel and remove a SITL bridge connection."""
+    task = sitl_bridges.get(vehicle_id)
+    if not task:
+        return JSONResponse({"error": "Bridge not found"}, status_code=404)
+    task.cancel()
+    sitl_bridges.pop(vehicle_id, None)
+    sitl_bridge_info.pop(vehicle_id, None)
+    vehicle_queues.pop(vehicle_id, None)
+    await broadcast_ui({"op": "sitl_bridge_removed", "vehicle_id": vehicle_id})
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# SITL bridge async task
+# ---------------------------------------------------------------------------
+
+async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float = 10.0) -> None:
+    """Asyncio task: connect to a MAVLink endpoint, detect frame type, and
+    stream telemetry into the ground station while forwarding commands back.
+
+    All blocking MAVLink I/O runs in a dedicated daemon thread so recv_match
+    uses blocking=True (zero poll delay).  Messages arrive in a thread-safe
+    queue and are drained in batches by the asyncio side.
+    """
+    info: dict[str, Any] = {
+        "vehicle_id": vehicle_id,
+        "url": mavlink_url,
+        "status": "connecting",
+        "frame": None,
+        "autopilot": None,
+        "vehicle_type": "uav",
+        "error": None,
+    }
+    sitl_bridge_info[vehicle_id] = info
+
+    # Command queue registered so route_command can deliver waypoints / RTB
+    cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    vehicle_queues[vehicle_id] = cmd_queue
+
+    await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+
+    master = None
+    _stop = threading.Event()
+    _inbound: _stdlib_queue.Queue[tuple[str, Any, float]] = _stdlib_queue.Queue(maxsize=500)
+    _outbound: _stdlib_queue.Queue[dict[str, Any]] = _stdlib_queue.Queue(maxsize=100)
+
+    try:
+        print(f"[SITL] Connecting {vehicle_id} -> {mavlink_url}")
+
+        def _connect_blocking():
+            m = _mavutil.mavlink_connection(mavlink_url, source_system=255)
+            m.wait_heartbeat(timeout=30)
+            return m
+
+        try:
+            master = await asyncio.wait_for(asyncio.to_thread(_connect_blocking), timeout=35.0)
+        except (asyncio.TimeoutError, Exception) as exc:
+            info["status"] = "error"
+            info["error"] = f"Connection failed: {exc}"
+            print(f"[SITL] {vehicle_id}: {info['error']}")
+            await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+            return
+
+        # Determine vehicle type and frame from the received heartbeat
+        hb = master.messages.get("HEARTBEAT")
+        if hb:
+            mav_type: int = int(hb.type)
+            autopilot_id: int = int(hb.autopilot)
+            vehicle_type, frame_name = _MAV_TYPE_MAP.get(mav_type, ("uav", f"MAV_TYPE {mav_type}"))
+            autopilot_name = _MAV_AUTOPILOT_NAMES.get(autopilot_id, f"Autopilot {autopilot_id}")
+            info["frame"] = frame_name
+            info["autopilot"] = autopilot_name
+            info["vehicle_type"] = vehicle_type
+            print(f"[SITL] {vehicle_id}: frame={frame_name}, autopilot={autopilot_name}, type={vehicle_type}")
+        else:
+            info["vehicle_type"] = "uav"
+
+        info["status"] = "connected"
+        info["error"] = None
+        await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+
+        # Request position stream at the target Hz and battery at 2 Hz
+        for stream_id, hz in [
+            (_mavutil.mavlink.MAV_DATA_STREAM_POSITION, int(send_hz)),
+            (_mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 2),
+        ]:
+            await asyncio.to_thread(
+                lambda sid=stream_id, h=hz: master.mav.request_data_stream_send(
+                    master.target_system, master.target_component, sid, h, 1
+                )
+            )
+
+        # ------------------------------------------------------------------ #
+        # Dedicated MAVLink I/O thread                                        #
+        # Uses blocking=True so there is zero poll delay and no              #
+        # asyncio.to_thread overhead per message in steady state.            #
+        # ------------------------------------------------------------------ #
+        def _io_thread(m: Any) -> None:
+            min_pos_interval = 1.0 / send_hz
+            last_pos_time = 0.0
+
+            while not _stop.is_set():
+                # Forward any outbound commands queued by the asyncio side
+                while True:
+                    try:
+                        _handle_sitl_command(m, _outbound.get_nowait())
+                    except _stdlib_queue.Empty:
+                        break
+
+                # Pause telemetry reads while a SAR mission holds the connection
+                # (mission executor calls recv_match for ACKs — must not race)
+                if _sar_active.is_set():
+                    time.sleep(0.05)
+                    continue
+
+                # Blocking read — wakes up as soon as a message arrives
+                msg = m.recv_match(
+                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS"],
+                    blocking=True,
+                    timeout=0.1,
+                )
+                if msg is None:
+                    continue
+
+                msg_type = msg.get_type()
+                now = time.time()
+
+                # Rate-limit position messages to avoid overwhelming the UI
+                if msg_type == "GLOBAL_POSITION_INT":
+                    if now - last_pos_time < min_pos_interval:
+                        continue
+                    last_pos_time = now
+
+                try:
+                    _inbound.put_nowait((msg_type, msg, now))
+                except _stdlib_queue.Full:
+                    pass  # drop under extreme back-pressure
+
+        # Event that SAR mission threads set while they hold the MAVLink
+        # connection for mission upload/arm/start.  The IO thread checks this
+        # before calling recv_match so the two never race on ACK messages.
+        _sar_active = threading.Event()
+
+        io_thread = threading.Thread(target=_io_thread, args=(master,), daemon=True)
+        io_thread.start()
+
+        last_battery_pct: Optional[float] = None
+
+        while True:
+            # Route asyncio command queue -> IO thread or SAR mission thread
+            while not cmd_queue.empty():
+                try:
+                    payload = cmd_queue.get_nowait()
+                    cmd_type = payload.get("command", {}).get("type")
+                    if cmd_type in ("search_grid", "mob"):
+                        # SAR missions need exclusive MAVLink access; run in a
+                        # dedicated thread and signal the IO thread to pause.
+                        _loop = asyncio.get_event_loop()
+                        def _run_sar(p: dict[str, Any] = payload) -> None:
+                            _sar_active.set()
+                            try:
+                                _execute_sar_command(master, p)
+                            except Exception as exc:
+                                print(f"[SITL][SAR] Unhandled error: {exc}")
+                            finally:
+                                _sar_active.clear()
+                        threading.Thread(target=_run_sar, daemon=True).start()
+                    else:
+                        _outbound.put_nowait(payload)
+                except (_stdlib_queue.Full, asyncio.QueueEmpty):
+                    break
+
+            # Drain all messages that arrived since last iteration
+            processed = 0
+            while processed < 32:  # cap per cycle to stay fair to event loop
+                try:
+                    msg_type, msg, now = _inbound.get_nowait()
+                except _stdlib_queue.Empty:
+                    break
+                processed += 1
+
+                if msg_type == "SYS_STATUS":
+                    raw = msg.battery_remaining
+                    if raw >= 0:
+                        last_battery_pct = raw / 100.0
+
+                elif msg_type == "BATTERY_STATUS":
+                    if msg.battery_remaining >= 0:
+                        last_battery_pct = msg.battery_remaining / 100.0
+
+                elif msg_type == "GLOBAL_POSITION_INT":
+                    lat = msg.lat / 1e7
+                    lon = msg.lon / 1e7
+                    alt = msg.relative_alt / 1000.0
+                    hdg = getattr(msg, "hdg", None)
+                    heading = (hdg / 100.0) if hdg is not None and hdg != 0 else None
+
+                    nav_msg: dict[str, Any] = {
+                        "header": {
+                            "stamp": {"sec": int(now), "nanosec": int((now % 1) * 1e9)},
+                            "frame_id": "map",
+                        },
+                        "status": {"status": 0, "service": 1},
+                        "latitude": lat,
+                        "longitude": lon,
+                        "altitude": alt,
+                        "position_covariance": [0.0] * 9,
+                        "position_covariance_type": 0,
+                    }
+                    if heading is not None:
+                        nav_msg["heading"] = heading
+
+                    await ingest_vehicle_message({
+                        "vehicle_id": vehicle_id,
+                        "vehicle_type": info["vehicle_type"],
+                        "topic": f"/vehicles/{vehicle_id}/navsatfix",
+                        "type": "sensor_msgs/msg/NavSatFix",
+                        "stamp": now,
+                        "msg": nav_msg,
+                    })
+
+                    if last_battery_pct is not None:
+                        await ingest_vehicle_message({
+                            "vehicle_id": vehicle_id,
+                            "vehicle_type": info["vehicle_type"],
+                            "topic": f"/vehicles/{vehicle_id}/battery",
+                            "type": "sensor_msgs/msg/BatteryState",
+                            "stamp": now,
+                            "msg": {"percentage": last_battery_pct},
+                        })
+
+            # Yield to event loop; shorter sleep when actively draining data
+            await asyncio.sleep(0.0 if processed else 0.02)
+
+    except asyncio.CancelledError:
+        print(f"[SITL] Bridge for {vehicle_id} cancelled")
+    except Exception as exc:
+        info["status"] = "error"
+        info["error"] = str(exc)
+        print(f"[SITL] Bridge error for {vehicle_id}: {exc}")
+        await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+    finally:
+        _stop.set()
+        vehicle_queues.pop(vehicle_id, None)
+        if info.get("status") == "connected":
+            info["status"] = "disconnected"
+            await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+        async with state_lock:
+            if vehicle_id in vehicles:
+                vehicles[vehicle_id]["connected"] = False
+        await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+
+
+def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
+    """Blocking: run a SAR mission (search_grid or mob) in the calling thread.
+
+    Must be called from a dedicated thread that holds the MAVLink connection
+    exclusively (IO thread paused via _sar_active event).
+    """
+    if _sar_missions is None:
+        print("[SITL][SAR] sar_missions not available — ignoring SAR command")
+        return
+    command = cmd_payload.get("command", {})
+    cmd_type = command.get("type")
+
+    if cmd_type == "search_grid":
+        lat = command.get("lat")
+        lon = command.get("lon")
+        grid_size_m = float(command.get("grid_size_m", 200))
+        swath_m = float(command.get("swath_m", 20))
+        altitude_m = float(command.get("altitude_m", 30))
+        if lat is None or lon is None:
+            print("[SITL][SAR] search_grid command missing lat/lon")
+            return
+        print(f"[SITL][SAR] Launching search grid at ({lat}, {lon}), {grid_size_m}m grid")
+        ok = _sar_missions.execute_search_grid(
+            master,
+            float(lat), float(lon),
+            grid_size_m, swath_m, altitude_m,
+            include_takeoff=True,
+            takeoff_altitude_m=30.0,
+            climb_speed_ms=8.0,
+        )
+        print(f"[SITL][SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
+
+    elif cmd_type == "mob":
+        track_points = command.get("track_points", [])
+        corridor_half_width_m = float(command.get("corridor_half_width_m", 50.0))
+        swath_m = float(command.get("swath_m", 20.0))
+        altitude_m = float(command.get("altitude_m", 30.0))
+        takeoff_altitude_m = float(command.get("takeoff_altitude_m", 30.0))
+        climb_speed_ms = float(command.get("climb_speed_ms", 8.0))
+        if len(track_points) < 2:
+            print(f"[SITL][SAR] MOB command needs at least 2 track points, got {len(track_points)}")
+            return
+        print(f"[SITL][SAR] MAN OVERBOARD — launching search on {len(track_points)}-point track")
+        ok = _sar_missions.execute_mob_search(
+            master, track_points,
+            corridor_half_width_m=corridor_half_width_m,
+            swath_m=swath_m,
+            altitude_m=altitude_m,
+            takeoff_altitude_m=takeoff_altitude_m,
+            climb_speed_ms=climb_speed_ms,
+            include_takeoff=True,
+        )
+        print(f"[SITL][SAR] MOB search mission {'STARTED' if ok else 'FAILED'}")
+
+
+def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
+    """Blocking: translate a ground-station command into MAVLink and send it."""
+    if _mavutil is None:
+        return
+    command = cmd_payload.get("command", {})
+    cmd_type = command.get("type")
+
+    if cmd_type == "waypoint":
+        target = command.get("target", {})
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        alt = float(target.get("altitude") or 30.0)
+        if lat is not None and lon is not None:
+            master.mav.set_position_target_global_int_send(
+                0,
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                int(0b110111111000),
+                int(float(lat) * 1e7),
+                int(float(lon) * 1e7),
+                alt,
+                0, 0, 0,
+                0, 0, 0,
+                0, 0,
+            )
+
+    elif cmd_type == "rtb":
+        try:
+            master.set_mode("RTL")
+        except Exception:
+            # Fallback: send RTL via command long
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            )
 
 
 @app.get("/api/vehicles")
@@ -195,14 +648,34 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                 return JSONResponse({"error": f"Vehicle '{requested_id}' not found"}, status_code=404)
             target_vehicle_id = requested_id
         else:
-            target = next(
-                (v for v in vehicles.values()
-                 if v.get("vehicle_type") != "yp" and v.get("connected")),
-                None,
+            # Prefer UAV SITL bridges first, then any SITL bridge, then hardware
+            # bridges (non-sim- prefix), then any non-YP vehicle as fallback.
+            target = (
+                next(
+                    (v for v in vehicles.values()
+                     if v.get("vehicle_type") == "uav"
+                     and v.get("connected")
+                     and v["vehicle_id"] in sitl_bridges),
+                    None,
+                )
+                or next(
+                    (v for v in vehicles.values()
+                     if v.get("vehicle_type") != "yp"
+                     and v.get("connected")
+                     and v["vehicle_id"] in sitl_bridges),
+                    None,
+                )
+                or next(
+                    (v for v in vehicles.values()
+                     if v.get("vehicle_type") != "yp"
+                     and v.get("connected")
+                     and not v["vehicle_id"].startswith("sim-")),
+                    None,
+                )
             )
             if not target:
                 return JSONResponse(
-                    {"error": "No available connected vehicle for MOB search"},
+                    {"error": "No available SITL or hardware vehicle for MOB search. Connect a SITL bridge first."},
                     status_code=409,
                 )
             target_vehicle_id = target["vehicle_id"]
@@ -647,9 +1120,57 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     await broadcast_ros(topic, msg, msg_type)
 
 
+def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]]:
+    """Return [[lat, lon], ...] waypoint pairs for the SAR flight path, or []."""
+    if _sar_missions is None:
+        return []
+    command = cmd_payload.get("command", cmd_payload)
+    cmd_type = command.get("type")
+    try:
+        if cmd_type == "search_grid":
+            lat = command.get("lat")
+            lon = command.get("lon")
+            if lat is None or lon is None:
+                return []
+            wps = _sar_missions.calculate_search_grid_waypoints(
+                float(lat), float(lon),
+                float(command.get("grid_size_m", 200)),
+                float(command.get("swath_m", 20)),
+                float(command.get("altitude_m", 30)),
+            )
+        elif cmd_type == "mob":
+            track_points = command.get("track_points", [])
+            if len(track_points) < 2:
+                return []
+            wps = _sar_missions.calculate_mob_waypoints(
+                track_points,
+                float(command.get("corridor_half_width_m", 50.0)),
+                float(command.get("swath_m", 20.0)),
+                float(command.get("altitude_m", 30.0)),
+            )
+        else:
+            return []
+        return [[float(wp[0]), float(wp[1])] for wp in wps]
+    except Exception as exc:
+        print(f"[SAR] Pattern compute error: {exc}")
+        return []
+
+
 async def route_command(vehicle_id: Optional[str], command: dict[str, Any], source: str) -> None:
     if not vehicle_id:
         return
+
+    # Broadcast SAR flight-path pattern to the UI before dispatching
+    if command.get("type") in ("search_grid", "mob"):
+        pattern_pts = _compute_sar_pattern_points({"command": command})
+        if pattern_pts:
+            await broadcast_ui({
+                "op": "sar_pattern",
+                "vehicle_id": vehicle_id,
+                "pattern_type": command["type"],
+                "waypoints": pattern_pts,
+            })
+
     payload = {
         "op": "command",
         "vehicle_id": vehicle_id,

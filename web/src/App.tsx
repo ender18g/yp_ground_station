@@ -3,17 +3,23 @@ import {
   AlertTriangle,
   Battery,
   Brush,
+  Cable,
+  CheckCircle2,
+  CircleDashed,
   Crosshair,
   EthernetPort,
   Grid3X3,
   Layers,
+  Loader2,
   LocateFixed,
   Maximize2,
   MessageSquare,
+  Plus,
   RotateCcw,
   Route,
   Settings,
   Ship,
+  Trash2,
   Video,
   Wifi,
   WifiOff,
@@ -22,7 +28,8 @@ import {
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { fetchSettings, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
+import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
+import type { SITLBridge } from "./api";
 import type { Command, Vehicle, VehicleType } from "./types";
 
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
@@ -106,6 +113,10 @@ export function App() {
   const [waypointMarkers, setWaypointMarkers] = useState<Record<string, WaypointMarker>>({});
   const [mobModalOpen, setMobModalOpen] = useState(false);
   const [mobSending, setMobSending] = useState(false);
+  const [mobError, setMobError] = useState<string | null>(null);
+  const [showSITL, setShowSITL] = useState(false);
+  const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
+  const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
@@ -149,6 +160,33 @@ export function App() {
         if (payload.op === "command_ack") {
           setMessageLog((current) => [streamMessageFromCommandAck(payload), ...current].slice(0, MAX_MESSAGE_LOG));
         }
+        if (payload.op === "sitl_bridge_update") {
+          const bridge = payload.bridge as SITLBridge;
+          setSitlBridges((current) => ({ ...current, [bridge.vehicle_id]: bridge }));
+        }
+        if (payload.op === "sitl_bridge_removed") {
+          setSitlBridges((current) => {
+            const next = { ...current };
+            delete next[payload.vehicle_id as string];
+            return next;
+          });
+        }
+        if (payload.op === "sar_pattern") {
+          setSarPatterns((current) => ({
+            ...current,
+            [payload.vehicle_id as string]: {
+              patternType: payload.pattern_type as string,
+              waypoints: payload.waypoints as [number, number][],
+            },
+          }));
+        }
+        if (payload.op === "sar_pattern_cleared") {
+          setSarPatterns((current) => {
+            const next = { ...current };
+            delete next[payload.vehicle_id as string];
+            return next;
+          });
+        }
         if (payload.op === "vehicle_disconnected") {
           setVehicles((current) => ({
             ...current,
@@ -166,6 +204,16 @@ export function App() {
       window.clearTimeout(retry);
       wsRef.current?.close();
     };
+  }, []);
+
+  // Load existing SITL bridges on mount (in case server already has active bridges)
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    listSITLBridges()
+      .then((bridges) =>
+        setSitlBridges(Object.fromEntries(bridges.map((b) => [b.vehicle_id, b])))
+      )
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -255,31 +303,37 @@ export function App() {
   };
 
   const handleMobConfirm = async () => {
-  setMobSending(true);
-  try {
-    const result = await triggerMOB();
-    const vehicleId = result.vehicle_id ?? "unknown";
+    setMobSending(true);
+    setMobError(null);
+    try {
+      const result = await triggerMOB();
+      const vehicleId = result.vehicle_id ?? "unknown";
 
-    const mobMessage: StreamMessage = {
-      id: `mob-${Date.now()}`,
-      receivedAt: Date.now(),
-      vehicle_id: vehicleId,
-      vehicle_type: "uav",
-      topic: `/vehicles/${vehicleId}/commands`,
-      type: "yp_ground_station/MOBTriggered",
-      stamp: Date.now() / 1000,
-      msg: result.ok
-        ? { status: "dispatched", vehicle_id: vehicleId }
-        : { status: "failed", error: result.error },
-    };
+      const mobMessage: StreamMessage = {
+        id: `mob-${Date.now()}`,
+        receivedAt: Date.now(),
+        vehicle_id: vehicleId,
+        vehicle_type: "uav",
+        topic: `/vehicles/${vehicleId}/commands`,
+        type: "yp_ground_station/MOBTriggered",
+        stamp: Date.now() / 1000,
+        msg: result.ok
+          ? { status: "dispatched", vehicle_id: vehicleId }
+          : { status: "failed", error: result.error },
+      };
 
-    setMessageLog((current) => [mobMessage, ...current].slice(0, MAX_MESSAGE_LOG));
-  } catch {
-    // swallow — error already logged via message log above
-  }
-  setMobSending(false);
-  setMobModalOpen(false);
-};
+      setMessageLog((current) => [mobMessage, ...current].slice(0, MAX_MESSAGE_LOG));
+
+      if (result.ok) {
+        setMobModalOpen(false);
+      } else {
+        setMobError(result.error ?? "Dispatch failed");
+      }
+    } catch (err) {
+      setMobError(err instanceof Error ? err.message : "Network error");
+    }
+    setMobSending(false);
+  };
 
   const sendAllToMapPoint = (lat: number, lon: number) => {
     const commandableVehicles = vehicleList.filter((candidate) => candidate.vehicle_type !== "yp");
@@ -321,6 +375,16 @@ export function App() {
         <FollowYpCenter yp={yp} enabled={followYp} />
         <FitAllControl vehicles={vehicleList} />
         {showYpRangeRings && <YpRangeRings yp={yp} />}
+        {(Object.entries(sarPatterns) as Array<[string, { patternType: string; waypoints: [number, number][] }]>).map(([vehicleId, pattern]) => (
+          <SarPatternOverlay
+            key={vehicleId}
+            vehicleId={vehicleId}
+            patternType={pattern.patternType}
+            waypoints={pattern.waypoints}
+            color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
+            onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
+          />
+        ))}
         {Object.values(waypointMarkers).map((waypoint) => (
           <WaypointCrosshair
             key={waypoint.vehicle_id}
@@ -400,7 +464,18 @@ export function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button" title="Settings" onClick={() => setShowSettings((value) => !value)}>
+          <button
+            className={showSITL ? "icon-button active" : "icon-button"}
+            title="SITL connections"
+            onClick={() => { setShowSITL((v) => !v); setShowSettings(false); }}
+          >
+            <Cable size={19} />
+          </button>
+          <button
+            className={showSettings ? "icon-button active" : "icon-button"}
+            title="Settings"
+            onClick={() => { setShowSettings((value) => !value); setShowSITL(false); }}
+          >
             <Settings size={19} />
           </button>
           <button className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
@@ -408,6 +483,31 @@ export function App() {
           </button>
         </div>
       </div>
+
+      {showSITL && !DEMO_MODE && (
+        <SITLPanel
+          bridges={sitlBridges}
+          onConnect={(url, vehicleId) =>
+            connectSITL(url, vehicleId || undefined)
+              .then((result) => {
+                if (!result.ok) return;
+                // Bridge info arrives via sitl_bridge_update WS op
+              })
+              .catch(() => undefined)
+          }
+          onDisconnect={(vehicleId) =>
+            disconnectSITL(vehicleId)
+              .then(() =>
+                setSitlBridges((current) => {
+                  const next = { ...current };
+                  delete next[vehicleId];
+                  return next;
+                })
+              )
+              .catch(() => undefined)
+          }
+        />
+      )}
 
       {showSettings && (
         <div className="settings-panel">
@@ -504,10 +604,15 @@ export function App() {
               This will immediately dispatch the nearest available vehicle to search
               the YP vessel&apos;s recent track. Confirm only if a person is overboard.
             </div>
+            {mobError && (
+              <div className="mob-modal-error">
+                <AlertTriangle size={14} /> {mobError}
+              </div>
+            )}
             <div className="mob-modal-actions">
               <button
                 className="mob-cancel-btn"
-                onClick={() => setMobModalOpen(false)}
+                onClick={() => { setMobModalOpen(false); setMobError(null); }}
                 disabled={mobSending}
               >
                 Cancel
@@ -679,6 +784,126 @@ function isPhoneBrowser(): boolean {
     return userAgentData.mobile;
   }
   return /iPhone|iPod|Android.*Mobile|Windows Phone|Mobi/i.test(navigator.userAgent);
+}
+
+function SITLPanel({
+  bridges,
+  onConnect,
+  onDisconnect,
+}: {
+  bridges: Record<string, SITLBridge>;
+  onConnect: (url: string, vehicleId: string) => void;
+  onDisconnect: (vehicleId: string) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [vehicleId, setVehicleId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+
+  const handleConnect = async () => {
+    const trimUrl = url.trim();
+    if (!trimUrl) {
+      setError("MAVLink URL is required");
+      return;
+    }
+    const validPrefixes = ["tcp:", "tcpin:", "tcpout:", "udpin:", "udpout:", "udpbcast:", "serial:"];
+    if (!validPrefixes.some((p) => trimUrl.toLowerCase().startsWith(p))) {
+      setError(`URL must start with: ${validPrefixes.join(", ")}`);
+      return;
+    }
+    setError(null);
+    setConnecting(true);
+    const result = await connectSITL(trimUrl, vehicleId.trim() || undefined).catch((e) => ({
+      ok: false as const,
+      error: String(e),
+    }));
+    setConnecting(false);
+    if (!result.ok) {
+      setError(result.error ?? "Connection failed");
+    } else {
+      setUrl("");
+      setVehicleId("");
+    }
+  };
+
+  const bridgeList = Object.values(bridges);
+
+  return (
+    <div className="sitl-panel">
+      <div className="panel-title">
+        <Cable size={17} />
+        <strong>SITL Connections</strong>
+      </div>
+
+      <div className="sitl-form">
+        <label className="sitl-field-label">MAVLink URL</label>
+        <input
+          className="sitl-input"
+          type="text"
+          placeholder="tcp:localhost:5760"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !connecting && handleConnect()}
+          spellCheck={false}
+        />
+        <label className="sitl-field-label">Vehicle ID <span className="sitl-optional">(optional)</span></label>
+        <input
+          className="sitl-input"
+          type="text"
+          placeholder="auto-generated from URL"
+          value={vehicleId}
+          onChange={(e) => setVehicleId(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !connecting && handleConnect()}
+          spellCheck={false}
+        />
+        {error && <div className="sitl-error">{error}</div>}
+        <button className="sitl-connect-btn" onClick={handleConnect} disabled={connecting}>
+          {connecting ? <Loader2 size={15} className="sitl-spin" /> : <Plus size={15} />}
+          {connecting ? "Connecting…" : "Connect"}
+        </button>
+      </div>
+
+      {bridgeList.length > 0 && (
+        <div className="sitl-bridge-list">
+          {bridgeList.map((bridge) => (
+            <div key={bridge.vehicle_id} className={`sitl-bridge-row sitl-status-${bridge.status}`}>
+              <div className="sitl-bridge-icon">
+                {bridge.status === "connected" && <CheckCircle2 size={15} />}
+                {bridge.status === "connecting" && <Loader2 size={15} className="sitl-spin" />}
+                {bridge.status === "error" && <CircleDashed size={15} />}
+                {bridge.status === "disconnected" && <CircleDashed size={15} />}
+              </div>
+              <div className="sitl-bridge-info">
+                <strong>{bridge.vehicle_id}</strong>
+                <span className="sitl-bridge-meta">
+                  {bridge.frame ? `${bridge.frame}` : bridge.url}
+                  {bridge.autopilot ? ` · ${bridge.autopilot}` : ""}
+                </span>
+                {bridge.status === "error" && bridge.error && (
+                  <span className="sitl-bridge-error">{bridge.error}</span>
+                )}
+              </div>
+              <button
+                className="sitl-disconnect-btn"
+                title="Disconnect"
+                onClick={() => onDisconnect(bridge.vehicle_id)}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {bridgeList.length === 0 && (
+        <div className="sitl-empty">No active connections. Enter a MAVLink URL above to connect a SITL instance.</div>
+      )}
+
+      <div className="sitl-hint">
+        Examples: <code>tcp:localhost:5760</code> · <code>udpin:0.0.0.0:14551</code>
+      </div>
+    </div>
+  );
 }
 
 function MapMenu({
@@ -1142,6 +1367,52 @@ function YpRangeRings({ yp }: { yp?: Vehicle }) {
           interactive={false}
         />
       ))}
+    </>
+  );
+}
+
+function SarPatternOverlay({
+  vehicleId,
+  patternType,
+  waypoints,
+  color,
+  onClear,
+}: {
+  vehicleId: string;
+  patternType: string;
+  waypoints: [number, number][];
+  color: string;
+  onClear: () => void;
+}) {
+  if (waypoints.length < 2) return null;
+  const label = patternType === "mob" ? "MOB Search" : "Grid Search";
+  return (
+    <>
+      <Polyline
+        positions={waypoints}
+        pathOptions={{ color, weight: 2, opacity: 0.85, dashArray: "6 4" }}
+      />
+      <CircleMarker
+        center={waypoints[0]}
+        radius={6}
+        pathOptions={{ color, fillColor: color, fillOpacity: 1, weight: 1.5 }}
+      >
+        <Tooltip permanent direction="top" offset={[0, -8]} className="sar-label-tooltip">
+          {label} — {vehicleId}
+        </Tooltip>
+        <Popup className="sar-clear-popup">
+          <div className="sar-clear-popup-inner">
+            <span>{label}</span>
+            <span className="sar-clear-popup-vehicle">{vehicleId}</span>
+            <button className="sar-clear-btn" onClick={onClear}>Clear pattern</button>
+          </div>
+        </Popup>
+      </CircleMarker>
+      <CircleMarker
+        center={waypoints[waypoints.length - 1]}
+        radius={4}
+        pathOptions={{ color, fillColor: "#fff", fillOpacity: 1, weight: 2 }}
+      />
     </>
   );
 }

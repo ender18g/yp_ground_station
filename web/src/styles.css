@@ -1257,6 +1257,84 @@ input {
   line-height: 1.55;
 }
 
+.mob-modal-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* SAR pattern label tooltip */
+.sar-label-tooltip {
+  background: rgba(15, 23, 42, 0.88) !important;
+  border: none !important;
+  border-radius: 4px !important;
+  color: #f1f5f9 !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+  padding: 3px 7px !important;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+}
+.sar-label-tooltip::before {
+  display: none !important;
+}
+
+/* SAR pattern clear popup */
+.sar-clear-popup .leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.sar-clear-popup .leaflet-popup-content {
+  margin: 0;
+}
+.sar-clear-popup .leaflet-popup-tip-container {
+  display: none;
+}
+.sar-clear-popup-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px 12px;
+  min-width: 160px;
+}
+.sar-clear-popup-inner span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.3;
+}
+.sar-clear-popup-vehicle {
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  color: #64748b !important;
+  margin-bottom: 4px;
+}
+.sar-clear-btn {
+  margin-top: 2px;
+  padding: 5px 10px;
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.sar-clear-btn:hover {
+  background: #dc2626;
+}
+
 .mob-modal-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1356,4 +1434,220 @@ input {
 
 .search-grid-launch-btn:hover {
   background: #1d4ed8;
+}
+
+/* -------------------------------------------------------------------------
+ * Active state for icon buttons (SITL / Settings toggle)
+ * ---------------------------------------------------------------------- */
+.icon-button.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+/* -------------------------------------------------------------------------
+ * SITL connection panel
+ * ---------------------------------------------------------------------- */
+.sitl-panel {
+  position: absolute;
+  z-index: 900;
+  top: 72px;
+  right: 16px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.18);
+  backdrop-filter: blur(10px);
+  display: grid;
+  gap: 10px;
+}
+
+.sitl-form {
+  display: grid;
+  gap: 6px;
+}
+
+.sitl-field-label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sitl-optional {
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.sitl-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #14202b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.sitl-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.sitl-error {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #b42318;
+  font-size: 12px;
+}
+
+.sitl-connect-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  margin-top: 4px;
+  border: none;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  transition: background 0.15s;
+}
+
+.sitl-connect-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.sitl-connect-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.sitl-bridge-list {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 10px;
+}
+
+.sitl-bridge-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.sitl-bridge-row.sitl-status-connected {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.sitl-bridge-row.sitl-status-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.sitl-bridge-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #64748b;
+}
+
+.sitl-status-connected .sitl-bridge-icon {
+  color: #16a34a;
+}
+
+.sitl-status-connecting .sitl-bridge-icon {
+  color: #2563eb;
+}
+
+.sitl-status-error .sitl-bridge-icon {
+  color: #dc2626;
+}
+
+.sitl-bridge-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.sitl-bridge-info strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sitl-bridge-meta {
+  color: #64748b;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sitl-bridge-error {
+  color: #b42318;
+  font-size: 11px;
+}
+
+.sitl-disconnect-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.sitl-disconnect-btn:hover {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.sitl-empty {
+  color: #94a3b8;
+  font-size: 12px;
+  text-align: center;
+  padding: 6px 0;
+}
+
+.sitl-hint {
+  border-top: 1px solid #e2e8f0;
+  color: #94a3b8;
+  font-size: 11px;
+  padding-top: 8px;
+}
+
+.sitl-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #475569;
+}
+
+@keyframes sitl-spin {
+  to { transform: rotate(360deg); }
+}
+
+.sitl-spin {
+  animation: sitl-spin 1s linear infinite;
 }

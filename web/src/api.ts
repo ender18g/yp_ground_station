@@ -64,3 +64,48 @@ export async function triggerMOB(vehicleId?: string): Promise<MobResult> {
   }
   return response.json();
 }
+
+// ---------------------------------------------------------------------------
+// SITL bridge API
+// ---------------------------------------------------------------------------
+
+export interface SITLBridge {
+  vehicle_id: string;
+  url: string;
+  status: "connecting" | "connected" | "error" | "disconnected";
+  frame: string | null;
+  autopilot: string | null;
+  vehicle_type: string;
+  error: string | null;
+}
+
+export interface ConnectSITLResult {
+  ok: boolean;
+  vehicle_id?: string;
+  url?: string;
+  error?: string;
+}
+
+export async function listSITLBridges(): Promise<SITLBridge[]> {
+  const response = await fetch("/api/sitl");
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.bridges ?? [];
+}
+
+export async function connectSITL(url: string, vehicleId?: string): Promise<ConnectSITLResult> {
+  const body: Record<string, string> = { url };
+  if (vehicleId) body.vehicle_id = vehicleId;
+  const response = await fetch("/api/sitl", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  if (!response.ok) return { ok: false, error: data.error ?? `HTTP ${response.status}` };
+  return data;
+}
+
+export async function disconnectSITL(vehicleId: string): Promise<void> {
+  await fetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, { method: "DELETE" });
+}
