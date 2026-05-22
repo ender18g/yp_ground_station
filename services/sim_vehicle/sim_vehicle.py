@@ -38,6 +38,7 @@ class VehicleSim:
         self.local_x = 0.0
         self.local_y = 0.0
         self.last_step = time.time()
+        self.mission_waypoints: list[dict[str, float]] = []
 
     def random_target(self) -> dict[str, float]:
         return {
@@ -51,9 +52,11 @@ class VehicleSim:
         command_type = command_body.get("type")
         if command_type == "rtb":
             self.mode = "rtb"
+            self.mission_waypoints = []
             self.target = {"latitude": HOME_LAT, "longitude": HOME_LON, "altitude": HOME_ALT}
         elif command_type == "waypoint":
             self.mode = "waypoint"
+            self.mission_waypoints = []
             target = command_body.get("target", {})
             self.target = {
                 "latitude": float(target.get("latitude", self.lat)),
@@ -62,6 +65,16 @@ class VehicleSim:
             }
         elif command_type == "trajectory":
             self.mode = "trajectory"
+        elif command_type in ("search_grid", "mob"):
+            # Server embeds pre-computed waypoints as [[lat, lon, alt], ...]
+            sim_wps = command_body.get("sim_waypoints", [])
+            if sim_wps:
+                self.mission_waypoints = [
+                    {"latitude": float(wp[0]), "longitude": float(wp[1]), "altitude": float(wp[2])}
+                    for wp in sim_wps
+                ]
+                self.mode = "sar_mission"
+                self.target = self.mission_waypoints.pop(0)
 
     def step(self) -> None:
         now = time.time()
@@ -72,6 +85,12 @@ class VehicleSim:
         if distance < max(4.0, SPEED_MPS * dt * 2.0):
             if self.mode == "rtb":
                 self.mode = "hold"
+            elif self.mode == "sar_mission":
+                if self.mission_waypoints:
+                    self.target = self.mission_waypoints.pop(0)
+                else:
+                    self.mode = "loiter"
+                    self.target = self.random_target()
             else:
                 self.target = self.random_target()
                 self.mode = "loiter"

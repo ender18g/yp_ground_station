@@ -651,6 +651,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
             # Prefer UAV SITL bridges first, then any SITL bridge, then hardware
             # bridges (non-sim- prefix), then any non-YP vehicle as fallback.
             target = (
+                # Tier 1 — UAV SITL bridge (best: real ArduPilot MAVLink execution)
                 next(
                     (v for v in vehicles.values()
                      if v.get("vehicle_type") == "uav"
@@ -658,6 +659,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                      and v["vehicle_id"] in sitl_bridges),
                     None,
                 )
+                # Tier 2 — any SITL bridge
                 or next(
                     (v for v in vehicles.values()
                      if v.get("vehicle_type") != "yp"
@@ -665,6 +667,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                      and v["vehicle_id"] in sitl_bridges),
                     None,
                 )
+                # Tier 3 — hardware bridge (non-sim- prefix)
                 or next(
                     (v for v in vehicles.values()
                      if v.get("vehicle_type") != "yp"
@@ -672,10 +675,26 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                      and not v["vehicle_id"].startswith("sim-")),
                     None,
                 )
+                # Tier 4 — sim UAV (visual-only fallback for testing)
+                or next(
+                    (v for v in vehicles.values()
+                     if v.get("vehicle_type") == "uav"
+                     and v.get("connected")
+                     and v["vehicle_id"].startswith("sim-")),
+                    None,
+                )
+                # Tier 5 — any connected non-YP sim vehicle
+                or next(
+                    (v for v in vehicles.values()
+                     if v.get("vehicle_type") != "yp"
+                     and v.get("connected")
+                     and v["vehicle_id"].startswith("sim-")),
+                    None,
+                )
             )
             if not target:
                 return JSONResponse(
-                    {"error": "No available SITL or hardware vehicle for MOB search. Connect a SITL bridge first."},
+                    {"error": "No available vehicle for MOB search. Connect a SITL bridge or ensure sim vehicles are running."},
                     status_code=409,
                 )
             target_vehicle_id = target["vehicle_id"]
@@ -1160,16 +1179,47 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
     if not vehicle_id:
         return
 
+    cmd_type = command.get("type")
+
     # Broadcast SAR flight-path pattern to the UI before dispatching
-    if command.get("type") in ("search_grid", "mob"):
+    if cmd_type in ("search_grid", "mob"):
         pattern_pts = _compute_sar_pattern_points({"command": command})
         if pattern_pts:
             await broadcast_ui({
                 "op": "sar_pattern",
                 "vehicle_id": vehicle_id,
-                "pattern_type": command["type"],
+                "pattern_type": cmd_type,
                 "waypoints": pattern_pts,
             })
+
+        # For sim (WebSocket) vehicles that have no MAVLink, embed the full 3-D
+        # waypoint list so sim_vehicle.py can navigate the pattern visually.
+        if vehicle_id not in sitl_bridges and _sar_missions is not None:
+            command = dict(command)  # shallow copy — don't mutate the caller's dict
+            try:
+                if cmd_type == "search_grid":
+                    lat = command.get("lat")
+                    lon = command.get("lon")
+                    if lat is not None and lon is not None:
+                        wps = _sar_missions.calculate_search_grid_waypoints(
+                            float(lat), float(lon),
+                            float(command.get("grid_size_m", 200)),
+                            float(command.get("swath_m", SAR_SWATH_M)),
+                            float(command.get("altitude_m", SAR_ALTITUDE_M)),
+                        )
+                        command["sim_waypoints"] = [[wp[0], wp[1], wp[2]] for wp in wps]
+                elif cmd_type == "mob":
+                    track_points = command.get("track_points", [])
+                    if len(track_points) >= 2:
+                        wps = _sar_missions.calculate_mob_waypoints(
+                            track_points,
+                            float(command.get("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M)),
+                            float(command.get("swath_m", SAR_SWATH_M)),
+                            float(command.get("altitude_m", SAR_ALTITUDE_M)),
+                        )
+                        command["sim_waypoints"] = [[wp[0], wp[1], wp[2]] for wp in wps]
+            except Exception as exc:
+                print(f"[SAR][sim] Waypoint embed error: {exc}")
 
     payload = {
         "op": "command",
