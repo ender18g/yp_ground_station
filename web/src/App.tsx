@@ -1816,6 +1816,7 @@ function vehicleGlyph(type: VehicleType): string {
 function vehicleColor(type: VehicleType): string {
   return {
     uav: "#dc2626",
+    uavf: "#b91c1c",
     usv: "#16a34a",
     uuv: "#eab308",
     yp: "#6b7280",
@@ -1834,6 +1835,7 @@ function withLocalVehicleColor(vehicle: Vehicle, localColors: Record<string, str
 function vehicleZIndexOffset(type: VehicleType): number {
   return {
     uav: 4000,
+    uavf: 4000,
     yp: 3000,
     usv: 2000,
     uuv: 1000,
