@@ -103,6 +103,7 @@ export function App() {
   const [messageLog, setMessageLog] = useState<StreamMessage[]>([]);
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
   const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
+  const [mapZoom, setMapZoom] = useState(17);
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
@@ -368,6 +369,7 @@ export function App() {
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
       <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
         <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
+        <MapZoomTracker onZoom={setMapZoom} />
         <MapCommander
           onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
         />
@@ -408,6 +410,7 @@ export function App() {
             vehicle={vehicle}
             trailSeconds={trailSeconds}
             isPhoneViewer={isPhoneViewer}
+            mapZoom={mapZoom}
             onClick={() => {
               setMapActionMenu(null);
               if (vehicle.vehicle_type === "yp") {
@@ -1242,11 +1245,13 @@ function VehicleLayer({
   vehicle,
   trailSeconds,
   isPhoneViewer,
+  mapZoom,
   onClick,
 }: {
   vehicle: Vehicle;
   trailSeconds: number;
   isPhoneViewer: boolean;
+  mapZoom: number;
   onClick: () => void;
 }) {
   const position = vehicle.position!;
@@ -1261,7 +1266,7 @@ function VehicleLayer({
       {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color, weight: 3, opacity: 0.75 }} />}
       <Marker
         position={[position.latitude, position.longitude]}
-        icon={vehicleIcon(vehicle, isPhoneViewer)}
+        icon={vehicleIcon(vehicle, isPhoneViewer, mapZoom)}
         zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
         eventHandlers={{
           click: (event) => {
@@ -1304,6 +1309,13 @@ function MapPanTracker({ onManualPan }: { onManualPan: () => void }) {
     dragstart() {
       onManualPan();
     },
+  });
+  return null;
+}
+
+function MapZoomTracker({ onZoom }: { onZoom: (zoom: number) => void }) {
+  useMapEvents({
+    zoomend: (event) => onZoom(event.target.getZoom()),
   });
   return null;
 }
@@ -1998,25 +2010,45 @@ function yawToQuaternion(yawDeg: number): Record<string, number> {
   return { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) };
 }
 
-function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
+function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const type = vehicle.vehicle_type;
   const heading = vehicle.heading ?? 0;
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
   const hasVideo = vehicle.vehicle_type === "usv";
-  const iconScale = isPhoneViewer ? 0.5 : 1;
-  const iconSize: [number, number] = [92 * iconScale, 50 * iconScale];
+  
+  // 1. Define base sizes (width, height)
+  const baseSizes: Record<string, [number, number]> = {
+    yp:  [120, 60],
+    usv: [70, 35],
+    uuv: [60, 30],
+    uav: [50, 50],
+  };
+
+  const baseSize = baseSizes[type] ?? [60, 30];
+
+  // 2. Calculate the exact geographic scale
+  const scale = Math.pow(2, zoom - 17);
+  const phoneScale = isPhoneViewer ? 0.6 : 1;
+  
+  // 3. Compute final pixel dimensions
+  const finalWidth = baseSize[0] * scale * phoneScale;
+  const finalHeight = baseSize[1] * scale * phoneScale;
+  const iconSize: [number, number] = [finalWidth, finalHeight];
+
   return L.divIcon({
-    className: "",
+    className: "", // Keep Leaflet from adding default icon margins
     iconSize,
-    iconAnchor: [iconSize[0] / 2, iconSize[1] / 2],
+    iconAnchor: [finalWidth / 2, finalHeight / 2], // Anchor exactly in the middle
     html: `
-      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}">
-        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg)">
+      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="width: ${finalWidth}px; height: ${finalHeight}px; position: relative;">
+        
+        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg); width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
           ${vehicleGlyph(type)}
         </div>
-        <div class="alt-label">
+        
+        <div class="alt-label" style="position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); white-space: nowrap;">
           ${altitude.toFixed(0)} m
           ${
             hasVideo
@@ -2034,6 +2066,7 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
   });
 }
 
+/*
 function vehicleGlyph(type: VehicleType): string {
   if (type === "yp") {
     return `
@@ -2083,6 +2116,24 @@ function vehicleGlyph(type: VehicleType): string {
     </svg>
   `;
 }
+*/
+
+function vehicleGlyph(type: VehicleType): string {
+  const baseUrl = import.meta.env.BASE_URL;
+  
+  const iconPaths: Record<string, string> = {
+    yp: `${baseUrl}logos/YP.png`,
+    uav: `${baseUrl}logos/MultiRotor.png`,
+    uavf: `${baseUrl}logos/fixedWing.png`,
+    usv: `${baseUrl}logos/USV_orange.png`,
+    uuv: `${baseUrl}logos/UUV.png`,
+  };
+
+  const src = iconPaths[type] ?? iconPaths.uav;
+
+  // Added max-width and max-height for extra CSS containment
+  return `<img src="${src}" alt="${type}" style="max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; pointer-events: none;" />`;
+}
 
 function vehicleColor(type: VehicleType): string {
   return {
@@ -2105,9 +2156,9 @@ function withLocalVehicleColor(vehicle: Vehicle, localColors: Record<string, str
 
 function vehicleZIndexOffset(type: VehicleType): number {
   return {
-    uav: 4000,
-    uavf: 4000,
-    yp: 3000,
+    uav: 1500,
+    uavf: 1500,
+    yp: 4000,
     usv: 2000,
     uuv: 1000,
   }[type];

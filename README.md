@@ -49,6 +49,19 @@ The PX4 profile starts:
 - `rosbridge`: exposes the ROS graph over WebSocket at `ws://localhost:9090`.
 - `px4-yp-bridge`: connects to rosbridge, subscribes to MAVROS telemetry topics, and connects to `yp-server` as vehicle `px4-uav`.
 
+You can now also enable an ArduCopter profile with:
+
+```bash
+docker compose --profile arducopter up --build
+```
+
+That profile starts:
+
+- `arducopter-sitl`: ArduPilot SITL configured to send MAVLink to the listening bridge on UDP port `14600`.
+- `arducopter-bridge`: a direct MAVLink-to-WebSocket bridge that listens on `udpin:0.0.0.0:14600` and forwards `GLOBAL_POSITION_INT` telemetry into `yp-server`.
+
+The first ArduCopter image build may also require internet access for the base SITL image and its dependencies.
+
 The first PX4 image build may take a while and needs internet access to clone PX4, its submodules, and Docker image layers. PX4 submodules are shallow-cloned for speed, with NuttX tags fetched explicitly because PX4's version-generation step reads those tags during the SITL build. The image also applies a small PX4 SITL compatibility patch that keeps the daemon socket alive when startup child processes interrupt `poll()`, and enables MAVLink broadcast on the offboard link so MAVROS can run in a separate Compose container. The SITL binary is built into the image so container startup does not rerun the full PX4 compile. The profile is not part of the normal quick start so day-to-day lightweight simulation still comes up quickly.
 
 ### MAVROS Topics Forwarded

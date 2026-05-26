@@ -56,7 +56,7 @@ services:
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       GPS_MODE: sim
-      VEHICLE_ID: yp
+      VEHICLE_ID: YP689
       HOME_LAT: "38.984764"
       HOME_LON: "-76.478643"
       HOME_ALT: "2.0"
@@ -194,6 +194,33 @@ services:
     depends_on:
       - yp-server
       - rosbridge
+
+  arducopter-bridge:
+    profiles: ["arducopter"]
+    build:
+      context: ./services/arducopter_ws_bridge
+    environment:
+      VEHICLE_ID: arducopter-uav
+      VEHICLE_TYPE: uav
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      MAVLINK_URL: udpin:0.0.0.0:14600
+      SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+  arducopter-sitl:
+    profiles: ["arducopter"]
+    build:
+      context: ./services/arducopter_sitl
+    environment:
+      HOME_LAT: "38.9851"
+      HOME_LON: "-76.47880"
+      HOME_ALT: "45.0"
+      SITL_MODEL: "ArduCopter"
+      SITL_FRAME: "quad"
+      MAVLINK_OUTPUT: "udpclient:arducopter-bridge:14600"
+    depends_on:
+      - arducopter-bridge
 
 volumes:
   influx-data:
