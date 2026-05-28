@@ -811,8 +811,6 @@ input {
 
 .alt-label {
   position: absolute;
-  top: 42px;
-  left: 52px;
   min-width: 42px;
   padding: 2px 5px;
   border: 1px solid rgba(15, 23, 32, 0.12);
@@ -826,8 +824,6 @@ input {
 }
 
 .marker-wrap.phone .alt-label {
-  top: 21px;
-  left: 26px;
   min-width: 21px;
   padding: 1px 3px;
   border-radius: 4px;
