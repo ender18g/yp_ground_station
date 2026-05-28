@@ -96,7 +96,7 @@ _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
     7: ("uav", "Airship"),
     8: ("uav", "Free Balloon"),
     9: ("uav", "Rocket"),
-    10: ("usv", "Ground Rover"),
+    10: ("ugv", "Ground Rover"),
     11: ("usv", "Surface Boat"),
     12: ("uuv", "Submarine"),
     13: ("uav", "Hexarotor"),
@@ -550,6 +550,25 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         lon = target.get("longitude")
         alt = float(target.get("altitude") or 30.0)
         if lat is not None and lon is not None:
+            # Fire-and-forget: set GUIDED mode then arm without waiting for ACKs
+            # so the IO thread is never stalled over a radio link.  ArduPilot
+            # processes MAVLink messages in order, so the position target arrives
+            # after the mode change and arm are applied.
+            mode_mapping = master.mode_mapping()
+            if mode_mapping and "GUIDED" in mode_mapping:
+                master.mav.set_mode_send(
+                    master.target_system,
+                    _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    mode_mapping["GUIDED"],
+                )
+                time.sleep(0.1)
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0, 1, 0, 0, 0, 0, 0, 0,
+            )
+            time.sleep(0.1)
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
@@ -1272,6 +1291,14 @@ async def broadcast_ros(topic: str, msg: dict[str, Any], msg_type: str) -> None:
         ros_connections.pop(websocket, None)
 
 
+def _do_influx_write(point: Any) -> None:
+    """Blocking InfluxDB write — always called from a daemon thread."""
+    try:
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+    except Exception as exc:
+        print(f"Influx write failed: {exc}")
+
+
 def write_influx(payload: dict[str, Any]) -> None:
     if not write_api:
         return
@@ -1287,9 +1314,12 @@ def write_influx(payload: dict[str, Any]) -> None:
             .time(int(float(payload.get("stamp") or time.time()) * 1_000_000_000))
         )
         add_fields(point, payload.get("msg", {}))
-        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
     except Exception as exc:
-        print(f"Influx write failed: {exc}")
+        print(f"Influx point build failed: {exc}")
+        return
+    # Offload the blocking network write to a daemon thread so this function
+    # never stalls the asyncio event loop (or the MAVLink IO thread).
+    threading.Thread(target=_do_influx_write, args=(point,), daemon=True).start()
 
 
 def should_write_influx(payload: dict[str, Any]) -> bool:
@@ -1381,7 +1411,7 @@ def topic_vehicle_id(topic: str) -> Optional[str]:
 
 def infer_vehicle_type(vehicle_id: str) -> str:
     lower = vehicle_id.lower()
-    for candidate in ("uav", "usv", "uuv", "yp"):
+    for candidate in ("uav", "usv", "ugv", "uuv", "yp"):
         if candidate in lower:
             return candidate
     return "uav"
@@ -1389,7 +1419,7 @@ def infer_vehicle_type(vehicle_id: str) -> str:
 
 def normalize_vehicle_type(value: Any) -> str:
     text = str(value or "uav").lower()
-    return text if text in {"uav", "usv", "uuv", "yp"} else "uav"
+    return text if text in {"uav", "usv", "ugv", "uuv", "yp"} else "uav"
 
 
 def extract_navsatfix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, float]]:

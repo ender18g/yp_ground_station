@@ -22,7 +22,7 @@ SEND_HZ = float(os.getenv("SEND_HZ", "5"))
 SPAWN_JITTER_DEG = float(os.getenv("SPAWN_JITTER_DEG", "0.004"))
 TARGET_JITTER_DEG = float(os.getenv("TARGET_JITTER_DEG", "0.006"))
 
-SPEED_MPS = {"uav": 9.0, "usv": 2.8, "uuv": 1.3}.get(VEHICLE_TYPE, 5.0)
+SPEED_MPS = {"uav": 9.0, "usv": 2.8, "ugv": 2.0, "uuv": 1.3}.get(VEHICLE_TYPE, 5.0)
 
 
 class VehicleSim:

@@ -267,6 +267,10 @@ input {
   background: #16a34a;
 }
 
+.vehicle-dot.ugv {
+  background: #b45309;
+}
+
 .vehicle-dot.uuv {
   background: #eab308;
 }
@@ -701,6 +705,10 @@ input {
   color: var(--vehicle-color, #16a34a);
 }
 
+.vehicle-marker.ugv {
+  color: var(--vehicle-color, #b45309);
+}
+
 .vehicle-marker.uuv {
   color: var(--vehicle-color, #eab308);
 }
@@ -945,6 +953,10 @@ input {
 
 .type-chip.usv {
   background: #16a34a;
+}
+
+.type-chip.ugv {
+  background: #b45309;
 }
 
 .type-chip.uuv {

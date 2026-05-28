@@ -1,4 +1,4 @@
-export type VehicleType = "uav" | "uavf" | "usv" | "uuv" | "yp";
+export type VehicleType = "uav" | "uavf" | "usv" | "ugv" | "uuv" | "yp";
 
 export interface Position {
   latitude: number;
