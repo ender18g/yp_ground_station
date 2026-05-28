@@ -24,13 +24,17 @@ import {
   Wifi,
   WifiOff,
   X,
+  Map as MapIcon
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, Suspense, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
 import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
 import type { SITLBridge } from "./api";
 import type { Command, Vehicle, VehicleType } from "./types";
+import { Canvas } from "@react-three/fiber";
+import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/drei";
+
 
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
 const MAX_MESSAGE_LOG = 700;
@@ -44,6 +48,13 @@ const USV_STREAM_URL = `${import.meta.env.BASE_URL}media/usv-stream.mp4`;
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
+
+interface LocalWaypoint {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+}
 
 interface StreamMessage {
   id: string;
@@ -72,22 +83,9 @@ interface WaypointMarker {
 }
 
 const VEHICLE_COLOR_PALETTE = [
-  "#dc2626",
-  "#ef4444",
-  "#f97316",
-  "#f59e0b",
-  "#eab308",
-  "#84cc16",
-  "#16a34a",
-  "#14b8a6",
-  "#06b6d4",
-  "#0ea5e9",
-  "#2563eb",
-  "#4f46e5",
-  "#7c3aed",
-  "#c026d3",
-  "#db2777",
-  "#6b7280",
+  "#dc2626", "#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16",
+  "#16a34a", "#14b8a6", "#06b6d4", "#0ea5e9", "#2563eb", "#4f46e5",
+  "#7c3aed", "#c026d3", "#db2777", "#6b7280",
 ];
 
 export function App() {
@@ -122,6 +120,8 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
   const localVehicleColorsRef = useRef<Record<string, string>>({});
+  
+  const [activeTab, setActiveTab] = useState<"map" | "planner">("map");
 
   useEffect(() => {
     if (!DEMO_MODE || !("serviceWorker" in navigator)) {
@@ -131,9 +131,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE) {
-      return;
-    }
+    if (DEMO_MODE) return;
     let retry: number | undefined;
 
     const connect = () => {
@@ -207,7 +205,6 @@ export function App() {
     };
   }, []);
 
-  // Load existing SITL bridges on mount (in case server already has active bridges)
   useEffect(() => {
     if (DEMO_MODE) return;
     listSITLBridges()
@@ -218,9 +215,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!DEMO_MODE) {
-      return;
-    }
+    if (!DEMO_MODE) return;
     demoSimsRef.current = createDemoVehicles();
     setWaypointMarkers(
       Object.fromEntries(
@@ -246,15 +241,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE) {
-      return;
-    }
+    if (DEMO_MODE) return;
     let cancelled = false;
     fetchSettings()
       .then((serverSettings) => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setMessageRetentionMinutes(Math.round(serverSettings.message_retention_seconds / 60));
         setSettingsLoaded(true);
       })
@@ -265,9 +256,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE || !settingsLoaded) {
-      return;
-    }
+    if (DEMO_MODE || !settingsLoaded) return;
     const timeout = window.setTimeout(() => {
       updateSettings({ message_retention_seconds: messageRetentionMinutes * 60 }).catch(() => undefined);
     }, 350);
@@ -367,62 +356,71 @@ export function App() {
 
   return (
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
-      <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
-        <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
-        <MapZoomTracker onZoom={setMapZoom} />
-        <MapCommander
-          onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
+      
+      {activeTab === "map" ? (
+        <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
+          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
+          <MapZoomTracker onZoom={setMapZoom} />
+          <MapCommander
+            onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
+          />
+          <MapPanTracker onManualPan={() => setFollowYp(false)} />
+          <FollowYpCenter yp={yp} enabled={followYp} />
+          <FitAllControl vehicles={vehicleList} />
+          {showYpRangeRings && <YpRangeRings yp={yp} />}
+          {(Object.entries(sarPatterns) as Array<[string, { patternType: string; waypoints: [number, number][] }]>).map(([vehicleId, pattern]) => (
+            <SarPatternOverlay
+              key={vehicleId}
+              vehicleId={vehicleId}
+              patternType={pattern.patternType}
+              waypoints={pattern.waypoints}
+              color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
+              onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
+            />
+          ))}
+          {Object.values(waypointMarkers).map((waypoint) => (
+            <WaypointCrosshair
+              key={waypoint.vehicle_id}
+              waypoint={waypoint}
+              vehicle={vehicles[waypoint.vehicle_id]}
+              onDragStart={() => {
+                followBeforeWaypointDragRef.current = followYp;
+                setFollowYp(false);
+              }}
+              onMove={(lat, lon) => sendWaypoint(waypoint.vehicle_id, lat, lon)}
+              onDragEnd={() => {
+                if (followBeforeWaypointDragRef.current) {
+                  window.setTimeout(() => setFollowYp(true), 250);
+                }
+              }}
+            />
+          ))}
+          {vehicleList.map((vehicle) => (
+            <VehicleLayer
+              key={vehicle.vehicle_id}
+              vehicle={vehicle}
+              trailSeconds={trailSeconds}
+              isPhoneViewer={isPhoneViewer}
+              mapZoom={mapZoom}
+              onClick={() => {
+                setMapActionMenu(null);
+                if (vehicle.vehicle_type === "yp") {
+                  setFollowYp(true);
+                }
+                setSelected(vehicle);
+              }}
+            />
+          ))}
+        </MapContainer>
+      ) : (
+        <WaypointPlanner 
+           yp={yp} 
+           vehicles={vehicleList.filter(v => v.vehicle_type !== "yp")} 
+           onCommand={command} 
         />
-        <MapPanTracker onManualPan={() => setFollowYp(false)} />
-        <FollowYpCenter yp={yp} enabled={followYp} />
-        <FitAllControl vehicles={vehicleList} />
-        {showYpRangeRings && <YpRangeRings yp={yp} />}
-        {(Object.entries(sarPatterns) as Array<[string, { patternType: string; waypoints: [number, number][] }]>).map(([vehicleId, pattern]) => (
-          <SarPatternOverlay
-            key={vehicleId}
-            vehicleId={vehicleId}
-            patternType={pattern.patternType}
-            waypoints={pattern.waypoints}
-            color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
-            onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
-          />
-        ))}
-        {Object.values(waypointMarkers).map((waypoint) => (
-          <WaypointCrosshair
-            key={waypoint.vehicle_id}
-            waypoint={waypoint}
-            vehicle={vehicles[waypoint.vehicle_id]}
-            onDragStart={() => {
-              followBeforeWaypointDragRef.current = followYp;
-              setFollowYp(false);
-            }}
-            onMove={(lat, lon) => sendWaypoint(waypoint.vehicle_id, lat, lon)}
-            onDragEnd={() => {
-              if (followBeforeWaypointDragRef.current) {
-                window.setTimeout(() => setFollowYp(true), 250);
-              }
-            }}
-          />
-        ))}
-        {vehicleList.map((vehicle) => (
-          <VehicleLayer
-            key={vehicle.vehicle_id}
-            vehicle={vehicle}
-            trailSeconds={trailSeconds}
-            isPhoneViewer={isPhoneViewer}
-            mapZoom={mapZoom}
-            onClick={() => {
-              setMapActionMenu(null);
-              if (vehicle.vehicle_type === "yp") {
-                setFollowYp(true);
-              }
-              setSelected(vehicle);
-            }}
-          />
-        ))}
-      </MapContainer>
+      )}
 
-      {mapActionMenu && (
+      {activeTab === "map" && mapActionMenu && (
         <MapActionMenu
           menu={mapActionMenu}
           vehicles={vehicleList}
@@ -443,7 +441,9 @@ export function App() {
         />
       )}
 
-      <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
+      {activeTab === "map" && (
+        <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
+      )}
 
       <div className="topbar">
         <div className="brand">
@@ -467,6 +467,21 @@ export function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button
+            className={activeTab === "map" ? "icon-button active" : "icon-button"}
+            title="Global Map"
+            onClick={() => setActiveTab("map")}
+          >
+            <MapIcon size={19} />
+          </button>
+          
+          <button
+            className={activeTab === "planner" ? "icon-button active" : "icon-button"}
+            title="Local Waypoint Planner"
+            onClick={() => { setActiveTab("planner"); setShowSettings(false); setShowSITL(false); }}
+            >
+            <Crosshair size={19} />
+          </button>
           <button
             className={showSITL ? "icon-button active" : "icon-button"}
             title="SITL connections"
@@ -494,7 +509,6 @@ export function App() {
             connectSITL(url, vehicleId || undefined)
               .then((result) => {
                 if (!result.ok) return;
-                // Bridge info arrives via sitl_bridge_update WS op
               })
               .catch(() => undefined)
           }
@@ -634,6 +648,370 @@ export function App() {
     </div>
   );
 }
+
+// ============================================================================
+// WAYPOINT PLANNER COMPONENTS
+// ============================================================================
+export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, vehicles: Vehicle[], onCommand: (vehicleId: string, cmd: Command) => void }) {
+  const [waypoints, setWaypoints] = useState<LocalWaypoint[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>("");
+
+  const updateWaypoint = (id: string, updates: Partial<LocalWaypoint>) => {
+    setWaypoints((prev) => prev.map(wp => wp.id === id ? { ...wp, ...updates } : wp));
+  };
+
+  const deleteWaypoint = (id: string) => {
+    setWaypoints((prev) => prev.filter(wp => wp.id !== id));
+    if (selectedId === id) setSelectedId(null);
+  };
+
+  const handleDispatch = () => {
+    if (!yp?.position || yp.heading == null) {
+      alert("Cannot dispatch: YP GPS or heading is unavailable.");
+      return;
+    }
+    if (!selectedVehicleId) {
+      alert("Please select a vehicle to dispatch.");
+      return;
+    }
+
+    const globalWaypoints = waypoints.map(wp => 
+      localToGlobalWaypoint(yp.position!.latitude, yp.position!.longitude, yp.heading!, yp.position!.altitude || 0, wp.x, wp.y, wp.z)
+    );
+
+    globalWaypoints.forEach((gWp) => {
+      onCommand(selectedVehicleId, { 
+        type: "waypoint", 
+        target: { latitude: gWp.latitude, longitude: gWp.longitude, altitude: gWp.altitude } 
+      });
+    });
+
+    alert(`Dispatched ${globalWaypoints.length} waypoints to ${selectedVehicleId}`);
+    setWaypoints([]);
+    setSelectedId(null);
+  };
+
+  const linePoints = waypoints.map((wp) => [wp.x, wp.z, wp.y] as [number, number, number]);
+
+  return (
+    <div className="planner-container" style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", overflowY: "auto", backgroundColor: "#0f172a", color: "white", paddingTop: 60, paddingBottom: 40 }}>
+      
+      {/* TOP PANEL: 3D Render Area */}
+      <div style={{ flex: "0 0 auto", height: "45vh", minHeight: 350, position: 'relative', borderBottom: '2px solid #334155' }}>
+        <Canvas camera={{ position: [60, 50, 60], fov: 45 }}>
+          <ambientLight intensity={0.5} />
+          <directionalLight position={[10, 10, 5]} intensity={1.5} />
+          <Suspense fallback={
+            <mesh position={[0, 0, 0]}><boxGeometry args={[2, 2, 2]} /><meshStandardMaterial color="#f97316" wireframe /></mesh>
+          }>
+            <ShipModel modelUrl="/logos/YP_CAD.glb" />
+          </Suspense>
+          
+          {/* WAYPOINTS: Made 3x larger and glowing so they stand out */}
+          {waypoints.map((wp) => (
+            <Sphere key={wp.id} position={[wp.x, wp.z, wp.y]} args={[1.5, 16, 16]}>
+              <meshStandardMaterial 
+                 color={wp.id === selectedId ? "#38bdf8" : "#ef4444"} 
+                 emissive={wp.id === selectedId ? "#38bdf8" : "#ef4444"}
+                 emissiveIntensity={0.6}
+              />
+            </Sphere>
+          ))}
+
+          {/* Thickened the line so you can see the path clearly */}
+          {linePoints.length > 1 && <Line points={linePoints} color="#f59e0b" lineWidth={5} />}
+          
+          <OrbitControls makeDefault target={[0, 0, 0]} />
+          
+          {/* Expanded the grid floor to visually match your 150m x 150m 2D workspace */}
+          <gridHelper args={[150, 150, "#334155", "#1e293b"]} position={[0, -2, 0]} />
+        </Canvas>
+      </div>
+
+      {/* BOTTOM PANEL: Split 2D View and Altitude View */}
+      <div style={{ flex: "0 0 auto", minHeight: 500, display: "flex", flexWrap: "wrap" }}>
+        
+        {/* BOTTOM LEFT: 2D Top-Down View */}
+        <div style={{ flex: "1 1 400px", padding: 20, borderRight: '2px solid #334155', display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+            <h2 style={{ fontSize: "1.2rem", fontWeight: "bold" }}>Lateral Planner (Top-Down)</h2>
+            
+            {/* FIX: The button is always rendered now, but uses opacity to hide itself. Layout is locked! */}
+            <button 
+              onClick={() => selectedId && deleteWaypoint(selectedId)} 
+              disabled={!selectedId}
+              style={{ 
+                padding: "4px 8px", background: "#ef4444", color: "white", border: "none", 
+                borderRadius: "4px", cursor: selectedId ? "pointer" : "default", 
+                display: "flex", alignItems: "center", gap: 5,
+                opacity: selectedId ? 1 : 0, 
+                pointerEvents: selectedId ? "auto" : "none",
+                transition: "opacity 0.2s" // Adds a nice smooth fade in
+              }}
+            >
+              <Trash2 size={14} /> Delete Selected
+            </button>
+
+          </div>
+          
+          <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center" }}>
+            <InteractiveWaypoint2D 
+              waypoints={waypoints} 
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onAdd={(x, y) => {
+                const newId = Date.now().toString();
+                setWaypoints(prev => [...prev, { id: newId, x, y, z: 15 }]);
+                setSelectedId(newId);
+              }}
+              onUpdate={updateWaypoint}
+            />
+          </div>
+        </div>
+
+        {/* BOTTOM RIGHT: Altitude Profile & Dispatch Controls */}
+        <div style={{ flex: "1 1 400px", padding: 20, display: "flex", flexDirection: "column" }}>
+          <h2 style={{ fontSize: "1.2rem", fontWeight: "bold", marginBottom: 10 }}>Altitude Profile</h2>
+          
+          <div style={{ flex: 1, minHeight: 250, backgroundColor: "#1e293b", borderRadius: 8, border: "1px solid #475569", position: "relative", marginBottom: 15, padding: "10px 0" }}>
+             <AltitudeProfile 
+                waypoints={waypoints} 
+                selectedId={selectedId} 
+                onSelect={setSelectedId}
+                onUpdateAltitude={(id, z) => updateWaypoint(id, { z })}
+             />
+          </div>
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <select value={selectedVehicleId} onChange={(e) => setSelectedVehicleId(e.target.value)} style={{ flex: 1, background: "#1e293b", color: "white", border: "1px solid #475569", padding: "10px", borderRadius: "4px" }}>
+              <option value="">-- Select Vehicle --</option>
+              {vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} ({v.vehicle_type})</option>)}
+            </select>
+            <button onClick={() => { setWaypoints([]); setSelectedId(null); }} style={{ padding: "10px", background: "#475569", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>Clear All</button>
+            <button onClick={handleDispatch} style={{ padding: "10px", background: "#2563eb", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "bold" }}>Dispatch</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+function InteractiveWaypoint2D({ waypoints, selectedId, onSelect, onAdd, onUpdate }: { 
+  waypoints: LocalWaypoint[]; 
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onAdd: (x: number, y: number) => void;
+  onUpdate: (id: string, updates: Partial<LocalWaypoint>) => void;
+}) {
+  // NEW: We define a workspace that represents 150x150 meters in the real world
+  const WORKSPACE_WIDTH_M = 150; 
+  const WORKSPACE_HEIGHT_M = 150; 
+  const SHIP_LENGTH_METERS = 33; 
+  const SHIP_WIDTH_METERS = 8;   
+  
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!containerRef.current) return;
+    if (e.target === containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      
+      // Update math to use the new workspace boundaries
+      const xMeters = ((e.clientX - rect.left) / rect.width - 0.5) * WORKSPACE_WIDTH_M; 
+      const yMeters = -((e.clientY - rect.top) / rect.height - 0.5) * WORKSPACE_HEIGHT_M; 
+      onAdd(xMeters, yMeters);
+    }
+  };
+
+  const startDrag = (id: string, e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    onSelect(id);
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+
+    const move = (moveEvent: PointerEvent) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const clampedX = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width));
+      const clampedY = Math.max(0, Math.min(moveEvent.clientY - rect.top, rect.height));
+      
+      // Update drag math to use the new workspace boundaries
+      const xMeters = ((clampedX / rect.width) - 0.5) * WORKSPACE_WIDTH_M;
+      const yMeters = -((clampedY / rect.height) - 0.5) * WORKSPACE_HEIGHT_M;
+      onUpdate(id, { x: xMeters, y: yMeters });
+    };
+
+    const up = () => {
+      target.releasePointerCapture(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+
+  return (
+    <div 
+      ref={containerRef}
+      onPointerDown={handlePointerDown}
+      style={{ 
+        width: "100%", maxWidth: 400, aspectRatio: "1/1", // Forces it to be a nice big square
+        backgroundColor: '#0f172a', 
+        backgroundImage: "linear-gradient(#334155 1px, transparent 1px), linear-gradient(90deg, #334155 1px, transparent 1px)", // Adds a grid texture
+        backgroundSize: '20px 20px',
+        backgroundPosition: 'center center',
+        position: 'relative', cursor: 'crosshair', border: '2px solid #475569', borderRadius: 4,
+        overflow: 'hidden'
+      }}
+    >
+      {/* THE SHIP OVERLAY: Positioned perfectly in the center, properly scaled against the 150m grid */}
+      <div style={{
+        position: 'absolute',
+        top: '50%', left: '50%',
+        width: `${(SHIP_WIDTH_METERS / WORKSPACE_WIDTH_M) * 100}%`,
+        height: `${(SHIP_LENGTH_METERS / WORKSPACE_HEIGHT_M) * 100}%`,
+        transform: 'translate(-50%, -50%)',
+        backgroundImage: "url('/logos/YP.png')",
+        backgroundSize: 'contain',
+        backgroundPosition: 'center',
+        backgroundRepeat: 'no-repeat',
+        pointerEvents: 'none', // Critical: Lets you click "through" the transparent parts of the ship PNG
+        opacity: 0.8
+      }} />
+
+      {/* WAYPOINT DOTS */}
+      {waypoints.map((wp, index) => {
+        // Update plotting math to use the new workspace boundaries
+        const pctX = (wp.x / WORKSPACE_WIDTH_M) + 0.5;
+        const pctY = (-wp.y / WORKSPACE_HEIGHT_M) + 0.5;
+        const isSelected = wp.id === selectedId;
+        
+        return (
+          <div 
+            key={wp.id} 
+            onPointerDown={(e) => startDrag(wp.id, e)}
+            style={{ 
+              position: 'absolute', left: `${pctX * 100}%`, top: `${pctY * 100}%`, 
+              width: 18, height: 18, 
+              backgroundColor: isSelected ? '#38bdf8' : '#ef4444', 
+              border: isSelected ? '2px solid white' : '1px solid #7f1d1d',
+              borderRadius: '50%', transform: 'translate(-50%, -50%)', 
+              cursor: 'grab', zIndex: isSelected ? 10 : 1,
+              display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: 10, color: 'white', fontWeight: 'bold',
+              userSelect: 'none'
+            }} 
+          >
+            {index + 1}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AltitudeProfile({ waypoints, selectedId, onSelect, onUpdateAltitude }: {
+  waypoints: LocalWaypoint[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onUpdateAltitude: (id: string, newAlt: number) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const MAX_ALTITUDE = 50;
+
+  const startDrag = (id: string, e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    onSelect(id);
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+
+    const move = (moveEvent: PointerEvent) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const clampedY = Math.max(0, Math.min(moveEvent.clientY - rect.top, rect.height));
+      
+      const altPercentage = 1 - (clampedY / rect.height);
+      const newAlt = altPercentage * MAX_ALTITUDE;
+      onUpdateAltitude(id, Math.max(0, newAlt));
+    };
+
+    const up = () => {
+      target.releasePointerCapture(e.pointerId);
+      target.removeEventListener("pointermove", move as EventListener);
+      target.removeEventListener("pointerup", up as EventListener);
+    };
+
+    target.addEventListener("pointermove", move as EventListener);
+    target.addEventListener("pointerup", up as EventListener);
+  };
+
+  if (waypoints.length === 0) {
+    return <div style={{ padding: 20, color: "#64748b", textAlign: "center", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>Click the 2D map to add waypoints.</div>;
+  }
+
+  const points = waypoints.map((wp, index) => {
+    const pctX = waypoints.length === 1 ? 50 : (index / (waypoints.length - 1)) * 90 + 5; 
+    const pctY = (1 - (wp.z / MAX_ALTITUDE)) * 100;
+    return { id: wp.id, x: `${pctX}%`, y: `${pctY}%`, z: wp.z, index: index + 1 };
+  });
+
+  const polylinePoints = points.map(p => `${p.x.replace('%','')} ${p.y.replace('%','')}`).join(', ');
+
+  return (
+    <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative", touchAction: "none" }}>
+      <div style={{ position: "absolute", top: "0%", width: "100%", borderTop: "1px dashed #334155" }}><span style={{fontSize: 10, color: '#64748b', paddingLeft: 5}}>50m</span></div>
+      <div style={{ position: "absolute", top: "50%", width: "100%", borderTop: "1px dashed #334155" }}><span style={{fontSize: 10, color: '#64748b', paddingLeft: 5}}>25m</span></div>
+      <div style={{ position: "absolute", bottom: "0%", width: "100%", borderTop: "1px solid #475569" }}><span style={{fontSize: 10, color: '#64748b', paddingLeft: 5}}>0m</span></div>
+
+      {/* SVG is now ONLY used for the connecting line */}
+      <svg width="100%" height="100%" style={{ display: "block" }} preserveAspectRatio="none" viewBox="0 0 100 100">
+        {points.length > 1 && (
+          <polyline points={polylinePoints} fill="none" stroke="#f59e0b" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+        )}
+      </svg>
+      
+      {/* HTML Divs are used for the dots, ensuring they never stretch or scale weirdly */}
+      {points.map((p) => {
+        const isSelected = p.id === selectedId;
+        return (
+          <div 
+            key={p.id} 
+            onPointerDown={(e) => startDrag(p.id, e)}
+            style={{ 
+              position: 'absolute', 
+              left: p.x, 
+              top: p.y, 
+              width: 18, 
+              height: 18, 
+              backgroundColor: isSelected ? '#38bdf8' : '#ef4444', 
+              border: isSelected ? '2px solid white' : '1px solid #7f1d1d',
+              borderRadius: '50%', 
+              transform: 'translate(-50%, -50%)', 
+              cursor: 'ns-resize', 
+              zIndex: isSelected ? 10 : 1,
+              display: 'flex', 
+              justifyContent: 'center', 
+              alignItems: 'center', 
+              fontSize: 10, 
+              color: 'white', 
+              fontWeight: 'bold',
+              userSelect: 'none'
+            }} 
+          >
+            {p.index}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+// ============================================================================
+// OLD APP LOGIC FUNCTIONS
+// ============================================================================
 
 function streamMessageFromPayload(payload: {
   vehicle_id?: string;
@@ -1480,209 +1858,20 @@ function waypointIcon(color: string) {
   });
 }
 
-function VehicleModal({
-  vehicle,
-  onClose,
-  onRtb,
-  onWaypoint,
-  onStreamVideo,
-  onColorSave,
-}: {
-  vehicle: Vehicle;
-  onClose: () => void;
-  onRtb: () => void;
-  onWaypoint: () => void;
-  onStreamVideo: () => void;
-  onColorSave: (color: string) => void;
-}) {
-  const position = vehicle.position;
-  const [showColorPalette, setShowColorPalette] = useState(false);
-  const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
+function ShipModel({ modelUrl }: { modelUrl: string }) {
+  const { scene } = useGLTF(modelUrl);
+  
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="vehicle-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <div className={`type-chip ${vehicle.vehicle_type}`}>{vehicle.vehicle_type.toUpperCase()}</div>
-          <div>
-            <h2>{vehicle.vehicle_id}</h2>
-            <p>{vehicle.connected ? "Connected" : "Last seen offline"}</p>
-          </div>
-          <button className="icon-button" title="Close" onClick={onClose}>
-            <X size={20} />
-          </button>
-        </div>
-        <div className="metrics">
-          <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} />
-          <Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} />
-          <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
-          <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
-          <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
-        </div>
-        <div className="modal-actions">
-          <button className="danger" onClick={onRtb}>
-            <RotateCcw size={18} />
-            RTB
-          </button>
-          <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
-            <Brush size={18} />
-            Color
-          </button>
-          {vehicle.vehicle_type === "usv" && (
-            <button className="stream" onClick={onStreamVideo}>
-              <Video size={18} />
-              Stream Video
-            </button>
-          )}
-          <button className="primary" onClick={onWaypoint}>
-            <Route size={18} />
-            Waypoint
-          </button>
-        </div>
-        {showColorPalette && (
-          <div className="color-panel">
-            <div className="color-swatches">
-              {VEHICLE_COLOR_PALETTE.map((color) => (
-                <button
-                  key={color}
-                  className={draftColor === color ? "color-swatch selected" : "color-swatch"}
-                  style={{ backgroundColor: color }}
-                  title={color}
-                  onClick={() => {
-                    setDraftColor(color);
-                    onColorSave(color);
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+    <primitive 
+      object={scene} 
+      scale={0.01} 
+      rotation={[-Math.PI / 2, 0, 0]} 
+      position={[0, -2, 5]} 
+    />
   );
 }
 
-function UsvVideoViewer({
-  vehicleId,
-  src,
-  onClose,
-}: {
-  vehicleId: string;
-  src: string;
-  onClose: () => void;
-}) {
-  const [frame, setFrame] = useState(() => ({
-    x: Math.max(16, window.innerWidth - 456),
-    y: 120,
-    width: Math.min(420, window.innerWidth - 32),
-    height: 320,
-  }));
-  const dragRef = useRef<{
-    mode: "move" | "resize";
-    pointerId: number;
-    startX: number;
-    startY: number;
-    frame: typeof frame;
-  } | null>(null);
-
-  const updateFrame = (next: typeof frame) => {
-    const maxWidth = Math.max(280, window.innerWidth - 24);
-    const maxHeight = Math.max(220, window.innerHeight - 24);
-    const width = Math.min(maxWidth, Math.max(280, next.width));
-    const height = Math.min(maxHeight, Math.max(220, next.height));
-    setFrame({
-      width,
-      height,
-      x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
-      y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
-    });
-  };
-
-  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = {
-      mode,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      frame,
-    };
-  };
-
-  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
-    if (drag.mode === "move") {
-      updateFrame({ ...drag.frame, x: drag.frame.x + dx, y: drag.frame.y + dy });
-      return;
-    }
-    updateFrame({ ...drag.frame, width: drag.frame.width + dx, height: drag.frame.height + dy });
-  };
-
-  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
-      dragRef.current = null;
-    }
-  };
-
-  return (
-    <section
-      className="video-viewer"
-      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
-      onMouseDown={(event) => event.stopPropagation()}
-    >
-      <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
-        <div>
-          <Video size={16} />
-          <strong>{vehicleId}</strong>
-        </div>
-        <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
-          <X size={17} />
-        </button>
-      </header>
-      <video className="video-viewer-media" src={src} autoPlay muted loop playsInline controls />
-      <button
-        className="video-resize-handle"
-        title="Resize stream"
-        onPointerDown={(event) => startDrag("resize", event)}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-      >
-        <Maximize2 size={15} />
-      </button>
-    </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function TelemetryTooltip({ vehicle }: { vehicle: Vehicle }) {
-  return (
-    <div className="tooltip-data">
-      <strong>{vehicle.vehicle_id}</strong>
-      <span>{vehicle.vehicle_type.toUpperCase()}</span>
-      <span>Alt {(vehicle.position?.altitude ?? 0).toFixed(1)} m</span>
-      <span>Hdg {(vehicle.heading ?? 0).toFixed(0)} deg</span>
-      {vehicle.battery?.percentage != null && (
-        <span className="battery-line">
-          <Battery size={13} /> {Math.round(vehicle.battery.percentage * 100)}%
-        </span>
-      )}
-    </div>
-  );
-}
+useGLTF.preload("/logos/YP_CAD.glb");
 
 interface DemoVehicle {
   vehicle_id: string;
@@ -2000,6 +2189,21 @@ function destinationPoint(lat: number, lon: number, bearing: number, distance: n
   return { latitude: (p2 * 180) / Math.PI, longitude: (l2 * 180) / Math.PI };
 }
 
+function localToGlobalWaypoint(shipLat: number, shipLon: number, shipHeading: number, shipAlt: number, localX: number, localY: number, localZ: number) {
+  const distanceMeters = Math.hypot(localX, localY);
+  const relativeAngleRad = Math.atan2(localX, localY);
+  const relativeAngleDeg = (relativeAngleRad * 180) / Math.PI;
+  const trueBearing = (shipHeading + relativeAngleDeg + 360) % 360;
+  
+  const globalCoord = destinationPoint(shipLat, shipLon, trueBearing, distanceMeters);
+  
+  return {
+    latitude: globalCoord.latitude,
+    longitude: globalCoord.longitude,
+    altitude: shipAlt + localZ
+  };
+}
+
 function smoothDegrees(current: number, target: number, ratio: number): number {
   const delta = ((((target - current) % 360) + 540) % 360) - 180;
   return (current + delta * ratio + 360) % 360;
@@ -2018,7 +2222,6 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
   const hasVideo = vehicle.vehicle_type === "usv";
   
-  // 1. Define base sizes (width, height)
   const baseSizes: Record<string, [number, number]> = {
     yp:  [120, 60],
     usv: [70, 35],
@@ -2029,27 +2232,25 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
 
   const baseSize = baseSizes[type] ?? [60, 30];
 
-  // 2. Calculate the exact geographic scale
   const scale = Math.pow(2, zoom - 17);
   const phoneScale = isPhoneViewer ? 0.6 : 1;
   
-  // 3. Compute final pixel dimensions
-  const finalWidth = baseSize[0] * scale * phoneScale;
-  const finalHeight = baseSize[1] * scale * phoneScale;
+  const finalWidth = Math.round(baseSize[0] * scale * phoneScale);
+  const finalHeight = Math.round(baseSize[1] * scale * phoneScale);
   const iconSize: [number, number] = [finalWidth, finalHeight];
 
   return L.divIcon({
-    className: "", // Keep Leaflet from adding default icon margins
+    className: "", 
     iconSize,
-    iconAnchor: [finalWidth / 2, finalHeight / 2], // Anchor exactly in the middle
+    iconAnchor: [Math.round(finalWidth / 2), Math.round(finalHeight / 2)], 
     html: `
-      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="width: ${finalWidth}px; height: ${finalHeight}px; position: relative;">
+      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="position: absolute; top: 0; left: 0; margin: 0; padding: 0; width: ${finalWidth}px; height: ${finalHeight}px;">
         
-        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg); width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
+        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="position: absolute; top: 0; left: 0; margin: 0; padding: 0; width: 100%; height: 100%; --vehicle-color: ${color}; transform: rotate(${heading}deg); transform-origin: center center; display: flex; align-items: center; justify-content: center;">
           ${vehicleGlyph(type)}
         </div>
         
-        <div class="alt-label" style="position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); white-space: nowrap;">
+        <div class="alt-label" style="position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); white-space: nowrap; margin: 0; padding: 0;">
           ${altitude.toFixed(0)} m
           ${
             hasVideo
@@ -2067,58 +2268,6 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   });
 }
 
-/*
-function vehicleGlyph(type: VehicleType): string {
-  if (type === "yp") {
-    return `
-      <svg viewBox="0 0 72 96" aria-hidden="true">
-        <path class="v-shadow" d="M36 3 C52 17 62 42 60 76 C54 88 46 93 36 94 C26 93 18 88 12 76 C10 42 20 17 36 3 Z" />
-        <path class="v-hull" d="M36 4 C51 18 59 42 56 76 C51 86 44 90 36 91 C28 90 21 86 16 76 C13 42 21 18 36 4 Z" />
-        <path class="v-deck" d="M36 13 C47 28 52 50 49 73 C45 80 40 83 36 83 C32 83 27 80 23 73 C20 50 25 28 36 13 Z" />
-        <path class="v-panel" d="M26 43 H46 L48 61 H24 Z" />
-        <path class="v-window" d="M27 36 H34 V43 H27 Z M38 36 H45 V43 H38 Z" />
-        <path class="v-line" d="M22 70 H50 M29 21 L36 9 L43 21 M19 49 L25 47 M53 49 L47 47" />
-      </svg>
-    `;
-  }
-
-  if (type === "uav") {
-    return `
-      <svg viewBox="0 0 88 88" aria-hidden="true">
-        <path class="v-arm" d="M42 42 L18 18 M46 42 L70 18 M42 46 L18 70 M46 46 L70 70" />
-        <circle class="v-rotor" cx="15" cy="15" r="9" />
-        <circle class="v-rotor" cx="73" cy="15" r="9" />
-        <circle class="v-rotor" cx="15" cy="73" r="9" />
-        <circle class="v-rotor" cx="73" cy="73" r="9" />
-        <path class="v-blade" d="M7 12 C12 8 18 8 23 12 M65 12 C70 8 76 8 81 12 M7 76 C12 80 18 80 23 76 M65 76 C70 80 76 80 81 76" />
-        <path class="v-hull" d="M44 20 L54 43 L44 58 L34 43 Z" />
-        <path class="v-panel" d="M39 33 H49 V48 H39 Z" />
-      </svg>
-    `;
-  }
-
-  if (type === "uuv") {
-    return `
-      <svg viewBox="0 0 56 112" aria-hidden="true">
-        <path class="v-hull" d="M28 4 C38 15 42 35 42 69 C42 94 36 108 28 108 C20 108 14 94 14 69 C14 35 18 15 28 4 Z" />
-        <path class="v-fin" d="M14 70 L3 82 L14 85 Z M42 70 L53 82 L42 85 Z M23 100 L28 111 L33 100 Z" />
-        <path class="v-panel" d="M23 25 H33 V38 H23 Z M22 55 H34 V78 H22 Z" />
-        <path class="v-line" d="M16 52 H40 M18 91 H38" />
-      </svg>
-    `;
-  }
-
-  return `
-    <svg viewBox="0 0 72 96" aria-hidden="true">
-      <path class="v-hull" d="M36 5 C50 19 56 41 54 78 C49 87 43 91 36 91 C29 91 23 87 18 78 C16 41 22 19 36 5 Z" />
-      <path class="v-deck" d="M36 17 C45 31 49 51 47 72 C43 78 39 80 36 80 C33 80 29 78 25 72 C23 51 27 31 36 17 Z" />
-      <path class="v-panel" d="M28 45 H44 L45 58 H27 Z" />
-      <path class="v-line" d="M23 73 H49 M28 27 L36 15 L44 27" />
-    </svg>
-  `;
-}
-*/
-
 function vehicleGlyph(type: VehicleType): string {
   const baseUrl = import.meta.env.BASE_URL;
   
@@ -2133,8 +2282,7 @@ function vehicleGlyph(type: VehicleType): string {
 
   const src = iconPaths[type] ?? iconPaths.uav;
 
-  // Added max-width and max-height for extra CSS containment
-  return `<img src="${src}" alt="${type}" style="max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; pointer-events: none;" />`;
+  return `<img src="${src}" alt="${type}" style="display: block; margin: 0; padding: 0; max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; pointer-events: none;" />`;
 }
 
 function vehicleColor(type: VehicleType): string {
@@ -2179,4 +2327,212 @@ function lightenHex(hex: string, amount: number): string {
   const blue = parseInt(clean.slice(4, 6), 16);
   const mix = (value: number) => Math.round(value + (255 - value) * amount);
   return `#${[mix(red), mix(green), mix(blue)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+// ============================================================================
+// MISSING UI COMPONENTS (VehicleModal, UsvVideoViewer, Tooltips)
+// ============================================================================
+
+function VehicleModal({
+  vehicle,
+  onClose,
+  onRtb,
+  onWaypoint,
+  onStreamVideo,
+  onColorSave,
+}: {
+  vehicle: Vehicle;
+  onClose: () => void;
+  onRtb: () => void;
+  onWaypoint: () => void;
+  onStreamVideo: () => void;
+  onColorSave: (color: string) => void;
+}) {
+  const position = vehicle.position;
+  const [showColorPalette, setShowColorPalette] = useState(false);
+  const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="vehicle-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div className={`type-chip ${vehicle.vehicle_type}`}>{vehicle.vehicle_type.toUpperCase()}</div>
+          <div>
+            <h2>{vehicle.vehicle_id}</h2>
+            <p>{vehicle.connected ? "Connected" : "Last seen offline"}</p>
+          </div>
+          <button className="icon-button" title="Close" onClick={onClose}>
+            <X size={20} />
+          </button>
+        </div>
+        <div className="metrics">
+          <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} />
+          <Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} />
+          <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
+          <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
+          <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
+        </div>
+        <div className="modal-actions">
+          <button className="danger" onClick={onRtb}>
+            <RotateCcw size={18} />
+            RTB
+          </button>
+          <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
+            <Brush size={18} />
+            Color
+          </button>
+          {vehicle.vehicle_type === "usv" && (
+            <button className="stream" onClick={onStreamVideo}>
+              <Video size={18} />
+              Stream Video
+            </button>
+          )}
+          <button className="primary" onClick={onWaypoint}>
+            <Route size={18} />
+            Waypoint
+          </button>
+        </div>
+        {showColorPalette && (
+          <div className="color-panel">
+            <div className="color-swatches">
+              {VEHICLE_COLOR_PALETTE.map((color) => (
+                <button
+                  key={color}
+                  className={draftColor === color ? "color-swatch selected" : "color-swatch"}
+                  style={{ backgroundColor: color }}
+                  title={color}
+                  onClick={() => {
+                    setDraftColor(color);
+                    onColorSave(color);
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UsvVideoViewer({
+  vehicleId,
+  src,
+  onClose,
+}: {
+  vehicleId: string;
+  src: string;
+  onClose: () => void;
+}) {
+  const [frame, setFrame] = useState(() => ({
+    x: Math.max(16, window.innerWidth - 456),
+    y: 120,
+    width: Math.min(420, window.innerWidth - 32),
+    height: 320,
+  }));
+  const dragRef = useRef<{
+    mode: "move" | "resize";
+    pointerId: number;
+    startX: number;
+    startY: number;
+    frame: typeof frame;
+  } | null>(null);
+
+  const updateFrame = (next: typeof frame) => {
+    const maxWidth = Math.max(280, window.innerWidth - 24);
+    const maxHeight = Math.max(220, window.innerHeight - 24);
+    const width = Math.min(maxWidth, Math.max(280, next.width));
+    const height = Math.min(maxHeight, Math.max(220, next.height));
+    setFrame({
+      width,
+      height,
+      x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
+      y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
+    });
+  };
+
+  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      mode,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      frame,
+    };
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (drag.mode === "move") {
+      updateFrame({ ...drag.frame, x: drag.frame.x + dx, y: drag.frame.y + dy });
+      return;
+    }
+    updateFrame({ ...drag.frame, width: drag.frame.width + dx, height: drag.frame.height + dy });
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+    }
+  };
+
+  return (
+    <section
+      className="video-viewer"
+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
+        <div>
+          <Video size={16} />
+          <strong>{vehicleId}</strong>
+        </div>
+        <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
+          <X size={17} />
+        </button>
+      </header>
+      <video className="video-viewer-media" src={src} autoPlay muted loop playsInline controls />
+      <button
+        className="video-resize-handle"
+        title="Resize stream"
+        onPointerDown={(event) => startDrag("resize", event)}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+      >
+        <Maximize2 size={15} />
+      </button>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function TelemetryTooltip({ vehicle }: { vehicle: Vehicle }) {
+  return (
+    <div className="tooltip-data">
+      <strong>{vehicle.vehicle_id}</strong>
+      <span>{vehicle.vehicle_type.toUpperCase()}</span>
+      <span>Alt {(vehicle.position?.altitude ?? 0).toFixed(1)} m</span>
+      <span>Hdg {(vehicle.heading ?? 0).toFixed(0)} deg</span>
+      {vehicle.battery?.percentage != null && (
+        <span className="battery-line">
+          <Battery size={13} /> {Math.round(vehicle.battery.percentage * 100)}%
+        </span>
+      )}
+    </div>
+  );
 }

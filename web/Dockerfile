@@ -4,6 +4,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 COPY . .
+# ADD THIS EXACT LINE HERE:
+RUN npm install three @react-three/fiber@8 @react-three/drei@9 @types/three
 RUN npm run build
 
 FROM nginx:1.27-alpine
