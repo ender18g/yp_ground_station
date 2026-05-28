@@ -2022,6 +2022,7 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const baseSizes: Record<string, [number, number]> = {
     yp:  [120, 60],
     usv: [70, 35],
+    ugv: [70, 35],
     uuv: [60, 30],
     uav: [50, 50],
   };
@@ -2126,6 +2127,7 @@ function vehicleGlyph(type: VehicleType): string {
     uav: `${baseUrl}logos/MultiRotor.png`,
     uavf: `${baseUrl}logos/fixedWing.png`,
     usv: `${baseUrl}logos/USV_orange.png`,
+    ugv: `${baseUrl}logos/UGV.png`,
     uuv: `${baseUrl}logos/UUV.png`,
   };
 
@@ -2140,6 +2142,7 @@ function vehicleColor(type: VehicleType): string {
     uav: "#dc2626",
     uavf: "#b91c1c",
     usv: "#16a34a",
+    ugv: "#b45309",
     uuv: "#eab308",
     yp: "#6b7280",
   }[type];
@@ -2160,6 +2163,7 @@ function vehicleZIndexOffset(type: VehicleType): number {
     uavf: 1500,
     yp: 4000,
     usv: 2000,
+    ugv: 1800,
     uuv: 1000,
   }[type];
 }
