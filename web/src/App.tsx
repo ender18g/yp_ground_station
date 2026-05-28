@@ -18,7 +18,8 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
+import { createPortal } from "react-dom";
+import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, WMSTileLayer, useMap, useMapEvents } from "react-leaflet";
 
 import { fetchSettings, sendCommand, updateSettings, websocketUrl } from "./api";
 import type { Command, Vehicle, VehicleType } from "./types";
@@ -32,9 +33,43 @@ const DEMO_KEEP_IN_RANGE_M = 200;
 const LOW_BATTERY_THRESHOLD = 0.25;
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
 const USV_STREAM_URL = `${import.meta.env.BASE_URL}media/usv-stream.mp4`;
+const DEFAULT_VEHICLE_ICON_SCALE = 85;
+const VEHICLE_ICON_SCALE_STORAGE_KEY = "yp-vehicle-icon-scale";
+const VEHICLE_ICON_REFERENCE_ZOOM = 17;
+const WEATHER_RADAR_WMS_URL = "https://mapservices.weather.noaa.gov/eventdriven/services/radar/radar_base_reflectivity/MapServer/WMSServer";
+const WEATHER_RADAR_REFRESH_MS = 10 * 60 * 1000;
+const WEATHER_RADAR_OPACITY = 0.48;
+const TRANSPARENT_TILE_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const WIND_OVERLAY_REFRESH_MS = 15 * 60 * 1000;
+const WIND_OVERLAY_SOURCE = "Open-Meteo";
+const WIND_OVERLAY_ATTRIBUTION = `Wind &copy; ${WIND_OVERLAY_SOURCE}`;
+const WIND_SAMPLE_COLUMNS = 4;
+const WIND_SAMPLE_ROWS = 3;
+const WIND_FETCH_TIMEOUT_MS = 7000;
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
+
+interface WindSample {
+  id: string;
+  latitude: number;
+  longitude: number;
+  speedKmh: number;
+  directionDeg: number;
+}
+
+type ProjectedWindSample = WindSample & { x: number; y: number };
+
+interface WindState {
+  samples: WindSample[];
+  projectedSamples: ProjectedWindSample[];
+}
+
+interface YpReadout {
+  headingDeg?: number;
+  speedKts?: number;
+}
 
 interface StreamMessage {
   id: string;
@@ -94,8 +129,11 @@ export function App() {
   const [messageLog, setMessageLog] = useState<StreamMessage[]>([]);
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
   const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
+  const [showWeatherRadar, setShowWeatherRadar] = useState(false);
+  const [showWindOverlay, setShowWindOverlay] = useState(false);
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
+  const [vehicleIconScale, setVehicleIconScale] = useState(() => storedVehicleIconScale());
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
@@ -221,6 +259,10 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [messageRetentionMinutes, settingsLoaded]);
 
+  useEffect(() => {
+    localStorage.setItem(VEHICLE_ICON_SCALE_STORAGE_KEY, String(vehicleIconScale));
+  }, [vehicleIconScale]);
+
   const vehicleList = useMemo(() => Object.values(vehicles).filter((vehicle) => vehicle.position), [vehicles]);
   const yp = vehicleList.find((vehicle) => vehicle.vehicle_type === "yp");
   const ypGpsLinked = Boolean(yp?.connected);
@@ -278,8 +320,12 @@ export function App() {
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
       <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
         <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
+        {showWeatherRadar && <WeatherRadarLayer />}
+        <WindLayer yp={yp} showVectors={showWindOverlay} onToggleVectors={() => setShowWindOverlay((value) => !value)} />
         <MapCommander
-          onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
+          onMapAction={(lat, lon, point) => {
+            setMapActionMenu({ lat, lon, x: point.x, y: point.y });
+          }}
         />
         <MapPanTracker onManualPan={() => setFollowYp(false)} />
         <FollowYpCenter yp={yp} enabled={followYp} />
@@ -308,6 +354,7 @@ export function App() {
             vehicle={vehicle}
             trailSeconds={trailSeconds}
             isPhoneViewer={isPhoneViewer}
+            iconScalePercent={vehicleIconScale}
             onClick={() => {
               setMapActionMenu(null);
               if (vehicle.vehicle_type === "yp") {
@@ -324,20 +371,29 @@ export function App() {
           menu={mapActionMenu}
           vehicles={vehicleList}
           preferredVehicleId={preferredWaypointVehicleId}
-          onSend={(vehicleId) => {
-            sendWaypoint(vehicleId, mapActionMenu.lat, mapActionMenu.lon);
+          onSend={(vehicleId, lat, lon) => {
+            sendWaypoint(vehicleId, lat, lon);
             setPreferredWaypointVehicleId(null);
             setMapActionMenu(null);
           }}
-          onSendAll={() => {
-            sendAllToMapPoint(mapActionMenu.lat, mapActionMenu.lon);
+          onSendAll={(lat, lon) => {
+            sendAllToMapPoint(lat, lon);
             setPreferredWaypointVehicleId(null);
             setMapActionMenu(null);
           }}
         />
       )}
 
-      <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
+      <MapMenu
+        mapBase={mapBase}
+        mapSource={mapSource}
+        showWeatherRadar={showWeatherRadar}
+        showWindOverlay={showWindOverlay}
+        onMapBaseChange={setMapBase}
+        onMapSourceChange={setMapSource}
+        onWeatherRadarChange={setShowWeatherRadar}
+        onWindOverlayChange={setShowWindOverlay}
+      />
 
       <div className="topbar">
         <div className="brand">
@@ -381,6 +437,11 @@ export function App() {
             <span>{trailSeconds}s</span>
           </label>
           <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
+          <label>
+            Vehicle icons
+            <span>{vehicleIconScale}%</span>
+          </label>
+          <input min={50} max={140} step={5} type="range" value={vehicleIconScale} onChange={(event) => setVehicleIconScale(Number(event.target.value))} />
           <label className="setting-toggle">
             <span>YP range rings</span>
             <input type="checkbox" checked={showYpRangeRings} onChange={(event) => setShowYpRangeRings(event.target.checked)} />
@@ -571,6 +632,269 @@ function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribut
   }[source];
 }
 
+function WeatherRadarLayer() {
+  const [radarCacheBucket, setRadarCacheBucket] = useState(() => Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS));
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setRadarCacheBucket(Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS));
+    }, WEATHER_RADAR_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return (
+    <WMSTileLayer
+      key={`weather-radar-${radarCacheBucket}`}
+      url={`${WEATHER_RADAR_WMS_URL}?radar_cache=${radarCacheBucket}`}
+      layers="1"
+      format="image/png"
+      transparent
+      opacity={WEATHER_RADAR_OPACITY}
+      attribution="Radar &copy; NOAA/NWS"
+      errorTileUrl={TRANSPARENT_TILE_DATA_URL}
+      eventHandlers={{
+        tileerror: (event) => {
+          const tile = (event as unknown as { tile?: HTMLImageElement }).tile;
+          if (tile) {
+            tile.src = TRANSPARENT_TILE_DATA_URL;
+          }
+        },
+      }}
+    />
+  );
+}
+
+function WindLayer({ yp, showVectors, onToggleVectors }: { yp?: Vehicle; showVectors: boolean; onToggleVectors: () => void }) {
+  const map = useMap();
+  const [windState, setWindState] = useState<WindState>({ samples: [], projectedSamples: [] });
+  const sampleKeyRef = useRef("");
+  const samplesRef = useRef<WindSample[]>([]);
+
+  useEffect(() => {
+    if (!showVectors) {
+      return;
+    }
+    map.attributionControl.addAttribution(WIND_OVERLAY_ATTRIBUTION);
+    return () => {
+      map.attributionControl.removeAttribution(WIND_OVERLAY_ATTRIBUTION);
+    };
+  }, [map, showVectors]);
+
+  useEffect(() => {
+    samplesRef.current = windState.samples;
+  }, [windState.samples]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let controller: AbortController | null = null;
+
+    const refreshSamples = () => {
+      const points = windSamplePoints(map);
+      const bucket = Math.floor(Date.now() / WIND_OVERLAY_REFRESH_MS);
+      const nextKey = `${bucket}:${points.map((point) => `${point.latitude.toFixed(2)},${point.longitude.toFixed(2)}`).join("|")}`;
+      if (nextKey === sampleKeyRef.current) {
+        setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
+        return;
+      }
+      sampleKeyRef.current = nextKey;
+      controller?.abort();
+      controller = new AbortController();
+      fetchWindSamples(points, controller.signal).then((nextSamples) => {
+        if (!cancelled) {
+          samplesRef.current = nextSamples;
+          setWindState({ samples: nextSamples, projectedSamples: projectWindSamples(map, nextSamples) });
+        }
+      });
+    };
+
+    const updateProjection = () => setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
+
+    refreshSamples();
+    map.on("moveend zoomend resize", refreshSamples);
+    map.on("move zoom", updateProjection);
+    const interval = window.setInterval(refreshSamples, WIND_OVERLAY_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      window.clearInterval(interval);
+      map.off("moveend zoomend resize", refreshSamples);
+      map.off("move zoom", updateProjection);
+    };
+  }, [map]);
+
+  const windReadout = windState.samples.length > 0 ? representativeWindSample(windState.samples) : null;
+  const ypReadout = readoutForYp(yp);
+
+  if (!windReadout && !ypReadout) {
+    return null;
+  }
+
+  return (
+    createPortal(
+      <>
+        {showVectors && windState.projectedSamples.length > 0 && (
+          <div className="wind-overlay" aria-hidden="true">
+            <svg width="100%" height="100%" focusable="false">
+              {windState.projectedSamples.map((sample) => (
+                <g key={sample.id} transform={`translate(${sample.x.toFixed(1)} ${sample.y.toFixed(1)}) rotate(${windFlowDirection(sample.directionDeg)})`}>
+                  <line className="wind-arrow-line" x1="0" y1="13" x2="0" y2={windArrowTipY(sample.speedKmh)} />
+                  <path className="wind-arrow-head" d={`M -5 ${windArrowTipY(sample.speedKmh) + 7} L 0 ${windArrowTipY(sample.speedKmh)} L 5 ${windArrowTipY(sample.speedKmh) + 7}`} />
+                  <circle className="wind-arrow-dot" cx="0" cy="13" r="2.4" />
+                </g>
+              ))}
+            </svg>
+          </div>
+        )}
+        <button className="wind-readout" type="button" title="Toggle wind vectors" onClick={onToggleVectors}>
+          {ypReadout && <ReadoutRow label="YP" heading={formatHeading(ypReadout.headingDeg)} speed={formatKnots(ypReadout.speedKts)} />}
+          {windReadout && <ReadoutRow label="Wind" heading={formatHeading(windReadout.directionDeg)} speed={formatKnots(kmhToKnots(windReadout.speedKmh))} />}
+        </button>
+      </>,
+      map.getContainer(),
+    )
+  );
+}
+
+function ReadoutRow({ label, heading, speed }: { label: string; heading: string; speed: string }) {
+  return (
+    <span className="readout-row">
+      <span className="readout-label">{label}:</span>
+      <span className="readout-heading">{heading}</span>
+      <span className="readout-at">@</span>
+      <span className="readout-speed">{speed} kts</span>
+    </span>
+  );
+}
+
+function windSamplePoints(map: L.Map): Array<{ latitude: number; longitude: number }> {
+  const size = map.getSize();
+  const points: Array<{ latitude: number; longitude: number }> = [];
+  for (let row = 0; row < WIND_SAMPLE_ROWS; row += 1) {
+    for (let column = 0; column < WIND_SAMPLE_COLUMNS; column += 1) {
+      const x = ((column + 0.5) / WIND_SAMPLE_COLUMNS) * size.x;
+      const y = ((row + 0.5) / WIND_SAMPLE_ROWS) * size.y;
+      const latLng = map.containerPointToLatLng([x, y]);
+      points.push({ latitude: latLng.lat, longitude: latLng.lng });
+    }
+  }
+  return points;
+}
+
+function projectWindSamples(map: L.Map, samples: WindSample[]): ProjectedWindSample[] {
+  return samples.map((sample) => {
+    const point = map.latLngToContainerPoint([sample.latitude, sample.longitude]);
+    return { ...sample, x: point.x, y: point.y };
+  });
+}
+
+async function fetchWindSamples(points: Array<{ latitude: number; longitude: number }>, signal: AbortSignal): Promise<WindSample[]> {
+  const results = await Promise.allSettled(points.map((point, index) => fetchWindSample(point.latitude, point.longitude, index, signal)));
+  return results.flatMap((result) => (result.status === "fulfilled" && result.value ? [result.value] : []));
+}
+
+async function fetchWindSample(latitude: number, longitude: number, index: number, signal: AbortSignal): Promise<WindSample | null> {
+  const timeoutController = new AbortController();
+  const timeout = window.setTimeout(() => timeoutController.abort(), WIND_FETCH_TIMEOUT_MS);
+  const abortListener = () => timeoutController.abort();
+  signal.addEventListener("abort", abortListener, { once: true });
+  try {
+    const params = new URLSearchParams({
+      latitude: latitude.toFixed(4),
+      longitude: longitude.toFixed(4),
+      current: "wind_speed_10m,wind_direction_10m",
+      wind_speed_unit: "kmh",
+      timezone: "UTC",
+    });
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, { signal: timeoutController.signal });
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await response.json()) as {
+      latitude?: number;
+      longitude?: number;
+      current?: { wind_speed_10m?: number; wind_direction_10m?: number };
+    };
+    const speedKmh = Number(payload.current?.wind_speed_10m);
+    const directionDeg = Number(payload.current?.wind_direction_10m);
+    if (!Number.isFinite(speedKmh) || !Number.isFinite(directionDeg)) {
+      return null;
+    }
+    return {
+      id: `${index}-${latitude.toFixed(3)}-${longitude.toFixed(3)}`,
+      latitude,
+      longitude,
+      speedKmh,
+      directionDeg,
+    };
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+    signal.removeEventListener("abort", abortListener);
+  }
+}
+
+function windArrowTipY(speedKmh: number): number {
+  return -Math.min(30, Math.max(14, 11 + speedKmh * 0.55));
+}
+
+function windFlowDirection(directionDeg: number): number {
+  return (directionDeg + 180) % 360;
+}
+
+function representativeWindSample(samples: WindSample[]): WindSample {
+  return samples[Math.floor(samples.length / 2)] ?? samples[0];
+}
+
+function kmhToKnots(speedKmh: number): number {
+  return speedKmh * 0.539957;
+}
+
+function readoutForYp(yp?: Vehicle): YpReadout | null {
+  if (!yp) {
+    return null;
+  }
+  const headingDeg = Number.isFinite(yp.heading) ? yp.heading : undefined;
+  const speedKts = speedKnotsFromHistory(yp.history);
+  if (headingDeg == null && speedKts == null) {
+    return null;
+  }
+  return { headingDeg, speedKts };
+}
+
+function speedKnotsFromHistory(history?: Vehicle["history"]): number | undefined {
+  if (!history || history.length < 2) {
+    return undefined;
+  }
+  const recent = [...history].reverse();
+  const latest = recent.find((point) => point.stamp != null);
+  const previous = latest ? recent.find((point) => point !== latest && point.stamp != null && latest.stamp! - point.stamp! > 0.1) : undefined;
+  if (!latest || !previous || latest.stamp == null || previous.stamp == null) {
+    return undefined;
+  }
+  const elapsedSeconds = latest.stamp - previous.stamp;
+  if (elapsedSeconds <= 0) {
+    return undefined;
+  }
+  return metersPerSecondToKnots(haversineMeters(previous.latitude, previous.longitude, latest.latitude, latest.longitude) / elapsedSeconds);
+}
+
+function metersPerSecondToKnots(speedMps: number): number {
+  return speedMps * 1.943844;
+}
+
+function formatHeading(directionDeg?: number): string {
+  if (typeof directionDeg !== "number" || !Number.isFinite(directionDeg)) {
+    return "---";
+  }
+  return String(((Math.round(directionDeg) % 360) + 360) % 360).padStart(3, "0");
+}
+
+function formatKnots(speedKts?: number): string {
+  return typeof speedKts === "number" && Number.isFinite(speedKts) ? String(Math.round(speedKts)) : "--";
+}
+
 function useIsPhoneViewer(): boolean {
   const query = "(pointer: coarse)";
   const getMatches = () => (typeof window === "undefined" ? false : isPhoneBrowser() && window.matchMedia(query).matches);
@@ -601,18 +925,40 @@ function isPhoneBrowser(): boolean {
 function MapMenu({
   mapBase,
   mapSource,
+  showWeatherRadar,
+  showWindOverlay,
   onMapBaseChange,
   onMapSourceChange,
+  onWeatherRadarChange,
+  onWindOverlayChange,
 }: {
   mapBase: MapBase;
   mapSource: MapSource;
+  showWeatherRadar: boolean;
+  showWindOverlay: boolean;
   onMapBaseChange: (base: MapBase) => void;
   onMapSourceChange: (source: MapSource) => void;
+  onWeatherRadarChange: (show: boolean) => void;
+  onWindOverlayChange: (show: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!expanded) {
+      return;
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!shellRef.current?.contains(event.target as Node)) {
+        setExpanded(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [expanded]);
 
   return (
-    <div className="map-menu-shell" aria-label="Map options">
+    <div ref={shellRef} className="map-menu-shell" aria-label="Map options">
       <button className="map-menu-toggle" title="Map layers" onClick={() => setExpanded((value) => !value)}>
         <Layers size={19} />
       </button>
@@ -644,6 +990,17 @@ function MapMenu({
               Online only
             </label>
           </fieldset>
+          <fieldset>
+            <legend>Overlay</legend>
+            <label>
+              <input type="checkbox" checked={showWeatherRadar} onChange={(event) => onWeatherRadarChange(event.target.checked)} />
+              Weather radar
+            </label>
+            <label>
+              <input type="checkbox" checked={showWindOverlay} onChange={(event) => onWindOverlayChange(event.target.checked)} />
+              Winds
+            </label>
+          </fieldset>
         </div>
       )}
     </div>
@@ -660,8 +1017,8 @@ function MapActionMenu({
   menu: MapActionMenuState;
   vehicles: Vehicle[];
   preferredVehicleId: string | null;
-  onSend: (vehicleId: string) => void;
-  onSendAll: () => void;
+  onSend: (vehicleId: string, lat: number, lon: number) => void;
+  onSendAll: (lat: number, lon: number) => void;
 }) {
   const [showVehicles, setShowVehicles] = useState(false);
   const commandableVehicles = vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp");
@@ -674,7 +1031,7 @@ function MapActionMenu({
         <span>Lon {menu.lon.toFixed(6)}</span>
       </div>
       {preferredVehicle && (
-        <button className="map-action-preferred" onClick={() => onSend(preferredVehicle.vehicle_id)}>
+        <button className="map-action-preferred" onClick={() => onSend(preferredVehicle.vehicle_id, menu.lat, menu.lon)}>
           <span className={`vehicle-dot ${preferredVehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(preferredVehicle) }} />
           Send {preferredVehicle.vehicle_id}
         </button>
@@ -685,13 +1042,13 @@ function MapActionMenu({
       </button>
       {showVehicles &&
         commandableVehicles.map((vehicle) => (
-          <button key={vehicle.vehicle_id} className="map-action-child" onClick={() => onSend(vehicle.vehicle_id)}>
+          <button key={vehicle.vehicle_id} className="map-action-child" onClick={() => onSend(vehicle.vehicle_id, menu.lat, menu.lon)}>
             <span className={`vehicle-dot ${vehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(vehicle) }} />
             {vehicle.vehicle_id}
           </button>
         ))}
       {commandableVehicles.length > 1 && (
-        <button className="map-action-all" onClick={onSendAll}>
+        <button className="map-action-all" onClick={() => onSendAll(menu.lat, menu.lon)}>
           All vehicles
         </button>
       )}
@@ -874,13 +1231,22 @@ function VehicleLayer({
   vehicle,
   trailSeconds,
   isPhoneViewer,
+  iconScalePercent,
   onClick,
 }: {
   vehicle: Vehicle;
   trailSeconds: number;
   isPhoneViewer: boolean;
+  iconScalePercent: number;
   onClick: () => void;
 }) {
+  const map = useMap();
+  const [zoom, setZoom] = useState(map.getZoom());
+  useMapEvents({
+    zoomend() {
+      setZoom(map.getZoom());
+    },
+  });
   const position = vehicle.position!;
   const cutoff = Date.now() / 1000 - trailSeconds;
   const trail = (vehicle.history ?? [])
@@ -893,7 +1259,7 @@ function VehicleLayer({
       {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color, weight: 3, opacity: 0.75 }} />}
       <Marker
         position={[position.latitude, position.longitude]}
-        icon={vehicleIcon(vehicle, isPhoneViewer)}
+        icon={vehicleIcon(vehicle, isPhoneViewer, zoom, iconScalePercent)}
         zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
         eventHandlers={{
           click: (event) => {
@@ -919,16 +1285,52 @@ function VehicleLayer({
 function MapCommander({
   onMapAction,
 }: {
-  onMapAction: (lat: number, lon: number, point: L.Point) => void;
+  onMapAction: (lat: number, lon: number, point: { x: number; y: number }) => void;
 }) {
   const map = useMap();
+  const lastDragAtRef = useRef(0);
+  const openMenu = (event: MouseEvent) => {
+    const latLng = map.mouseEventToLatLng(event);
+    onMapAction(latLng.lat, latLng.lng, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  useEffect(() => {
+    const container = map.getContainer();
+    const handleContextMenu = (event: MouseEvent) => {
+      if (isInteractiveOverlayTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      openMenu(event);
+    };
+    container.addEventListener("contextmenu", handleContextMenu);
+    return () => container.removeEventListener("contextmenu", handleContextMenu);
+  }, [map]);
+
   useMapEvents({
-    contextmenu(event) {
-      const point = map.latLngToContainerPoint(event.latlng);
-      onMapAction(event.latlng.lat, event.latlng.lng, point);
+    dragend() {
+      lastDragAtRef.current = Date.now();
+    },
+    click(event) {
+      if (!isCoarsePointer() || Date.now() - lastDragAtRef.current < 250) {
+        return;
+      }
+      openMenu(event.originalEvent);
     },
   });
   return null;
+}
+
+function isInteractiveOverlayTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button, input, select, textarea, .leaflet-control"));
+}
+
+function isCoarsePointer(): boolean {
+  return typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
 }
 
 function MapPanTracker({ onManualPan }: { onManualPan: () => void }) {
@@ -1584,21 +1986,24 @@ function yawToQuaternion(yawDeg: number): Record<string, number> {
   return { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) };
 }
 
-function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
+function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number, iconScalePercent: number) {
   const type = vehicle.vehicle_type;
   const heading = vehicle.heading ?? 0;
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
   const hasVideo = vehicle.vehicle_type === "usv";
-  const iconScale = isPhoneViewer ? 0.5 : 1;
-  const iconSize: [number, number] = [92 * iconScale, 50 * iconScale];
+  const phoneScale = isPhoneViewer ? 0.5 : 1;
+  const typeScale = type === "yp" ? 1.2 : 1;
+  const visualScale = zoomVehicleIconScale(zoom) * (iconScalePercent / 100) * typeScale;
+  const iconSize: [number, number] = [92 * phoneScale, 50 * phoneScale];
+  const translateY = isPhoneViewer ? -4 : -8;
   return L.divIcon({
     className: "",
     iconSize,
     iconAnchor: [iconSize[0] / 2, iconSize[1] / 2],
     html: `
-      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}">
+      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="transform: translateY(${translateY}px) scale(${visualScale})">
         <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg)">
           ${vehicleGlyph(type)}
         </div>
@@ -1618,6 +2023,22 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean) {
       </div>
     `,
   });
+}
+
+function zoomVehicleIconScale(zoom: number): number {
+  if (zoom >= VEHICLE_ICON_REFERENCE_ZOOM) {
+    return 1;
+  }
+  return clamp(0.35, 1, Math.pow(0.76, VEHICLE_ICON_REFERENCE_ZOOM - zoom));
+}
+
+function storedVehicleIconScale(): number {
+  const stored = Number(localStorage.getItem(VEHICLE_ICON_SCALE_STORAGE_KEY));
+  return Number.isFinite(stored) ? clamp(50, 140, stored) : DEFAULT_VEHICLE_ICON_SCALE;
+}
+
+function clamp(min: number, max: number, value: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function vehicleGlyph(type: VehicleType): string {
