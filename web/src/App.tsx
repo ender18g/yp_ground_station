@@ -2033,7 +2033,11 @@ function zoomVehicleIconScale(zoom: number): number {
 }
 
 function storedVehicleIconScale(): number {
-  const stored = Number(localStorage.getItem(VEHICLE_ICON_SCALE_STORAGE_KEY));
+  const storedValue = localStorage.getItem(VEHICLE_ICON_SCALE_STORAGE_KEY);
+  if (storedValue == null) {
+    return DEFAULT_VEHICLE_ICON_SCALE;
+  }
+  const stored = Number(storedValue);
   return Number.isFinite(stored) ? clamp(50, 140, stored) : DEFAULT_VEHICLE_ICON_SCALE;
 }
 
