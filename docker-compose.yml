@@ -57,12 +57,15 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       GPS_MODE: sim
       VEHICLE_ID: YP689
-      HOME_LAT: "38.984764"
+      HOME_LAT: "38.989639"
       HOME_LON: "-76.478643"
       HOME_ALT: "2.0"
       HEADING_DEG: "330"
       SPEED_KNOTS: "3"
       SEND_HZ: "5"
+      CIRCLE_LEFT_LON: "-76.487031"
+      CIRCLE_RIGHT_LON: "-76.479393"
+      CIRCLE_CW: "true"
       SERIAL_PORT: /dev/ttyUSB0
       BAUD_RATE: "9600"
     depends_on:
@@ -78,8 +81,8 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
       VEHICLE_ID: sim-uav
-      HOME_LAT: "38.98490"
-      HOME_LON: "-76.47880"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "45.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"
@@ -94,8 +97,8 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: usv
       VEHICLE_ID: sim-usv
-      HOME_LAT: "38.98465"
-      HOME_LON: "-76.47845"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "0.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"
@@ -110,8 +113,8 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uuv
       VEHICLE_ID: sim-uuv
-      HOME_LAT: "38.98455"
-      HOME_LON: "-76.47875"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "-6.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"

@@ -23,6 +23,9 @@ HEADING_DEG = float(os.getenv("HEADING_DEG", "330"))
 SPEED_KNOTS = float(os.getenv("SPEED_KNOTS", "3"))
 SEND_HZ = float(os.getenv("SEND_HZ", "5"))
 KNOTS_TO_MPS = 0.514444
+CIRCLE_LEFT_LON = float(os.getenv("CIRCLE_LEFT_LON", "-76.487031"))
+CIRCLE_RIGHT_LON = float(os.getenv("CIRCLE_RIGHT_LON", "-76.479393"))
+CIRCLE_CW = os.getenv("CIRCLE_CW", "true").lower() != "false"
 
 
 async def main() -> None:
@@ -41,17 +44,30 @@ async def main() -> None:
 
 
 async def sim_loop(ws: websockets.WebSocketClientProtocol) -> None:
+    # Derive circle geometry from lon boundaries; HOME_LAT is the center latitude.
+    center_lon = (CIRCLE_LEFT_LON + CIRCLE_RIGHT_LON) / 2.0
+    radius_lon_deg = (CIRCLE_RIGHT_LON - CIRCLE_LEFT_LON) / 2.0
+    meters_per_deg_lon = 111320.0 * math.cos(math.radians(HOME_LAT))
+    radius_m = radius_lon_deg * meters_per_deg_lon
+    speed_mps = SPEED_KNOTS * KNOTS_TO_MPS
+    # Degrees of heading change per second to trace the target radius.
+    turn_rate_deg_per_s = math.degrees(speed_mps / radius_m)
+
+    # Start at the east boundary, center latitude.
+    # CW from that position means heading south (180°); CCW means north (0°).
     lat = HOME_LAT
-    lon = HOME_LON
-    alt = HOME_ALT
-    heading = HEADING_DEG % 360
+    lon = CIRCLE_RIGHT_LON
+    heading = 180.0 if CIRCLE_CW else 0.0
     last_step = time.time()
+
     while True:
         now = time.time()
-        dt = max(0.001, now - last_step)
+        dt = min(0.5, max(0.001, now - last_step))
         last_step = now
-        lat, lon = destination_point(lat, lon, heading, SPEED_KNOTS * KNOTS_TO_MPS * dt)
-        await send_fix(ws, lat, lon, alt, heading)
+        delta = turn_rate_deg_per_s * dt
+        heading = (heading + (delta if CIRCLE_CW else -delta)) % 360
+        lat, lon = destination_point(lat, lon, heading, speed_mps * dt)
+        await send_fix(ws, lat, lon, HOME_ALT, heading)
         await asyncio.sleep(1.0 / SEND_HZ)
 
 

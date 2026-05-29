@@ -78,7 +78,7 @@ class VehicleSim:
 
     def step(self) -> None:
         now = time.time()
-        dt = max(0.001, now - self.last_step)
+        dt = min(0.5, max(0.001, now - self.last_step))
         self.last_step = now
 
         distance = haversine_m(self.lat, self.lon, self.target["latitude"], self.target["longitude"])
@@ -210,8 +210,9 @@ async def main() -> None:
     uri = f"{SERVER_WS_URL.rstrip('/')}/{VEHICLE_ID}"
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=10, ping_timeout=10) as ws:
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=20) as ws:
                 print(f"{VEHICLE_ID} connected to {uri}")
+                sim.last_step = time.time()
                 receiver = asyncio.create_task(receive_commands(ws, sim))
                 try:
                     while True:
