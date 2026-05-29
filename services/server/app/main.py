@@ -134,6 +134,23 @@ settings = {
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
+# Single persistent InfluxDB writer thread drains a bounded queue.
+# Replaces the old approach of spawning one daemon thread per write,
+# which created up to ~100 OS threads/second under normal load.
+_influx_write_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=500)
+
+
+def _influx_writer_loop() -> None:
+    while True:
+        point = _influx_write_queue.get()
+        if point is None:
+            break
+        _do_influx_write(point)
+
+
+_influx_writer_thread = threading.Thread(target=_influx_writer_loop, daemon=True)
+_influx_writer_thread.start()
+
 
 @app.get("/")
 async def root() -> dict[str, Any]:
@@ -1152,9 +1169,14 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
             vehicle["battery"] = battery
 
         vehicle_snapshot = public_vehicle(vehicle)
+        # Strip history from the per-message update — it grows to thousands of entries
+        # and would otherwise be serialised and sent to the UI 75+ times per second.
+        # The initial /ws/ui snapshot sends the full history; clients accumulate
+        # subsequent positions locally from the NavSatFix messages.
+        slim_snapshot = {k: v for k, v in vehicle_snapshot.items() if k != "history"}
 
     write_influx(update)
-    await broadcast_ui({"op": "vehicle_update", "vehicle": vehicle_snapshot, "message": update})
+    await broadcast_ui({"op": "vehicle_update", "vehicle": slim_snapshot, "message": update})
     await broadcast_ros(topic, msg, msg_type)
 
 
@@ -1317,9 +1339,11 @@ def write_influx(payload: dict[str, Any]) -> None:
     except Exception as exc:
         print(f"Influx point build failed: {exc}")
         return
-    # Offload the blocking network write to a daemon thread so this function
-    # never stalls the asyncio event loop (or the MAVLink IO thread).
-    threading.Thread(target=_do_influx_write, args=(point,), daemon=True).start()
+    # Drop the point onto the persistent writer queue; never stalls the event loop.
+    try:
+        _influx_write_queue.put_nowait(point)
+    except _stdlib_queue.Full:
+        pass  # drop under back-pressure rather than stall
 
 
 def should_write_influx(payload: dict[str, Any]) -> bool:

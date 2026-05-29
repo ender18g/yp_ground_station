@@ -31,7 +31,7 @@ import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer,
 
 import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
 import type { SITLBridge } from "./api";
-import type { Command, Vehicle, VehicleType } from "./types";
+import type { Command, Position, Vehicle, VehicleType } from "./types";
 import { Canvas } from "@react-three/fiber";
 import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/drei";
 
@@ -150,8 +150,21 @@ export function App() {
           setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
         }
         if (payload.op === "vehicle_update") {
-          const vehicle = withLocalVehicleColor(payload.vehicle, localVehicleColorsRef.current);
-          setVehicles((current) => ({ ...current, [vehicle.vehicle_id]: vehicle }));
+          const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
+          setVehicles((current) => {
+            const prev = current[incoming.vehicle_id];
+            // Server no longer sends history in vehicle_update to avoid megabyte-sized
+            // payloads growing over time. Accumulate the trail locally here instead.
+            const prevHistory: Position[] = prev?.history ?? [];
+            const msgType: string = (payload.message as { type?: string } | undefined)?.type ?? "";
+            const pos = incoming.position;
+            const stamp: number | undefined = (payload.message as { stamp?: number } | undefined)?.stamp;
+            const newHistory: Position[] =
+              msgType.includes("NavSatFix") && pos
+                ? [...prevHistory, { latitude: pos.latitude, longitude: pos.longitude, altitude: pos.altitude, stamp }].slice(-500)
+                : prevHistory;
+            return { ...current, [incoming.vehicle_id]: { ...incoming, history: newHistory } };
+          });
           if (payload.message) {
             setMessageLog((current) => [streamMessageFromPayload(payload.message), ...current].slice(0, MAX_MESSAGE_LOG));
           }

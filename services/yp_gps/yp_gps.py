@@ -28,46 +28,51 @@ CIRCLE_RIGHT_LON = float(os.getenv("CIRCLE_RIGHT_LON", "-76.479393"))
 CIRCLE_CW = os.getenv("CIRCLE_CW", "true").lower() != "false"
 
 
+def _init_sim_state() -> dict:
+    """Compute circle constants and starting position once at startup."""
+    radius_lon_deg = (CIRCLE_RIGHT_LON - CIRCLE_LEFT_LON) / 2.0
+    meters_per_deg_lon = 111320.0 * math.cos(math.radians(HOME_LAT))
+    radius_m = radius_lon_deg * meters_per_deg_lon
+    speed_mps = SPEED_KNOTS * KNOTS_TO_MPS
+    return {
+        "lat": HOME_LAT,
+        "lon": CIRCLE_RIGHT_LON,
+        "heading": 180.0 if CIRCLE_CW else 0.0,
+        "last_step": time.time(),
+        "turn_rate": math.degrees(speed_mps / radius_m),
+        "speed_mps": speed_mps,
+    }
+
+
 async def main() -> None:
     uri = f"{SERVER_WS_URL.rstrip('/')}/{VEHICLE_ID}"
+    sim_state = _init_sim_state()
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=10, ping_timeout=10) as ws:
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=20) as ws:
                 print(f"YP GPS connected to {uri} in {GPS_MODE} mode")
+                # Reset timing so the reconnect gap doesn't produce a large dt
+                sim_state["last_step"] = time.time()
                 if GPS_MODE == "serial":
                     await serial_loop(ws)
                 else:
-                    await sim_loop(ws)
+                    await sim_loop(ws, sim_state)
         except Exception as exc:
             print(f"YP GPS reconnecting after error: {exc}")
             await asyncio.sleep(2.0)
 
 
-async def sim_loop(ws: websockets.WebSocketClientProtocol) -> None:
-    # Derive circle geometry from lon boundaries; HOME_LAT is the center latitude.
-    center_lon = (CIRCLE_LEFT_LON + CIRCLE_RIGHT_LON) / 2.0
-    radius_lon_deg = (CIRCLE_RIGHT_LON - CIRCLE_LEFT_LON) / 2.0
-    meters_per_deg_lon = 111320.0 * math.cos(math.radians(HOME_LAT))
-    radius_m = radius_lon_deg * meters_per_deg_lon
-    speed_mps = SPEED_KNOTS * KNOTS_TO_MPS
-    # Degrees of heading change per second to trace the target radius.
-    turn_rate_deg_per_s = math.degrees(speed_mps / radius_m)
-
-    # Start at the east boundary, center latitude.
-    # CW from that position means heading south (180°); CCW means north (0°).
-    lat = HOME_LAT
-    lon = CIRCLE_RIGHT_LON
-    heading = 180.0 if CIRCLE_CW else 0.0
-    last_step = time.time()
-
+async def sim_loop(ws: websockets.WebSocketClientProtocol, state: dict) -> None:
     while True:
         now = time.time()
-        dt = min(0.5, max(0.001, now - last_step))
-        last_step = now
-        delta = turn_rate_deg_per_s * dt
-        heading = (heading + (delta if CIRCLE_CW else -delta)) % 360
-        lat, lon = destination_point(lat, lon, heading, speed_mps * dt)
-        await send_fix(ws, lat, lon, HOME_ALT, heading)
+        dt = min(0.5, max(0.001, now - state["last_step"]))
+        state["last_step"] = now
+        delta = state["turn_rate"] * dt
+        state["heading"] = (state["heading"] + (delta if CIRCLE_CW else -delta)) % 360
+        state["lat"], state["lon"] = destination_point(
+            state["lat"], state["lon"], state["heading"], state["speed_mps"] * dt
+        )
+        await send_fix(ws, state["lat"], state["lon"], HOME_ALT, state["heading"])
         await asyncio.sleep(1.0 / SEND_HZ)
 
 
