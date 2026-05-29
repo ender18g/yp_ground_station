@@ -1,6 +1,7 @@
-# YP Ground Station
+# TRIDENT YP
+### Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol
 
-![YP Ground Station screenshot](screenshots/screen1.png)
+![TRIDENT YP screenshot](screenshots/screen1.png)
 
 Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects telemetry from USVs, UAVs, UUVs, a YP GPS feed, and an optional PX4/MAVROS UAV simulation, logs ROS-shaped messages to InfluxDB, and serves a local-first React/Leaflet map interface for monitoring and command.
 
@@ -13,7 +14,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 - `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
 - `px4-sitl-uav`: Optional profile-gated PX4 SITL multicopter simulation.
 - `mavros`, `ros-master`, and `rosbridge`: Optional ROS/MAVROS path used by the PX4 UAV simulation.
-- `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into the YP ground station, and translates YP waypoint/RTB commands back to MAVROS/PX4.
+- `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into TRIDENT YP, and translates YP waypoint/RTB commands back to MAVROS/PX4.
 - `influxdb`: Time-series storage for telemetry and command messages.
 
 ## Quick Start

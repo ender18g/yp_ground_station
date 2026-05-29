@@ -458,11 +458,13 @@ export function App() {
         <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
       )}
 
+      <div className="trident-tagline">Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol</div>
+
       <div className="topbar">
         <div className="brand">
           <img className="brand-logo" src={BRAND_LOGO_URL} alt="USNA crest" />
           <div className="brand-copy">
-            <strong>YP Vehicle View</strong>
+            <strong>TRIDENT YP Vehicle View</strong>
             <div className="brand-statuses">
               <span className={connected ? "brand-status online" : "brand-status offline"}>
                 <EthernetPort size={15} />
@@ -708,10 +710,10 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
   const linePoints = waypoints.map((wp) => [wp.x, wp.z, wp.y] as [number, number, number]);
 
   return (
-    <div className="planner-container" style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", overflowY: "auto", backgroundColor: "#0f172a", color: "white", paddingTop: 60, paddingBottom: 40 }}>
+    <div className="planner-container" style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", overflow: "hidden", backgroundColor: "#0f172a", color: "white", paddingTop: 60 }}>
       
       {/* TOP PANEL: 3D Render Area */}
-      <div style={{ flex: "0 0 auto", height: "45vh", minHeight: 350, position: 'relative', borderBottom: '2px solid #334155' }}>
+      <div style={{ flex: "2 1 0", minHeight: 0, position: 'relative', borderBottom: '2px solid #334155', overflow: 'hidden' }}>
         <Canvas camera={{ position: [60, 50, 60], fov: 45 }}>
           <ambientLight intensity={0.5} />
           <directionalLight position={[10, 10, 5]} intensity={1.5} />
@@ -743,10 +745,10 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
       </div>
 
       {/* BOTTOM PANEL: Split 2D View and Altitude View */}
-      <div style={{ flex: "0 0 auto", minHeight: 500, display: "flex", flexWrap: "wrap" }}>
+      <div style={{ flex: "3 1 0", minHeight: 0, display: "flex", overflow: "hidden" }}>
         
         {/* BOTTOM LEFT: 2D Top-Down View */}
-        <div style={{ flex: "1 1 400px", padding: 20, borderRight: '2px solid #334155', display: "flex", flexDirection: "column" }}>
+        <div style={{ flex: "1 1 0", minWidth: 0, padding: 20, borderRight: '2px solid #334155', display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
             <h2 style={{ fontSize: "1.2rem", fontWeight: "bold" }}>Lateral Planner (Top-Down)</h2>
             
@@ -768,7 +770,7 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
 
           </div>
           
-          <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", alignItems: "center", overflow: "hidden" }}>
             <InteractiveWaypoint2D 
               waypoints={waypoints} 
               selectedId={selectedId}
@@ -784,10 +786,10 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
         </div>
 
         {/* BOTTOM RIGHT: Altitude Profile & Dispatch Controls */}
-        <div style={{ flex: "1 1 400px", padding: 20, display: "flex", flexDirection: "column" }}>
+        <div style={{ flex: "1 1 0", minWidth: 0, padding: 20, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <h2 style={{ fontSize: "1.2rem", fontWeight: "bold", marginBottom: 10 }}>Altitude Profile</h2>
           
-          <div style={{ flex: 1, minHeight: 250, backgroundColor: "#1e293b", borderRadius: 8, border: "1px solid #475569", position: "relative", marginBottom: 15, padding: "10px 0" }}>
+          <div style={{ flex: 1, minHeight: 0, backgroundColor: "#1e293b", borderRadius: 8, border: "1px solid #475569", position: "relative", marginBottom: 15, padding: "10px 0", overflow: "hidden" }}>
              <AltitudeProfile 
                 waypoints={waypoints} 
                 selectedId={selectedId} 
