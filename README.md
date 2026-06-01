@@ -8,8 +8,8 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 ## What Is Included
 
 - `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, and InfluxDB logging.
-- `web`: React + TypeScript + Leaflet UI with vehicle markers, headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, and a live message drawer.
-- `sim-vehicle`: Lightweight configurable simulated UAV, USV, or UUV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz.
+- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, and view-only mode.
+- `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution via embedded waypoints from the server.
 - `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
 - `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
 - `px4-sitl-uav`: Optional profile-gated PX4 SITL multicopter simulation.
@@ -107,17 +107,20 @@ The map shows:
 - Green USV markers
 - Orange UAV markers
 - Yellow UUV markers
+- Amber UGV markers (ground rovers)
 - Gray YP marker
 - Heading arrow for each vehicle
 - Altitude beside each marker
 - Adjustable recent trail duration
 - Hover popup with telemetry
-- Click modal with `RTB` and waypoint command actions
+- Click modal with `RTB` and waypoint command actions (hidden for non-commandable vehicles in view-only mode)
 - Hideable map layer/source menu opened with the layer icon
 - Optional YP range rings at 50 m, 100 m, and 200 m
 - Live message drawer opened with the message icon
-- SITL bridge panel (cable icon) to connect ArduPilot SITL instances by TCP/UDP address at runtime
+- Vehicle Connections panel (cable icon) to connect ArduPilot SITL instances or RFD-900 radios at runtime
 - SAR mission patterns overlaid on the map when a grid search or MOB mission is dispatched; click the filled start dot to open a popup and clear the pattern manually
+
+The top bar also contains a **Waypoint Planner** tab (chart icon) for visual top-down mission planning, and a **View only** badge is shown when the UI is loaded in view-only mode (see [View-Only Mode](#view-only-mode)).
 
 The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
 
@@ -136,7 +139,7 @@ Open the **SITL** panel in the UI (cable icon in the top bar), enter a pymavlink
 | UDP input | `udpin:0.0.0.0:14551` | Receive MAVLink datagrams |
 | UDP output | `udpout:192.168.1.100:14550` | Send MAVLink datagrams to host |
 
-Leave the **Vehicle ID** field empty to auto-derive an ID from the connection URL (e.g. `sitl-localhost-5760`), or enter a custom ID.
+Leave the **Vehicle ID** field empty to auto-derive an ID from the connection URL (e.g. `vehicle-localhost-5760`), or enter a custom ID.
 
 The bridge detects the vehicle frame type from the first MAVLink heartbeat and updates the map marker style accordingly. Telemetry is streamed at 10 Hz. Multiple SITL instances can be connected simultaneously.
 
@@ -177,7 +180,7 @@ The server computes a boustrophedon (lawnmower) waypoint pattern centred on the 
 
 ### Man Overboard (MOB)
 
-Click the **MOB** button in the top bar and confirm. The server:
+Click the **MOB** button in the top bar and confirm. The MOB modal now includes a **Dispatch vehicle** dropdown so you can choose exactly which connected vehicle receives the mission. UGV vehicles and the YP itself are excluded from the dropdown. The server:
 
 1. Reads the YP vessel's recent position history to reconstruct the ship's track.
 2. Generates a set of parallel lanes centred on the track and expanding outward — the number of lanes is determined by the corridor half-width divided by the swath width.
@@ -200,6 +203,77 @@ When a SAR mission is dispatched the full flight path is broadcast to all connec
 ### SAR With Hardware Bridges
 
 The `arducopter_ws_bridge` service supports the same `search_grid` and `mob` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over its WebSocket, pauses telemetry, uploads the mission via direct MAVLink, arms, and starts AUTO mode. The pattern overlay is shown on the map at dispatch time.
+
+## RFD-900 / Telemetry Radio Support
+
+The ground station can connect to a real MAVLink vehicle over an RFD-900 (or any serial telemetry radio) through the browser Connections panel.
+
+### Windows Host TCP Relay
+
+Because Docker on Windows cannot directly access COM ports, a host-side relay script bridges the serial radio to a TCP port that the `yp-server` container can reach:
+
+```bash
+pip install pyserial
+python services/com_tcp_relay.py --port COM12 --baud 57600 --tcp-port 5762
+```
+
+The relay opens the COM port and listens for a single TCP connection. When `yp-server` connects, bytes flow bidirectionally between Docker and the radio. The relay keeps the serial port open and accepts a new TCP connection automatically each time Docker reconnects.
+
+### Connecting in the UI
+
+Open the **Connections** panel (cable icon), switch to the **RFD-900** tab. Select a serial port from the dropdown (populated by the `/api/serial-ports` endpoint), set a baud rate, and click **Connect** — the server connects using the relay URL `tcp:host.docker.internal:5762` automatically.
+
+Alternatively, use the **Network** tab and enter the relay URL directly:
+
+```
+tcp:host.docker.internal:5762
+```
+
+### Serial Device Passthrough (Linux / native Docker)
+
+On Linux the radio can be passed directly to the server container without a relay. Uncomment the `devices:` block in `docker-compose.yml` under `yp-server`:
+
+```yaml
+devices:
+  - /dev/ttyUSB0:/dev/ttyUSB0
+```
+
+Then connect using the serial URL in the Network tab:
+
+```
+serial:/dev/ttyUSB0:57600
+```
+
+### Serial Port API
+
+```http
+GET /api/serial-ports   → list serial ports visible to the server container
+```
+
+## View-Only Mode
+
+The UI can be opened in view-only mode by navigating to the `/view` path or appending `?view=true` to any URL:
+
+```
+http://localhost:8080/view
+http://localhost:8080/?view=true
+```
+
+In view-only mode:
+
+- Live telemetry updates and the map operate normally.
+- Commands (RTB, Waypoint, SAR) are **blocked** for real hardware vehicles. The RTB and Waypoint buttons are hidden in the vehicle modal.
+- Simulated vehicles (those whose IDs start with `sim-`) remain fully commandable.
+- The Vehicle Connections panel (cable icon) is hidden; new connections cannot be added.
+- A **View only** badge is displayed in the top status bar.
+
+This is useful for displaying the situational picture on secondary screens or for observers who should not be able to send commands to real vehicles.
+
+## Waypoint Planner
+
+A visual **Waypoint Planner** tab is available in the top bar (chart/ruler icon). It provides a top-down lateral planning view for building waypoint routes before dispatching them. The planner displays vehicle positions and the current YP position for spatial context.
+
+> **Note:** Command-and-control (C2) integration is not yet implemented. The planner is currently a visual aid only.
 
 ## Waypoint And RTB Commands
 
@@ -441,6 +515,7 @@ Useful environment variables:
 | `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent on-demand map tile cache |
 | `yp-server` | `OSM_TILE_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Street tile source URL template |
 | `yp-server` | `EARTH_TILE_URL` | `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` | Satellite tile source URL template |
+| `yp-server` | `MAX_TILE_ZOOM` | `20` | Maximum tile zoom level served by the proxy |
 | `yp-server` | `VEHICLE_TTL_SECONDS` | `30` | Seconds before an unheard vehicle is considered stale |
 | `yp-server` | `HISTORY_MAX_POINTS` | `5000` | Maximum position history points kept per vehicle |
 | `yp-server` | `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | MOB search corridor half-width in metres |
@@ -448,7 +523,7 @@ Useful environment variables:
 | `yp-server` | `SAR_ALTITUDE_M` | `30.0` | SAR search altitude in metres |
 | `yp-server` | `SAR_TAKEOFF_ALT_M` | `30.0` | SAR takeoff altitude in metres |
 | `yp-server` | `SAR_CLIMB_SPEED_MS` | `8.0` | SAR climb speed in m/s |
-| `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `usv`, or `uuv` |
+| `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
 | `sim-*` | `HOME_LON` | `-76.4819` | RTB/home longitude |
@@ -456,6 +531,9 @@ Useful environment variables:
 | `yp-gps` | `SERIAL_PORT` | `/dev/ttyUSB0` | NMEA GPS serial device |
 | `yp-gps` | `HEADING_DEG` | `330` | Simulated YP heading in degrees |
 | `yp-gps` | `SPEED_KNOTS` | `3` | Simulated YP speed |
+| `yp-gps` | `CIRCLE_LEFT_LON` | *(unset)* | Left longitude bound for circular YP movement in sim mode |
+| `yp-gps` | `CIRCLE_RIGHT_LON` | *(unset)* | Right longitude bound for circular YP movement in sim mode |
+| `yp-gps` | `CIRCLE_CW` | `false` | `true` to start the circular track clockwise |
 | `px4-sitl-uav` | `PX4_HOME_LAT` | `38.98490` | PX4 SITL home latitude |
 | `px4-sitl-uav` | `PX4_HOME_LON` | `-76.47880` | PX4 SITL home longitude |
 | `px4-sitl-uav` | `PX4_HOME_ALT` | `45.0` | PX4 SITL home altitude |
