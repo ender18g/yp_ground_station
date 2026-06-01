@@ -231,9 +231,9 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
         )
 
     if not vehicle_id:
-        # Derive a stable ID from the URL: tcp:localhost:5760 -> sitl-localhost-5760
+        # Derive a stable ID from the URL: tcp:localhost:5760 -> vehicle-localhost-5760
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", mavlink_url.split(":", 1)[-1]).strip("-")
-        vehicle_id = f"sitl-{slug}" if slug else f"sitl-{len(sitl_bridges) + 1}"
+        vehicle_id = f"vehicle-{slug}" if slug else f"vehicle-{len(sitl_bridges) + 1}"
 
     existing_task = sitl_bridges.get(vehicle_id)
     if existing_task and not existing_task.done():
@@ -254,8 +254,29 @@ async def disconnect_sitl(vehicle_id: str) -> JSONResponse:
     sitl_bridges.pop(vehicle_id, None)
     sitl_bridge_info.pop(vehicle_id, None)
     vehicle_queues.pop(vehicle_id, None)
+    async with state_lock:
+        vehicles.pop(vehicle_id, None)
+    await broadcast_ui({"op": "vehicle_removed", "vehicle_id": vehicle_id})
     await broadcast_ui({"op": "sitl_bridge_removed", "vehicle_id": vehicle_id})
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/serial-ports")
+async def list_serial_ports_endpoint() -> dict[str, Any]:
+    """Return serial ports available on the server host.
+
+    Requires the server container to have device passthrough configured (see
+    docker-compose ``devices:`` key) and pyserial installed.
+    """
+    try:
+        import serial.tools.list_ports as _list_ports
+        ports = [
+            {"device": p.device, "description": p.description, "hwid": p.hwid}
+            for p in _list_ports.comports()
+        ]
+    except ImportError:
+        ports = []
+    return {"ports": ports}
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,11 @@ services:
       - ./data/tile-cache:/data/tile-cache
     depends_on:
       - influxdb
+    # To connect an RFD-900 (or any serial telemetry radio) via the browser UI,
+    # pass the USB device through to the server container. Adjust the device path
+    # to match what appears on your host (check with: python -m serial.tools.list_ports)
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
 
   web:
     build:

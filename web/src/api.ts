@@ -109,3 +109,20 @@ export async function connectSITL(url: string, vehicleId?: string): Promise<Conn
 export async function disconnectSITL(vehicleId: string): Promise<void> {
   await fetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, { method: "DELETE" });
 }
+
+// ---------------------------------------------------------------------------
+// Serial port listing
+// ---------------------------------------------------------------------------
+
+export interface SerialPortInfo {
+  device: string;
+  description: string;
+  hwid: string;
+}
+
+export async function listSerialPorts(): Promise<SerialPortInfo[]> {
+  const response = await fetch("/api/serial-ports");
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.ports ?? [];
+}
