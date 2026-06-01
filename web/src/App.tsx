@@ -371,8 +371,8 @@ export function App() {
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
       
       {activeTab === "map" ? (
-        <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
-          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
+        <MapContainer center={center} zoom={17} minZoom={3} maxZoom={20} zoomControl className="map">
+          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} maxZoom={20} />
           <MapZoomTracker onZoom={setMapZoom} />
           <MapCommander
             onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
@@ -2247,7 +2247,7 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
 
   const baseSize = baseSizes[type] ?? [60, 30];
 
-  const scale = Math.pow(2, zoom - 17);
+  const scale = Math.pow(2, Math.min(zoom, 17) - 17);
   const phoneScale = isPhoneViewer ? 0.6 : 1;
   
   const finalWidth = Math.round(baseSize[0] * scale * phoneScale);
