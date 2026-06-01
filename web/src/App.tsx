@@ -40,6 +40,12 @@ import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
 const MAX_MESSAGE_LOG = 700;
 const DEMO_MODE = import.meta.env.VITE_STATIC_DEMO === "true" || window.location.pathname.startsWith("/demo") || window.location.search.includes("demo=true");
+/** View-only mode: live data but commands blocked for real (non-sim) vehicles. */
+const VIEW_MODE = !DEMO_MODE && (window.location.pathname.startsWith("/view") || window.location.search.includes("view=true"));
+/** Returns true if a vehicle ID belongs to a docker-spawned sim vehicle. */
+function isSimVehicle(vehicleId: string): boolean {
+  return vehicleId.startsWith("sim-");
+}
 const YP_DEMO_SPEED_MPS = 5 * 0.514444;
 const YP_DEMO_HEADING = 330;
 const DEMO_KEEP_IN_RANGE_M = 200;
@@ -304,6 +310,9 @@ export function App() {
       handleDemoCommand(demoSimsRef.current, vehicleId, body);
       return;
     }
+    if (VIEW_MODE && !isSimVehicle(vehicleId)) {
+      return; // Block commands to real vehicles in view-only mode
+    }
     sendCommand(wsRef.current, vehicleId, body);
   };
 
@@ -354,7 +363,11 @@ export function App() {
   };
 
   const sendAllToMapPoint = (lat: number, lon: number) => {
-    const commandableVehicles = vehicleList.filter((candidate) => candidate.vehicle_type !== "yp");
+    const commandableVehicles = vehicleList.filter((candidate) => {
+      if (candidate.vehicle_type === "yp") return false;
+      if (VIEW_MODE && !isSimVehicle(candidate.vehicle_id)) return false;
+      return true;
+    });
     const nextMarkers: Record<string, WaypointMarker> = {};
     commandableVehicles.forEach((vehicle, index) => {
       const offset = waypointOffset(lat, lon, index, commandableVehicles.length);
@@ -406,7 +419,9 @@ export function App() {
               onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
             />
           ))}
-          {Object.values(waypointMarkers).map((waypoint) => (
+          {Object.values(waypointMarkers)
+            .filter((waypoint) => !VIEW_MODE || isSimVehicle(waypoint.vehicle_id))
+            .map((waypoint) => (
             <WaypointCrosshair
               key={waypoint.vehicle_id}
               waypoint={waypoint}
@@ -451,7 +466,7 @@ export function App() {
       {activeTab === "map" && mapActionMenu && (
         <MapActionMenu
           menu={mapActionMenu}
-          vehicles={vehicleList}
+          vehicles={VIEW_MODE ? vehicleList.filter((v) => v.vehicle_type === "yp" || isSimVehicle(v.vehicle_id)) : vehicleList}
           preferredVehicleId={preferredWaypointVehicleId}
           onSend={(vehicleId) => {
             sendWaypoint(vehicleId, mapActionMenu.lat, mapActionMenu.lon);
@@ -493,6 +508,12 @@ export function App() {
                 <Ship size={15} />
                 {vehicleList.length} tracked
               </span>
+              {VIEW_MODE && (
+                <span className="brand-status view-only">
+                  <Radio size={15} />
+                  View only
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -512,13 +533,15 @@ export function App() {
             >
             <Crosshair size={19} />
           </button>
-          <button
-            className={showSITL ? "icon-button active" : "icon-button"}
-            title="Vehicle Connections"
-            onClick={() => { setShowSITL((v) => !v); setShowSettings(false); }}
-          >
-            <Cable size={19} />
-          </button>
+          {!VIEW_MODE && (
+            <button
+              className={showSITL ? "icon-button active" : "icon-button"}
+              title="Vehicle Connections"
+              onClick={() => { setShowSITL((v) => !v); setShowSettings(false); }}
+            >
+              <Cable size={19} />
+            </button>
+          )}
           <button
             className={showSettings ? "icon-button active" : "icon-button"}
             title="Settings"
@@ -602,6 +625,7 @@ export function App() {
       {selected && (
         <VehicleModal
           vehicle={selected}
+          canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
           onClose={() => setSelected(null)}
           onRtb={() => {
             command(selected.vehicle_id, { type: "rtb" });
@@ -633,7 +657,11 @@ export function App() {
         title="Man Overboard — dispatch SAR search"
         onClick={(e) => {
           e.stopPropagation();
-          const commandable = Object.values(vehicles).filter((v) => v.vehicle_type !== "yp" && v.connected !== false);
+          const commandable = Object.values(vehicles).filter((v) => {
+            if (v.vehicle_type === "yp" || v.vehicle_type === "ugv") return false;
+            if (VIEW_MODE && !isSimVehicle(v.vehicle_id)) return false;
+            return v.connected !== false;
+          });
           setMobVehicleId(commandable[0]?.vehicle_id ?? "");
           setMobError(null);
           setMobModalOpen(true);
@@ -657,7 +685,11 @@ export function App() {
             <div className="mob-modal-vehicle">
               <label className="mob-vehicle-label">Dispatch vehicle</label>
               {(() => {
-                const commandable = Object.values(vehicles).filter((v) => v.vehicle_type !== "yp" && v.connected !== false);
+                const commandable = Object.values(vehicles).filter((v) => {
+                  if (v.vehicle_type === "yp" || v.vehicle_type === "ugv") return false;
+                  if (VIEW_MODE && !isSimVehicle(v.vehicle_id)) return false;
+                  return v.connected !== false;
+                });
                 return commandable.length > 0 ? (
                   <select
                     className="mob-vehicle-select"
@@ -2568,6 +2600,7 @@ function lightenHex(hex: string, amount: number): string {
 
 function VehicleModal({
   vehicle,
+  canCommand = true,
   onClose,
   onRtb,
   onWaypoint,
@@ -2575,6 +2608,7 @@ function VehicleModal({
   onColorSave,
 }: {
   vehicle: Vehicle;
+  canCommand?: boolean;
   onClose: () => void;
   onRtb: () => void;
   onWaypoint: () => void;
@@ -2605,10 +2639,12 @@ function VehicleModal({
           <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
         </div>
         <div className="modal-actions">
-          <button className="danger" onClick={onRtb}>
-            <RotateCcw size={18} />
-            RTB
-          </button>
+          {canCommand && (
+            <button className="danger" onClick={onRtb}>
+              <RotateCcw size={18} />
+              RTB
+            </button>
+          )}
           <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
             <Brush size={18} />
             Color
@@ -2619,10 +2655,12 @@ function VehicleModal({
               Stream Video
             </button>
           )}
-          <button className="primary" onClick={onWaypoint}>
-            <Route size={18} />
-            Waypoint
-          </button>
+          {canCommand && (
+            <button className="primary" onClick={onWaypoint}>
+              <Route size={18} />
+              Waypoint
+            </button>
+          )}
         </div>
         {showColorPalette && (
           <div className="color-panel">

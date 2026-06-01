@@ -703,6 +703,8 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
         if requested_id:
             if requested_id not in vehicles:
                 return JSONResponse({"error": f"Vehicle '{requested_id}' not found"}, status_code=404)
+            if vehicles[requested_id].get("vehicle_type") == "ugv":
+                return JSONResponse({"error": "UGVs cannot be dispatched for a Man Overboard search"}, status_code=422)
             target_vehicle_id = requested_id
         else:
             # Prefer UAV SITL bridges first, then any SITL bridge, then hardware
@@ -719,7 +721,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                 # Tier 2 — any SITL bridge
                 or next(
                     (v for v in vehicles.values()
-                     if v.get("vehicle_type") != "yp"
+                     if v.get("vehicle_type") not in ("yp", "ugv")
                      and v.get("connected")
                      and v["vehicle_id"] in sitl_bridges),
                     None,
@@ -727,7 +729,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                 # Tier 3 — hardware bridge (non-sim- prefix)
                 or next(
                     (v for v in vehicles.values()
-                     if v.get("vehicle_type") != "yp"
+                     if v.get("vehicle_type") not in ("yp", "ugv")
                      and v.get("connected")
                      and not v["vehicle_id"].startswith("sim-")),
                     None,
@@ -740,10 +742,10 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                      and v["vehicle_id"].startswith("sim-")),
                     None,
                 )
-                # Tier 5 — any connected non-YP sim vehicle
+                # Tier 5 — any connected non-YP non-UGV sim vehicle
                 or next(
                     (v for v in vehicles.values()
-                     if v.get("vehicle_type") != "yp"
+                     if v.get("vehicle_type") not in ("yp", "ugv")
                      and v.get("connected")
                      and v["vehicle_id"].startswith("sim-")),
                     None,

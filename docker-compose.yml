@@ -79,18 +79,34 @@ services:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
 
-  sim-uav:
+  # sim-uav:
+  #   build:
+  #     context: ./services/sim_vehicle
+  #   environment:
+  #     SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+  #     VEHICLE_TYPE: uav
+  #     VEHICLE_ID: sim-uav
+  #     HOME_LAT: "38.989639"
+  #     HOME_LON: "-76.483322"
+  #     HOME_ALT: "45.0"
+  #     SPAWN_JITTER_DEG: "0.0003"
+  #     TARGET_JITTER_DEG: "0.0010"
+  #     SEND_HZ: "5"
+  #   depends_on:
+  #     - yp-server
+
+  sim-uav1:
     build:
       context: ./services/sim_vehicle
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
       VEHICLE_ID: sim-uav
-      HOME_LAT: "38.989639"
-      HOME_LON: "-76.483322"
+      HOME_LAT: "38.984134"
+      HOME_LON: "-76.509564"
       HOME_ALT: "45.0"
-      SPAWN_JITTER_DEG: "0.0003"
-      TARGET_JITTER_DEG: "0.0010"
+      SPAWN_JITTER_DEG: "0.0002"
+      TARGET_JITTER_DEG: "0.0011"
       SEND_HZ: "5"
     depends_on:
       - yp-server

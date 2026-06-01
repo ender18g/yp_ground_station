@@ -126,6 +126,10 @@ input {
   color: #b42318;
 }
 
+.brand-status.view-only {
+  color: #92400e;
+}
+
 .topbar > * {
   pointer-events: auto;
 }
