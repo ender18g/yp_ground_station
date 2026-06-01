@@ -114,6 +114,7 @@ export function App() {
   const [mobModalOpen, setMobModalOpen] = useState(false);
   const [mobSending, setMobSending] = useState(false);
   const [mobError, setMobError] = useState<string | null>(null);
+  const [mobVehicleId, setMobVehicleId] = useState<string>("");
   const [showSITL, setShowSITL] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
@@ -323,7 +324,7 @@ export function App() {
     setMobSending(true);
     setMobError(null);
     try {
-      const result = await triggerMOB();
+      const result = await triggerMOB(mobVehicleId || undefined);
       const vehicleId = result.vehicle_id ?? "unknown";
 
       const mobMessage: StreamMessage = {
@@ -632,6 +633,9 @@ export function App() {
         title="Man Overboard — dispatch SAR search"
         onClick={(e) => {
           e.stopPropagation();
+          const commandable = Object.values(vehicles).filter((v) => v.vehicle_type !== "yp" && v.connected !== false);
+          setMobVehicleId(commandable[0]?.vehicle_id ?? "");
+          setMobError(null);
           setMobModalOpen(true);
         }}
       >
@@ -647,8 +651,29 @@ export function App() {
               Man Overboard
             </div>
             <div className="mob-modal-body">
-              This will immediately dispatch the nearest available vehicle to search
+              This will immediately dispatch the selected vehicle to search
               the YP vessel&apos;s recent track. Confirm only if a person is overboard.
+            </div>
+            <div className="mob-modal-vehicle">
+              <label className="mob-vehicle-label">Dispatch vehicle</label>
+              {(() => {
+                const commandable = Object.values(vehicles).filter((v) => v.vehicle_type !== "yp" && v.connected !== false);
+                return commandable.length > 0 ? (
+                  <select
+                    className="mob-vehicle-select"
+                    value={mobVehicleId}
+                    onChange={(e) => setMobVehicleId(e.target.value)}
+                    disabled={mobSending}
+                  >
+                    <option value="">— nearest available —</option>
+                    {commandable.map((v) => (
+                      <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="mob-no-vehicles">No connected vehicles — server will choose automatically</div>
+                );
+              })()}
             </div>
             {mobError && (
               <div className="mob-modal-error">

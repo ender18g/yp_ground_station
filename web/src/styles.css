@@ -1295,6 +1295,50 @@ input {
   font-weight: 500;
 }
 
+.mob-modal-vehicle {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.mob-vehicle-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #7f1d1d;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mob-vehicle-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  background: #fff7f7;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mob-vehicle-select:focus {
+  outline: none;
+  border-color: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+}
+
+.mob-vehicle-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mob-no-vehicles {
+  font-size: 12px;
+  color: #b45309;
+  padding: 6px 0;
+}
+
 /* SAR pattern label tooltip */
 .sar-label-tooltip {
   background: rgba(15, 23, 42, 0.88) !important;
