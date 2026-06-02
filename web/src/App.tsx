@@ -121,6 +121,10 @@ export function App() {
   const [mobSending, setMobSending] = useState(false);
   const [mobError, setMobError] = useState<string | null>(null);
   const [mobVehicleId, setMobVehicleId] = useState<string>("");
+  const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
+  const [mobSwathM, setMobSwathM] = useState(20);
+  const [mobAltM, setMobAltM] = useState(30);
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob">("display");
   const [showSITL, setShowSITL] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
@@ -333,7 +337,7 @@ export function App() {
     setMobSending(true);
     setMobError(null);
     try {
-      const result = await triggerMOB(mobVehicleId || undefined);
+      const result = await triggerMOB(mobVehicleId || undefined, mobTrackSeconds, mobSwathM, mobAltM);
       const vehicleId = result.vehicle_id ?? "unknown";
 
       const mobMessage: StreamMessage = {
@@ -400,7 +404,7 @@ export function App() {
       
       {activeTab === "map" ? (
         <MapContainer center={center} zoom={17} minZoom={3} maxZoom={20} zoomControl className="map">
-          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} maxZoom={20} />
+          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} maxNativeZoom={mapLayer.maxNativeZoom} maxZoom={20} />
           <MapZoomTracker onZoom={setMapZoom} />
           <MapCommander
             onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
@@ -585,28 +589,65 @@ export function App() {
             <Settings size={17} />
             <strong>Settings</strong>
           </div>
-          <label>
-            Trail window
-            <span>{trailSeconds}s</span>
-          </label>
-          <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
-          <label className="setting-toggle">
-            <span>YP range rings</span>
-            <input type="checkbox" checked={showYpRangeRings} onChange={(event) => setShowYpRangeRings(event.target.checked)} />
-          </label>
-          <label>
-            DB retention
-            <span>{messageRetentionMinutes} min</span>
-          </label>
-          <input
-            min={1}
-            max={1440}
-            step={1}
-            type="range"
-            value={messageRetentionMinutes}
-            disabled={DEMO_MODE}
-            onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
-          />
+          <div className="settings-tabs">
+            <button
+              className={settingsTab === "display" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("display")}
+            >
+              Display
+            </button>
+            <button
+              className={settingsTab === "mob" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("mob")}
+            >
+              Man Overboard
+            </button>
+          </div>
+          {settingsTab === "display" && (
+            <>
+              <label>
+                Trail window
+                <span>{trailSeconds}s</span>
+              </label>
+              <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
+              <label className="setting-toggle">
+                <span>YP range rings</span>
+                <input type="checkbox" checked={showYpRangeRings} onChange={(event) => setShowYpRangeRings(event.target.checked)} />
+              </label>
+              <label>
+                DB retention
+                <span>{messageRetentionMinutes} min</span>
+              </label>
+              <input
+                min={1}
+                max={1440}
+                step={1}
+                type="range"
+                value={messageRetentionMinutes}
+                disabled={DEMO_MODE}
+                onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
+              />
+            </>
+          )}
+          {settingsTab === "mob" && (
+            <>
+              <label>
+                Track length
+                <span>{mobTrackSeconds}s</span>
+              </label>
+              <input min={10} max={600} step={10} type="range" value={mobTrackSeconds} onChange={(e) => setMobTrackSeconds(Number(e.target.value))} />
+              <label>
+                Swath width
+                <span>{mobSwathM} m</span>
+              </label>
+              <input min={5} max={100} step={5} type="range" value={mobSwathM} onChange={(e) => setMobSwathM(Number(e.target.value))} />
+              <label>
+                Search altitude
+                <span>{mobAltM} m</span>
+              </label>
+              <input min={5} max={120} step={5} type="range" value={mobAltM} onChange={(e) => setMobAltM(Number(e.target.value))} />
+            </>
+          )}
         </div>
       )}
 
@@ -1192,36 +1233,44 @@ function filterLabel(depth: number): string {
   return ["Topic root", "Vehicle ID", "Message topic", "Subtopic"][depth] ?? `Level ${depth + 1}`;
 }
 
-function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribution: string } {
+function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribution: string; maxNativeZoom: number } {
   if (base === "street") {
     return {
       auto: {
         url: "/tiles/osm/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
       cache: {
         url: "/tiles/cache/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
       online: {
         url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
     }[source];
   }
 
+  // Satellite: cached tiles only go to z=19 so we overzoom from there;
+  // online Esri World Imagery natively serves z=20 in high-detail areas.
   return {
     auto: {
       url: "/tiles/earth/{z}/{x}/{y}.png",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 19,
     },
     cache: {
       url: "/tiles/earth-cache/{z}/{x}/{y}.png",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 19,
     },
     online: {
       url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 20,
     },
   }[source];
 }
@@ -1604,6 +1653,19 @@ function MapMenu({
   );
 }
 
+function gridSliderToMeters(v: number): number {
+  // Maps slider 0–100 to 5–500 m on a log scale for finer control near 5 m
+  const min = Math.log(5);
+  const max = Math.log(500);
+  return Math.round(Math.exp(min + (v / 100) * (max - min)));
+}
+
+function gridMetersToSlider(m: number): number {
+  const min = Math.log(5);
+  const max = Math.log(500);
+  return Math.round(((Math.log(m) - min) / (max - min)) * 100);
+}
+
 function MapActionMenu({
   menu,
   vehicles,
@@ -1621,7 +1683,8 @@ function MapActionMenu({
 }) {
   const [showVehicles, setShowVehicles] = useState(false);
   const [showSearchGrid, setShowSearchGrid] = useState(false);
-  const [gridSizeM, setGridSizeM] = useState(200);
+  const [gridSlider, setGridSlider] = useState(() => gridMetersToSlider(200));
+  const gridSizeM = gridSliderToMeters(gridSlider);
   const [swathM, setSwathM] = useState(20);
   const [altM, setAltM] = useState(30);
   const commandableVehicles = vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp");
@@ -1669,9 +1732,9 @@ function MapActionMenu({
               <span>{gridSizeM} m</span>
             </label>
             <input
-              type="range" min={50} max={500} step={25}
-              value={gridSizeM}
-              onChange={(e) => setGridSizeM(Number(e.target.value))}
+              type="range" min={0} max={100} step={1}
+              value={gridSlider}
+              onChange={(e) => setGridSlider(Number(e.target.value))}
             />
             <label>
               Swath width

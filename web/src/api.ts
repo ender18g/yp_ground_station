@@ -52,11 +52,16 @@ export interface MobResult {
 }
 
 /** Trigger a Man Overboard search via the server's SAR endpoint. */
-export async function triggerMOB(vehicleId?: string): Promise<MobResult> {
+export async function triggerMOB(vehicleId?: string, trackSeconds?: number, swathM?: number, altM?: number): Promise<MobResult> {
+  const body: Record<string, unknown> = {};
+  if (vehicleId) body.vehicle_id = vehicleId;
+  if (trackSeconds !== undefined) body.track_seconds = trackSeconds;
+  if (swathM !== undefined) body.swath_m = swathM;
+  if (altM !== undefined) body.altitude_m = altM;
   const response = await fetch("/api/sar/mob", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(vehicleId ? { vehicle_id: vehicleId } : {}),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
