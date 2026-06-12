@@ -15,7 +15,8 @@ services:
 
   yp-server:
     build:
-      context: ./services/server
+      context: ./services
+      dockerfile: server/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -199,6 +200,12 @@ services:
       tgt_component:=1"
     depends_on:
       - ros-master
+      # NOTE: px4-sitl-uav is listed here because MAVROS connects to it over
+      # MAVLink (fcu_url above). The px4-sitl-uav service block is currently
+      # commented out in this file because PX4 SITL is optional and
+      # resource-heavy. To re-enable it, uncomment the px4-sitl-uav service
+      # block above. Removing this depends_on entry would let mavros start
+      # but it would fail to get a MAVLink connection.
       - px4-sitl-uav
 
   rosbridge:
@@ -238,7 +245,8 @@ services:
   arducopter-bridge:
     profiles: ["arducopter"]
     build:
-      context: ./services/arducopter_ws_bridge
+      context: ./services
+      dockerfile: arducopter_ws_bridge/Dockerfile
     environment:
       VEHICLE_ID: arducopter-uav
       VEHICLE_TYPE: uav
@@ -248,19 +256,24 @@ services:
     depends_on:
       - yp-server
 
-  arducopter-sitl:
-    profiles: ["arducopter"]
-    build:
-      context: ./services/arducopter_sitl
-    environment:
-      HOME_LAT: "38.9851"
-      HOME_LON: "-76.47880"
-      HOME_ALT: "45.0"
-      SITL_MODEL: "ArduCopter"
-      SITL_FRAME: "quad"
-      MAVLINK_OUTPUT: "udpclient:arducopter-bridge:14600"
-    depends_on:
-      - arducopter-bridge
+  # arducopter-sitl is commented out because the ./services/arducopter_sitl
+  # build context (an ArduPilot SITL image) has not been created yet.
+  # The arducopter-bridge service above will sit idle with no MAVLink traffic
+  # until this service (or a real vehicle) is connected on UDP port 14600.
+  # To re-enable: create services/arducopter_sitl/Dockerfile and uncomment.
+  # arducopter-sitl:
+  #   profiles: ["arducopter"]
+  #   build:
+  #     context: ./services/arducopter_sitl
+  #   environment:
+  #     HOME_LAT: "38.9851"
+  #     HOME_LON: "-76.47880"
+  #     HOME_ALT: "45.0"
+  #     SITL_MODEL: "ArduCopter"
+  #     SITL_FRAME: "quad"
+  #     MAVLINK_OUTPUT: "udpclient:arducopter-bridge:14600"
+  #   depends_on:
+  #     - arducopter-bridge
 
 volumes:
   influx-data:

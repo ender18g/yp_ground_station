@@ -32,7 +32,7 @@ Then open:
 - API root/status links: `http://localhost:8000`
 - InfluxDB: `http://localhost:8086`
 
-The default compose file starts one existing simulated UAV, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
+The default compose file starts two simulated UAVs (`sim-uav1`, `sim-uav2`), one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
 
 ## PX4/MAVROS UAV Simulation
 
@@ -92,7 +92,7 @@ Every forwarded topic is written into the ground station under `/vehicles/px4-ua
 
 ## Scaling Existing Simulated Vehicles
 
-To stress test with more of the lightweight simulated vehicles:
+The default stack uses two fixed-name UAV services (`sim-uav1`, `sim-uav2`). To run more instances, uncomment the generic `sim-uav` service block in `docker-compose.yml` (it is commented out by default) and then use `--scale`:
 
 ```bash
 docker compose up --build --scale sim-uav=10 --scale sim-usv=4 --scale sim-uuv=3
@@ -432,7 +432,7 @@ The default compose file runs:
 
 ```yaml
 GPS_MODE: sim
-HOME_LAT: "38.984764"
+HOME_LAT: "38.989639"
 HOME_LON: "-76.478643"
 HEADING_DEG: "330"
 SPEED_KNOTS: "3"
@@ -451,7 +451,7 @@ devices:
 
 The GPS container publishes the YP as a `yp` vehicle with `NavSatFix`, `Pose`, `BatteryState`, and heartbeat messages so the map can center on the ship.
 
-In simulated mode, the YP starts at latitude `38.984764`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
+In simulated mode, the YP starts at latitude `38.989639`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
 
 ## Map Tiles
 

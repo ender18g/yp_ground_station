@@ -211,9 +211,9 @@ async def telemetry_loop() -> None:
                 await asyncio.sleep(0.01)
 
     except Exception as exc:
-        print("\n[ERROR] Websocket connection failed!")
-        print(str(exc))
+        print(f"\n[ERROR] Bridge disconnected: {exc}")
         traceback.print_exc()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +268,12 @@ def _run_mob_search(
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(telemetry_loop())
-    except KeyboardInterrupt:
-        print("\n[INFO] Shutting down cleanly")
+    while True:
+        try:
+            asyncio.run(telemetry_loop())
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down cleanly")
+            break
+        except Exception:
+            print("[INFO] Reconnecting in 5 seconds...")
+            time.sleep(5)

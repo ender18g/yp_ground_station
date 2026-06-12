@@ -547,8 +547,8 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             float(lat), float(lon),
             grid_size_m, swath_m, altitude_m,
             include_takeoff=True,
-            takeoff_altitude_m=30.0,
-            climb_speed_ms=8.0,
+            takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
+            climb_speed_ms=SAR_CLIMB_SPEED_MS,
         )
         print(f"[SITL][SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
 
@@ -557,8 +557,8 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         corridor_half_width_m = float(command.get("corridor_half_width_m", 50.0))
         swath_m = float(command.get("swath_m", 20.0))
         altitude_m = float(command.get("altitude_m", 30.0))
-        takeoff_altitude_m = float(command.get("takeoff_altitude_m", 30.0))
-        climb_speed_ms = float(command.get("climb_speed_ms", 8.0))
+        takeoff_altitude_m = float(command.get("takeoff_altitude_m", SAR_TAKEOFF_ALT_M))
+        climb_speed_ms = float(command.get("climb_speed_ms", SAR_CLIMB_SPEED_MS))
         if len(track_points) < 2:
             print(f"[SITL][SAR] MOB command needs at least 2 track points, got {len(track_points)}")
             return

@@ -3,6 +3,11 @@
 Ported from lifeguard/components/mavlink_io.py and lifeguard/system/workers.py.
 Used by vehicle bridges to execute search-grid and MOB missions without any
 dependency on the full Lifeguard codebase.
+
+Canonical location: services/shared/sar_missions.py
+Both services/server and services/arducopter_ws_bridge copy this file into
+their Docker images at build time via their respective Dockerfiles.
+Do NOT edit the per-service copies — edit this file only.
 """
 from __future__ import annotations
 
