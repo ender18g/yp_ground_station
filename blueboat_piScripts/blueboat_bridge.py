@@ -9,7 +9,7 @@ import traceback
 from pymavlink import mavutil
 import websockets
 
-#import sar_missions
+import sar_missions
 
 VEHICLE_ID = os.getenv("VEHICLE_ID", "blueboat") # establish default name and type, but this will get queried from mavlink stream later
 VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "usv")
@@ -25,7 +25,7 @@ SEND_HZ = float(os.getenv("SEND_HZ", "5")) # rate to send json messages to web f
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 # Set to "false" for surface vehicles (USV/UGV) that don't take off
-#SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
+SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
 
 # Held by SAR mission threads so the telemetry loop skips MAVLink reads during
 # blocking mission upload / arm / start sequences.
@@ -70,7 +70,6 @@ def create_navsatfix_message(lat: float, lon: float, alt: float, heading: float 
         "topic": f"/vehicles/{VEHICLE_ID}/navsatfix",
         "type": "sensor_msgs/msg/NavSatFix",
         "stamp": now,
-        "webRTC_url": "http://10.10.130.3:8889/blueboat/whep",
         "msg": {
             "header": {
                 "stamp": {"sec": sec, "nanosec": nanosec},
@@ -531,7 +530,7 @@ async def telemetry_loop() -> None:
 # SAR mission thread targets
 # ---------------------------------------------------------------------------
 
-'''def _run_search_grid(
+def _run_search_grid(
     master,
     lat: float, lon: float,
     grid_size_m: float, swath_m: float, altitude_m: float,
@@ -554,9 +553,9 @@ async def telemetry_loop() -> None:
         except Exception as exc:
             print(f"[SAR] Search grid error: {exc}")
             traceback.print_exc()
-'''
 
-'''def _run_mob_search(
+
+def _run_mob_search(
     master,
     track_points: list,
     corridor_half_width_m: float,
@@ -587,7 +586,7 @@ async def telemetry_loop() -> None:
         except Exception as exc:
             print(f"[SAR] MOB search error: {exc}")
             traceback.print_exc()
-'''
+
 
 
 if __name__ == "__main__":
