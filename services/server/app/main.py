@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     _sar_missions = None  # type: ignore[assignment]
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 import httpx
@@ -53,6 +53,7 @@ HISTORY_MAX_POINTS = int(os.getenv("HISTORY_MAX_POINTS", "5000"))
 MESSAGE_RETENTION_SECONDS = float(os.getenv("MESSAGE_RETENTION_SECONDS", str(10 * 60)))
 MESSAGE_CLEANUP_INTERVAL_SECONDS = float(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", str(10 * 60)))
 INFLUX_MAX_WRITE_HZ = float(os.getenv("INFLUX_MAX_WRITE_HZ", "5"))
+VIDEO_STREAMS_JSON = os.getenv("VIDEO_STREAMS_JSON", "{}")
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
@@ -75,6 +76,7 @@ app.add_middleware(
 )
 
 vehicles: dict[str, dict[str, Any]] = {}
+video_streams: dict[str, dict[str, Any]] = {}
 vehicle_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
 ui_connections: set[WebSocket] = set()
 ros_connections: dict[WebSocket, set[str]] = defaultdict(set)
@@ -120,6 +122,7 @@ _VALID_MAVLINK_PREFIXES = (
     "udpin:", "udpout:", "udpbcast:",
     "serial:",
 )
+_VALID_STREAM_ID_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
 
 influx_client: Optional[InfluxDBClient] = None
 tile_http_client: Optional[httpx.AsyncClient] = None
@@ -152,6 +155,65 @@ _influx_writer_thread = threading.Thread(target=_influx_writer_loop, daemon=True
 _influx_writer_thread.start()
 
 
+def sanitize_stream_id(value: str) -> str:
+    text = _VALID_STREAM_ID_CHARS.sub("-", value.strip())
+    text = text.strip("-").lower()
+    return text or "stream"
+
+
+def default_playback_url(stream_id: str) -> str:
+    return f"/hls/{stream_id}/index.m3u8"
+
+
+def upsert_video_stream(vehicle_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    current = video_streams.get(vehicle_id, {})
+    source_rtsp_url = str(payload.get("source_rtsp_url") or current.get("source_rtsp_url") or "").strip()
+    stream_id = sanitize_stream_id(str(payload.get("stream_id") or current.get("stream_id") or vehicle_id))
+    playback_url = str(payload.get("playback_url") or current.get("playback_url") or default_playback_url(stream_id)).strip()
+    enabled = bool(payload.get("enabled", current.get("enabled", True)))
+
+    entry = {
+        "vehicle_id": vehicle_id,
+        "stream_id": stream_id,
+        "source_rtsp_url": source_rtsp_url,
+        "playback_url": playback_url,
+        "enabled": enabled,
+    }
+    video_streams[vehicle_id] = entry
+    return entry
+
+
+def public_video_stream(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "vehicle_id": entry.get("vehicle_id"),
+        "stream_id": entry.get("stream_id"),
+        "playback_url": entry.get("playback_url"),
+        "enabled": bool(entry.get("enabled", True)),
+    }
+
+
+def load_video_streams_from_env() -> None:
+    try:
+        raw = json.loads(VIDEO_STREAMS_JSON)
+    except json.JSONDecodeError as exc:
+        print(f"VIDEO_STREAMS_JSON parse error: {exc}")
+        return
+
+    if not isinstance(raw, dict):
+        print("VIDEO_STREAMS_JSON must be an object map of vehicle_id -> config")
+        return
+
+    for vehicle_id, value in raw.items():
+        if not isinstance(vehicle_id, str) or not vehicle_id.strip():
+            continue
+        vid = vehicle_id.strip()
+        if isinstance(value, str):
+            upsert_video_stream(vid, {"source_rtsp_url": value})
+            continue
+        if isinstance(value, dict):
+            upsert_video_stream(vid, value)
+
+
 @app.get("/")
 async def root() -> dict[str, Any]:
     return {
@@ -161,6 +223,7 @@ async def root() -> dict[str, Any]:
         "docs": "/docs",
         "health": "/health",
         "vehicles": "/api/vehicles",
+        "video_streams": "/api/video/streams",
         "tile_cache": "/api/tile-cache",
     }
 
@@ -177,6 +240,7 @@ async def startup() -> None:
     except Exception as exc:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
+    load_video_streams_from_env()
 
 
 @app.on_event("shutdown")
@@ -638,6 +702,42 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
 async def get_vehicles() -> dict[str, Any]:
     async with state_lock:
         return {"vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]}
+
+
+@app.get("/api/video/streams")
+async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, Any]:
+    streams: list[dict[str, Any]] = []
+    for entry in video_streams.values():
+        streams.append(dict(entry) if include_sources else public_video_stream(entry))
+    return {"streams": streams}
+
+
+@app.put("/api/video/streams/{vehicle_id}")
+async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    vehicle_id = vehicle_id.strip()
+    if not vehicle_id:
+        return JSONResponse({"error": "vehicle_id is required"}, status_code=400)
+
+    source_rtsp_url = payload.get("source_rtsp_url")
+    playback_url = payload.get("playback_url")
+    if source_rtsp_url is None and playback_url is None and vehicle_id not in video_streams:
+        return JSONResponse(
+            {"error": "Provide source_rtsp_url and/or playback_url when creating a stream"},
+            status_code=400,
+        )
+
+    entry = upsert_video_stream(vehicle_id, payload)
+    await broadcast_ui({"op": "video_stream_update", "video": public_video_stream(entry)})
+    return JSONResponse({"ok": True, "stream": public_video_stream(entry)})
+
+
+@app.delete("/api/video/streams/{vehicle_id}")
+async def delete_video_stream(vehicle_id: str) -> JSONResponse:
+    if vehicle_id not in video_streams:
+        return JSONResponse({"error": "stream not found"}, status_code=404)
+    video_streams.pop(vehicle_id, None)
+    await broadcast_ui({"op": "video_stream_removed", "vehicle_id": vehicle_id})
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/settings")
@@ -1446,6 +1546,9 @@ def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
     snapshot = dict(vehicle)
     if isinstance(snapshot.get("history"), deque):
         snapshot["history"] = list(snapshot["history"])
+    entry = video_streams.get(str(snapshot.get("vehicle_id") or ""))
+    if entry:
+        snapshot["video"] = public_video_stream(entry)
     return snapshot
 
 

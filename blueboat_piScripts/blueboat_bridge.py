@@ -9,20 +9,23 @@ import traceback
 from pymavlink import mavutil
 import websockets
 
-import sar_missions
+#import sar_missions
 
-VEHICLE_ID = os.getenv("VEHICLE_ID", "arducopter-uav")
-VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "uav")
-#SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://yp-server:8000/ws/vehicle")
-SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://localhost:8000/ws/vehicle") # use this when running outside of docker
+VEHICLE_ID = os.getenv("VEHICLE_ID", "blueboat") # establish default name and type, but this will get queried from mavlink stream later
+VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "usv")
+
+#SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://localhost:8000/ws/vehicle") # use this when running outside of docker
+#SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://10.24.5.242:8000/ws/vehicle") # use this when running outside of docker
+#SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://10.42.0.1:8000/ws/vehicle") # use this when running outside of docker
+SERVER_WS_URL = os.getenv("SERVER_WS_URL", "ws://10.10.130.2:8000/ws/vehicle")
 MAVLINK_URL = os.getenv("MAVLINK_URL", "udpin:0.0.0.0:14551")
-SEND_HZ = float(os.getenv("SEND_HZ", "5"))
+SEND_HZ = float(os.getenv("SEND_HZ", "5")) # rate to send json messages to web frontend
 
 # SAR defaults (override via env vars in docker-compose)
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 # Set to "false" for surface vehicles (USV/UGV) that don't take off
-SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
+#SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
 
 # Held by SAR mission threads so the telemetry loop skips MAVLink reads during
 # blocking mission upload / arm / start sequences.
@@ -67,6 +70,7 @@ def create_navsatfix_message(lat: float, lon: float, alt: float, heading: float 
         "topic": f"/vehicles/{VEHICLE_ID}/navsatfix",
         "type": "sensor_msgs/msg/NavSatFix",
         "stamp": now,
+        "webRTC_url": "http://10.10.130.3:8889/blueboat/whep",
         "msg": {
             "header": {
                 "stamp": {"sec": sec, "nanosec": nanosec},
@@ -293,20 +297,14 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
             target_lat, target_lon, target_alt = _relative_waypoint_to_global(ship_lat, ship_lon, ship_heading, ship_alt, waypoint)
 
             # --- OVERRIDE FOR SURFACE VEHICLES ---
-            frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
             if VEHICLE_TYPE in ["usv", "ugv"]:
                 target_alt = 0.0
-                frame = mavutil.mavlink.MAV_FRAME_GLOBAL_INT
-                try:
-                    master.set_mode('GUIDED')
-                except Exception:
-                    pass
 
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
                 master.target_component,
-                frame,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                 int(0b110111000000),
                 int(target_lat * 1e7),
                 int(target_lon * 1e7),
@@ -322,8 +320,15 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
             )
 
             distance_m = _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon)
-            alt_error_m = abs(float(vehicle_state["alt"]) - target_alt)
-            if distance_m <= arrival_radius_m and alt_error_m <= max(2.0, arrival_radius_m * 0.5):
+           
+            # --- OVERRIDE FOR SURFACE VEHICLES ---
+            if VEHICLE_TYPE in ["usv", "ugv"]:
+                alt_condition_met = True
+            else:
+                alt_error_m = abs(float(vehicle_state["alt"]) - target_alt)
+                alt_condition_met = alt_error_m <= max(2.0, arrival_radius_m * 0.5)
+
+            if distance_m <= arrival_radius_m and alt_condition_met:
                 print(f"[SHIP-REL] Reached waypoint {index}/{len(local_waypoints)}")
                 break
 
@@ -335,30 +340,24 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
 
     print("[SHIP-REL] Mission complete.")
 
+
 def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30):
     """Send vehicle to a waypoint and wait for arrival"""
-    global VEHICLE_TYPE
-    
-    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-    
+   
     # --- OVERRIDE FOR SURFACE VEHICLES ---
     if VEHICLE_TYPE in ["usv", "ugv"]:
         target_alt = 0.0
-        frame = mavutil.mavlink.MAV_FRAME_GLOBAL_INT  # Rovers require Global Int
-        
-        # Ensure the boat is in GUIDED mode to accept the command
-        try:
-            master.set_mode('GUIDED')
-        except Exception as e:
-            print(f"[WARN] Could not set GUIDED mode: {e}")
-            
+       
     print(f"\n[NAV] Flying/Driving to waypoint: {target_lat:.6f}, {target_lon:.6f}, alt={target_alt}m")
     
+    # Force the vehicle into GUIDED mode so it accepts the command
+    master.set_mode('GUIDED')
+                                
     master.mav.set_position_target_global_int_send(
         0,
         master.target_system,
         master.target_component,
-        frame,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
         int(0b110111111000),
         int(target_lat * 1e7),
         int(target_lon * 1e7),
@@ -368,41 +367,39 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30):
         0, 0
     )
 
+
 async def telemetry_loop() -> None:
+    # Need access to global flags to update them based on heartbeat
+    global VEHICLE_TYPE
+    global SAR_INCLUDE_TAKEOFF
+
     print("\n==============================", flush=True)
-    print(" ARDUCOPTER MAVLINK BRIDGE ", flush=True)
+    print(" ARDUCOPTER/ARDUROVER BRIDGE ", flush=True)
     print("==============================\n", flush=True)
 
-    print(f"[INFO] Vehicle ID: {VEHICLE_ID}", flush=True)
-    print(f"[INFO] Vehicle Type: {VEHICLE_TYPE}", flush=True)
+    print(f"[INFO] Initial Vehicle ID: {VEHICLE_ID}", flush=True)
+    print(f"[INFO] Initial Vehicle Type: {VEHICLE_TYPE}", flush=True)
     print(f"[INFO] MAVLink URL: {MAVLINK_URL}", flush=True)
     print(f"[INFO] WebSocket URL: {SERVER_WS_URL.rstrip('/')}/{VEHICLE_ID}", flush=True)
 
     print("\n[INFO] Connecting to MAVLink...")
     master = mavutil.mavlink_connection(MAVLINK_URL)
 
-    print("[INFO] Waiting for autopilot heartbeat...")
-    # --- DYNAMIC VEHICLE TYPE DETECTION ---
-    # We must explicitly look for Component ID 1 (The Flight Controller)
-    # to avoid catching companion computers or GCS heartbeats on the network.
-    while True:
-        msg = master.recv_match(type='HEARTBEAT', blocking=True)
-        if msg.get_srcComponent() == 1:
-            master.target_system = msg.get_srcSystem()
-            master.target_component = msg.get_srcComponent()
-            break
+    print("[INFO] Waiting for heartbeat...")
+    msg = master.wait_heartbeat()
 
-    print("[SUCCESS] Heartbeat received from Autopilot!")
+    print("[SUCCESS] Heartbeat received!")
     print(f"[INFO] Target System: {master.target_system}")
     print(f"[INFO] Target Component: {master.target_component}")
     print(f"[INFO] MAV_TYPE Detected: {msg.type}")
 
+    # --- DYNAMIC VEHICLE TYPE DETECTION ---
     # MAV_TYPE_ROVER = 10, MAV_TYPE_SURFACE_BOAT = 22
     if msg.type in [10, 22]:
         VEHICLE_TYPE = "usv"
         SAR_INCLUDE_TAKEOFF = False
         print("[INFO] Vehicle identified as Surface/Ground. Adapted logic: Alt=0, No Takeoff.")
-        
+   
     print("\n[INFO] Requesting position telemetry stream...")
     master.mav.request_data_stream_send(
         master.target_system,
@@ -420,27 +417,28 @@ async def telemetry_loop() -> None:
             print("[SUCCESS] WebSocket connected!")
             counter = 0
             last_send_time = time.time()
-            
+           
             while True:
                 # 1. Listen for incoming WebSocket commands (short timeout to avoid blocking)
                 try:
                     response = await asyncio.wait_for(ws.recv(), timeout=0.01)
                     print("[SERVER RESPONSE]", response)
-                    
+                   
                     try:
                         server_msg = json.loads(response)
-                        
+                       
                         if (server_msg.get("op") == "command"
                             and server_msg.get("vehicle_id") == VEHICLE_ID):
                             command_data = server_msg.get("command", {})
                             cmd_type = command_data.get("type")
 
-                            if cmd_type == "waypoint": # simple one-shot goto command (in inertial frame) with lat/lon/alt in the payload
+                            if cmd_type == "waypoint":
                                 target = command_data.get("target", {})
-                                
+                               
                                 target_lat = target.get("latitude")
                                 target_lon = target.get("longitude")
                                 target_alt = target.get("altitude")
+
                                 
                                 if None not in (target_lat, target_lon, target_alt):
                                     goto_waypoint(master, target_lat, target_lon, target_alt)
@@ -448,7 +446,7 @@ async def telemetry_loop() -> None:
                                 else:
                                     print("[ERROR] Missing coordinates in waypoint command payload.")
 
-                            elif cmd_type == "search_grid": # launch a search grid mission centered at the specified lat/lon with the given grid size and spacing parameters
+                            elif cmd_type == "search_grid":
                                 lat = command_data.get("lat")
                                 lon = command_data.get("lon")
                                 grid_size_m = float(command_data.get("grid_size_m", 200))
@@ -464,7 +462,7 @@ async def telemetry_loop() -> None:
                                 else:
                                     print("[ERROR] search_grid command missing lat/lon.")
 
-                            elif cmd_type == "mob": # launch a curved-track search (man overboard) along the provided track points with the given corridor and spacing parameters
+                            elif cmd_type == "mob":
                                 track_points = command_data.get("track_points", [])
                                 corridor_half_width_m = float(command_data.get("corridor_half_width_m", 50.0))
                                 swath_m = float(command_data.get("swath_m", 20.0))
@@ -480,12 +478,10 @@ async def telemetry_loop() -> None:
                                     ).start()
                                 else:
                                     print(f"[ERROR] MOB command needs at least 2 track points, got {len(track_points)}")
-                            elif cmd_type == "ship_relative_trajectory": # follow a trajectory as specified in ship-fixed coordinates
+                           
+                            elif cmd_type == "ship_relative_trajectory":
                                 _launch_ship_relative_mission(master, command_data)
                                 print("[INFO] Ship-relative trajectory command launched.")
-                            
-
-
 
                     except json.JSONDecodeError:
                         print("[WARNING] Server response was not valid JSON.")
@@ -494,12 +490,10 @@ async def telemetry_loop() -> None:
                     pass # Normal behavior, no incoming command this cycle
 
                 # 2. Check for MAVLink telemetry (non-blocking).
-                # Skip MAVLink reads while a SAR mission thread holds the lock to avoid
-                # consuming COMMAND_ACKs that the mission sequence is waiting for.
                 msg = None
                 if not _sar_mission_lock.locked():
                     msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=False)
-                
+               
                 # 3. Process and send telemetry at the specified SEND_HZ rate
                 now = time.time()
                 if msg is not None:
@@ -520,7 +514,7 @@ async def telemetry_loop() -> None:
 
                     await ws.send(json_payload)
                     print(f"[INFO] Sent websocket message #{counter}")
-                    
+                   
                     # Reset the timer
                     last_send_time = now
 
@@ -537,12 +531,17 @@ async def telemetry_loop() -> None:
 # SAR mission thread targets
 # ---------------------------------------------------------------------------
 
-def _run_search_grid(
+'''def _run_search_grid(
     master,
     lat: float, lon: float,
     grid_size_m: float, swath_m: float, altitude_m: float,
 ) -> None:
     """Blocking: generate, upload, arm, and start a search grid mission."""
+   
+    # --- OVERRIDE FOR SURFACE VEHICLES ---
+    if VEHICLE_TYPE in ["usv", "ugv"]:
+        altitude_m = 0.0
+
     with _sar_mission_lock:
         try:
             ok = sar_missions.execute_search_grid(
@@ -555,9 +554,9 @@ def _run_search_grid(
         except Exception as exc:
             print(f"[SAR] Search grid error: {exc}")
             traceback.print_exc()
+'''
 
-
-def _run_mob_search(
+'''def _run_mob_search(
     master,
     track_points: list,
     corridor_half_width_m: float,
@@ -567,6 +566,12 @@ def _run_mob_search(
     climb_speed_ms: float,
 ) -> None:
     """Blocking: generate, upload, arm, and start a MOB curved-track search mission."""
+   
+    # --- OVERRIDE FOR SURFACE VEHICLES ---
+    if VEHICLE_TYPE in ["usv", "ugv"]:
+        altitude_m = 0.0
+        takeoff_altitude_m = 0.0
+
     with _sar_mission_lock:
         try:
             ok = sar_missions.execute_mob_search(
@@ -582,6 +587,7 @@ def _run_mob_search(
         except Exception as exc:
             print(f"[SAR] MOB search error: {exc}")
             traceback.print_exc()
+'''
 
 
 if __name__ == "__main__":

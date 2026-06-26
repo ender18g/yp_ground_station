@@ -16,8 +16,13 @@ services:
   yp-server:
     build:
       context: ./services/server
+      network: host
     ports:
       - "8000:8000"
+      # MAVLink UDP ingress from BlueOS / external radios
+      # MAVLink UDP ingress from external radios / BlueOS endpoints
+      - "14550:14550/udp"
+      - "14551:14551/udp"
     environment:
       INFLUX_URL: http://influxdb:8086
       INFLUX_ORG: yp
@@ -50,6 +55,7 @@ services:
   web:
     build:
       context: ./web
+      network: host
     ports:
       - "8080:80"
     depends_on:
@@ -58,6 +64,7 @@ services:
   yp-gps:
     build:
       context: ./services/yp_gps
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       GPS_MODE: sim
@@ -98,6 +105,7 @@ services:
   sim-uav1:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
@@ -114,6 +122,7 @@ services:
   sim-uav2:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
@@ -130,6 +139,7 @@ services:
   sim-usv:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: usv
@@ -146,6 +156,7 @@ services:
   sim-uuv:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uuv

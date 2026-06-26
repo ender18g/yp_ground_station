@@ -13,12 +13,24 @@ export interface VehicleMessage {
   msg: Record<string, unknown>;
 }
 
+export interface RelativeWaypoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface Vehicle {
   vehicle_id: string;
   vehicle_type: VehicleType;
   connected: boolean;
   last_seen: number;
   last_seen_age?: number;
+  video?: {
+    vehicle_id: string;
+    stream_id: string;
+    playback_url: string;
+    enabled: boolean;
+  };
   position?: Position;
   history?: Position[];
   heading?: number;
@@ -31,7 +43,7 @@ export interface Vehicle {
 }
 
 export interface Command {
-  type: "rtb" | "waypoint" | "trajectory" | "search_grid";
+  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory";
   target?: {
     latitude: number;
     longitude: number;
@@ -43,4 +55,8 @@ export interface Command {
   grid_size_m?: number;
   swath_m?: number;
   altitude_m?: number;
+  ship_vehicle_id?: string;
+  local_waypoints?: RelativeWaypoint[];
+  arrival_radius_m?: number;
+  update_hz?: number;
 }

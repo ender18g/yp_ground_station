@@ -1,10 +1,12 @@
-FROM node:22-alpine AS build
+FROM node:20-alpine AS build
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm config set fetch-retries 5 \
+	&& npm config set fetch-retry-mintimeout 20000 \
+	&& npm config set fetch-retry-maxtimeout 120000 \
+	&& npm ci --no-audit --no-fund
 COPY . .
-# ADD THIS EXACT LINE HERE:
 RUN npm install three @react-three/fiber@8 @react-three/drei@9 @types/three
 RUN npm run build
 

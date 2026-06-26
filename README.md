@@ -124,6 +124,68 @@ The top bar also contains a **Waypoint Planner** tab (chart icon) for visual top
 
 The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
 
+## Multi-Vehicle Video Streams (RTSP -> HLS)
+
+Browsers cannot play RTSP directly. The stack uses a media gateway (`mediamtx`) to pull per-vehicle RTSP feeds and expose HLS playlists that the web UI can play.
+
+### Data Flow
+
+1. Camera source: each vehicle publishes RTSP.
+2. Media gateway: `mediamtx` ingests RTSP and serves HLS.
+3. Web server: Nginx proxies `/hls/...` to `mediamtx`.
+4. UI: vehicle modal opens the stream URL from the server's vehicle metadata.
+
+### Configure MediaMTX Paths
+
+Edit `services/mediamtx/mediamtx.yml` and add one path per vehicle under `paths:`:
+
+```yaml
+paths:
+  blueboat-01:
+    source: rtsp://user:pass@10.0.0.21:554/stream1
+    sourceProtocol: tcp
+  blueboat-02:
+    source: rtsp://user:pass@10.0.0.22:554/stream1
+    sourceProtocol: tcp
+```
+
+Each path is then available as:
+
+```text
+/hls/<stream_id>/index.m3u8
+```
+
+### Register Streams In `yp-server`
+
+Provide a vehicle-to-stream map in `docker-compose.yml` using `VIDEO_STREAMS_JSON` (under `yp-server`):
+
+```yaml
+VIDEO_STREAMS_JSON: >-
+  {
+    "blueboat-01": {"source_rtsp_url": "rtsp://user:pass@10.0.0.21:554/stream1", "stream_id": "blueboat-01"},
+    "blueboat-02": {"source_rtsp_url": "rtsp://user:pass@10.0.0.22:554/stream1", "stream_id": "blueboat-02"}
+  }
+```
+
+The server adds `video.playback_url` to each vehicle snapshot (for example `/hls/blueboat-01/index.m3u8`), and the UI enables the **Stream Video** button when that metadata is present.
+
+### Video Stream API
+
+```http
+GET    /api/video/streams                         -> list stream mappings (safe fields)
+PUT    /api/video/streams/{vehicle_id}            -> create/update mapping
+DELETE /api/video/streams/{vehicle_id}            -> remove mapping
+GET    /api/video/streams?include_sources=true    -> include RTSP source URLs (admin use)
+```
+
+Example update call:
+
+```bash
+curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
+  -H 'Content-Type: application/json' \
+  -d '{"source_rtsp_url":"rtsp://user:pass@10.0.0.23:554/stream1","stream_id":"blueboat-03"}'
+```
+
 ## ArduPilot SITL Bridge
 
 The ground station includes a built-in MAVLink bridge that connects directly to ArduPilot or ArduCopter SITL instances at runtime — no separate bridge container required. This is useful for testing SAR missions against a simulated vehicle without deploying hardware.

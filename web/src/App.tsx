@@ -32,7 +32,7 @@ import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer,
 
 import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, listSerialPorts, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
 import type { SITLBridge, SerialPortInfo } from "./api";
-import type { Command, Position, Vehicle, VehicleType } from "./types";
+import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
 import { Canvas } from "@react-three/fiber";
 import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/drei";
 
@@ -51,7 +51,6 @@ const YP_DEMO_HEADING = 330;
 const DEMO_KEEP_IN_RANGE_M = 200;
 const LOW_BATTERY_THRESHOLD = 0.25;
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
-const USV_STREAM_URL = `${import.meta.env.BASE_URL}media/usv-stream.mp4`;
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
@@ -87,6 +86,7 @@ interface WaypointMarker {
   vehicle_id: string;
   latitude: number;
   longitude: number;
+  trackingYP?: boolean;
 }
 
 const VEHICLE_COLOR_PALETTE = [
@@ -232,6 +232,38 @@ export function App() {
               connected: false,
             },
           }));
+        }
+        if (payload.op === "video_stream_update") {
+          const incoming = payload.video as Vehicle["video"] & { vehicle_id?: string };
+          const vehicleId = incoming?.vehicle_id;
+          if (!vehicleId) {
+            return;
+          }
+          setVehicles((current) => {
+            const currentVehicle = current[vehicleId];
+            if (!currentVehicle) {
+              return current;
+            }
+            return {
+              ...current,
+              [vehicleId]: {
+                ...currentVehicle,
+                video: incoming,
+              },
+            };
+          });
+        }
+        if (payload.op === "video_stream_removed") {
+          const vehicleId = payload.vehicle_id as string;
+          setVehicles((current) => {
+            const currentVehicle = current[vehicleId];
+            if (!currentVehicle || !currentVehicle.video) {
+              return current;
+            }
+            const nextVehicle = { ...currentVehicle };
+            delete nextVehicle.video;
+            return { ...current, [vehicleId]: nextVehicle };
+          });
         }
       };
     };
@@ -430,6 +462,7 @@ export function App() {
               key={waypoint.vehicle_id}
               waypoint={waypoint}
               vehicle={vehicles[waypoint.vehicle_id]}
+              yp={yp}
               onDragStart={() => {
                 followBeforeWaypointDragRef.current = followYp;
                 setFollowYp(false);
@@ -665,11 +698,30 @@ export function App() {
 
       {selected && (
         <VehicleModal
-          vehicle={selected}
+          // Lookup the live vehicle data, fallback to the snapshot if it briefly disconnects
+          vehicle={vehicles[selected.vehicle_id] || selected}
+          shipVehicle={yp}
           canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
           onClose={() => setSelected(null)}
           onRtb={() => {
             command(selected.vehicle_id, { type: "rtb" });
+            // Extract the coordinates into strictly typed local variables first
+            const ypLat = yp?.position?.latitude;
+            const ypLon = yp?.position?.longitude;
+
+            // Snap the waypoint marker to the YP and lock it
+            if (ypLat !== undefined && ypLon !== undefined) {
+              setWaypointMarkers((current) => ({
+                ...current,
+                [selected.vehicle_id]: {
+                  vehicle_id: selected.vehicle_id,
+                  latitude: ypLat,
+                  longitude: ypLon,
+                  trackingYp: true,
+                }
+              }));
+            }
+
             setSelected(null);
           }}
           onWaypoint={() => {
@@ -684,10 +736,20 @@ export function App() {
         />
       )}
 
+      {/*
       {streamVehicleId && (
         <UsvVideoViewer
           vehicleId={streamVehicleId}
-          src={USV_STREAM_URL}
+          src={vehicles[streamVehicleId]?.video?.playback_url ?? `${import.meta.env.BASE_URL}media/usv-stream.mp4`}
+          onClose={() => setStreamVehicleId(null)}
+        />
+      )}
+        */}
+      {streamVehicleId && (
+        <UsvVideoViewer
+          vehicleId={streamVehicleId}
+          // Pulls from backend if available, otherwise defaults to your Pi's WebRTC bridge!
+          src={vehicles[streamVehicleId]?.video?.playback_url ?? `http://10.10.130.3:8889/blueboat`}
           onClose={() => setStreamVehicleId(null)}
         />
       )}
@@ -798,23 +860,26 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
       alert("Cannot dispatch: YP GPS or heading is unavailable.");
       return;
     }
+    if (waypoints.length === 0) {
+      alert("Add at least one waypoint before dispatching.");
+      return;
+    }
     if (!selectedVehicleId) {
       alert("Please select a vehicle to dispatch.");
       return;
     }
 
-    const globalWaypoints = waypoints.map(wp => 
-      localToGlobalWaypoint(yp.position!.latitude, yp.position!.longitude, yp.heading!, yp.position!.altitude || 0, wp.x, wp.y, wp.z)
-    );
+    const localWaypoints: RelativeWaypoint[] = waypoints.map(({ x, y, z }) => ({ x, y, z }));
 
-    globalWaypoints.forEach((gWp) => {
-      onCommand(selectedVehicleId, { 
-        type: "waypoint", 
-        target: { latitude: gWp.latitude, longitude: gWp.longitude, altitude: gWp.altitude } 
-      });
+    onCommand(selectedVehicleId, {
+      type: "ship_relative_trajectory",
+      ship_vehicle_id: yp.vehicle_id,
+      local_waypoints: localWaypoints,
+      arrival_radius_m: 6,
+      update_hz: 10,
     });
 
-    alert(`Dispatched ${globalWaypoints.length} waypoints to ${selectedVehicleId}`);
+    alert(`Dispatched ${localWaypoints.length} ship-relative waypoints to ${selectedVehicleId}`);
     setWaypoints([]);
     setSelectedId(null);
   };
@@ -2138,19 +2203,27 @@ function SarPatternOverlay({
 function WaypointCrosshair({
   waypoint,
   vehicle,
+  yp,
   onDragStart,
   onDragEnd,
   onMove,
 }: {
   waypoint: WaypointMarker;
   vehicle?: Vehicle;
+  yp?: Vehicle;
   onDragStart: () => void;
   onDragEnd: () => void;
   onMove: (lat: number, lon: number) => void;
 }) {
   const color = vehicle ? vehicleMarkerColor(vehicle) : "#0f172a";
-  const position = useMemo<[number, number]>(() => [waypoint.latitude, waypoint.longitude], [waypoint.latitude, waypoint.longitude]);
+  
+  // Safely fallback to the static waypoint coordinate if the YP or its position is missing
+  const lat = waypoint.trackingYP ? (yp?.position?.latitude ?? waypoint.latitude) : waypoint.latitude;
+  const lon = waypoint.trackingYP ? (yp?.position?.longitude ?? waypoint.longitude) : waypoint.longitude;
+  
+  const position = useMemo<[number, number]>(() => [lat, lon], [lat, lon]);
   const icon = useMemo(() => waypointIcon(color), [color]);
+  
   return (
     <Marker
       position={position}
@@ -2161,8 +2234,8 @@ function WaypointCrosshair({
         click: (event) => L.DomEvent.stopPropagation(event.originalEvent),
         dragstart: onDragStart,
         dragend: (event) => {
-          const position = event.target.getLatLng();
-          onMove(position.lat, position.lng);
+          const newPos = event.target.getLatLng();
+          onMove(newPos.lat, newPos.lng);
           onDragEnd();
         },
       }}
@@ -2389,16 +2462,32 @@ function handleDemoCommand(vehicles: DemoVehicle[], vehicleId: string, command: 
   if (!vehicle) {
     return;
   }
+  const yp = vehicles.find((candidate) => candidate.vehicle_id === command.ship_vehicle_id)
+    ?? vehicles.find((candidate) => candidate.vehicle_type === "yp");
+  const ypPosition = yp ? { latitude: yp.lat, longitude: yp.lon, altitude: yp.alt } : null;
   if (command.type === "rtb") {
     vehicle.mode = "rtb";
     vehicle.manualWaypoint = false;
-    const yp = vehicles.find((candidate) => candidate.vehicle_type === "yp");
     vehicle.target = yp ? sternTargetForYp(yp, vehicle) : { latitude: 38.984764, longitude: -76.478643, altitude: vehicle.vehicle_type === "uuv" ? -4 : vehicle.vehicle_type === "uav" ? 45 : 0 };
   }
   if (command.type === "waypoint" && command.target) {
     vehicle.mode = "waypoint";
     vehicle.manualWaypoint = true;
     vehicle.target = command.target;
+  }
+  if (command.type === "ship_relative_trajectory" && yp && ypPosition && command.local_waypoints?.length) {
+    const firstWaypoint = command.local_waypoints[0];
+    vehicle.mode = "waypoint";
+    vehicle.manualWaypoint = true;
+    vehicle.target = localToGlobalWaypoint(
+      ypPosition.latitude,
+      ypPosition.longitude,
+      yp.heading,
+      ypPosition.altitude,
+      firstWaypoint.x,
+      firstWaypoint.y,
+      firstWaypoint.z,
+    );
   }
 }
 
@@ -2506,6 +2595,35 @@ function bearingDegrees(lat1: number, lon1: number, lat2: number, lon2: number):
   return (Math.atan2(y, x) * 180) / Math.PI;
 }
 
+function calculateRelativePosition(ship: Vehicle, target: Vehicle) {
+  if (!ship.position || !target.position || ship.heading == null) return null;
+
+  const distance = haversineMeters(
+    ship.position.latitude, ship.position.longitude,
+    target.position.latitude, target.position.longitude
+  );
+  
+  const trueBearing = bearingDegrees(
+    ship.position.latitude, ship.position.longitude,
+    target.position.latitude, target.position.longitude
+  );
+
+  // Relative bearing: 0 is straight ahead, 90 is starboard, -90 is port
+  let relBearingDeg = trueBearing - ship.heading;
+  
+  // Normalize angle to be between -180 and +180 degrees
+  relBearingDeg = ((relBearingDeg + 540) % 360) - 180;
+  const relBearingRad = relBearingDeg * (Math.PI / 180);
+
+  // Calculate Forward (Y) and Starboard (X) distances
+  const x = distance * Math.cos(relBearingRad);
+  const y = -distance * Math.sin(relBearingRad);
+  const z = (target.position?.altitude ?? 0) - (ship.position?.altitude ?? 0);
+
+  return { x, y, z, distance };
+}
+
+
 function destinationPoint(lat: number, lon: number, bearing: number, distance: number): { latitude: number; longitude: number } {
   const radius = 6371000;
   const angular = distance / radius;
@@ -2548,7 +2666,7 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
-  const hasVideo = vehicle.vehicle_type === "usv";
+  const hasVideo = Boolean(vehicle.video?.enabled && vehicle.video.playback_url);
   
   const baseSizes: Record<string, [number, number]> = {
     yp:  [120, 60],
@@ -2663,6 +2781,7 @@ function lightenHex(hex: string, amount: number): string {
 
 function VehicleModal({
   vehicle,
+  shipVehicle,
   canCommand = true,
   onClose,
   onRtb,
@@ -2671,6 +2790,7 @@ function VehicleModal({
   onColorSave,
 }: {
   vehicle: Vehicle;
+  shipVehicle?: Vehicle;
   canCommand?: boolean;
   onClose: () => void;
   onRtb: () => void;
@@ -2681,68 +2801,198 @@ function VehicleModal({
   const position = vehicle.position;
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
+  const canStreamVideo = Boolean(vehicle.video?.enabled && vehicle.video.playback_url);
+
+  // Calculate relative position
+  const relativePos = shipVehicle && vehicle.vehicle_id !== shipVehicle.vehicle_id
+    ? calculateRelativePosition(shipVehicle, vehicle)
+    : null;
+
+  // 1. Setup floating window state (Default to bottom-left)
+  const [frame, setFrame] = useState(() => ({
+    x: 20,
+    y: Math.max(20, window.innerHeight - 480),
+    width: 340,
+  }));
+
+  const dragRef = useRef<{
+    mode: "move" | "resize";
+    pointerId: number;
+    startX: number;
+    startY: number;
+    frame: typeof frame;
+  } | null>(null);
+
+  // 2. Drag and Resize Handlers
+  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      mode,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      frame,
+    };
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+
+    if (drag.mode === "move") {
+      setFrame({
+        ...drag.frame,
+        x: Math.max(0, Math.min(drag.frame.x + dx, window.innerWidth - drag.frame.width)),
+        y: Math.max(0, Math.min(drag.frame.y + dy, window.innerHeight - 100)),
+      });
+    } else if (drag.mode === "resize") {
+      setFrame({
+        ...drag.frame,
+        width: Math.max(280, Math.min(600, drag.frame.width + dx)),
+      });
+    }
+  };
+
+  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+    }
+  };
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="vehicle-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <div className={`type-chip ${vehicle.vehicle_type}`}>{vehicle.vehicle_type.toUpperCase()}</div>
-          <div>
-            <h2>{vehicle.vehicle_id}</h2>
-            <p>{vehicle.connected ? "Connected" : "Last seen offline"}</p>
+    // Note: The <div className="modal-backdrop"> has been completely removed
+    <div 
+      className="vehicle-modal" 
+      style={{
+        position: 'fixed',
+        left: frame.x,
+        top: frame.y,
+        width: frame.width,
+        margin: 0,
+        zIndex: 5000,
+        boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)',
+        cursor: 'default',
+        maxHeight: '90vh',
+        overflowY: 'auto'
+      }}
+      // Stop clicks from falling through to the map underneath
+      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div 
+        className="modal-header" 
+        style={{ cursor: 'grab' }}
+        onPointerDown={(e) => startDrag("move", e)}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+      >
+        <div className={`type-chip ${vehicle.vehicle_type}`}>{vehicle.vehicle_type.toUpperCase()}</div>
+        <div style={{ flex: 1 }}>
+          <h2>{vehicle.vehicle_id}</h2>
+          <p>{vehicle.connected ? "Connected" : "Last seen offline"}</p>
+        </div>
+        {/* Stop pointer events on the X button so it doesn't trigger a drag */}
+        <button 
+          className="icon-button" 
+          title="Close" 
+          onPointerDown={(e) => e.stopPropagation()} 
+          onClick={onClose}
+        >
+          <X size={20} />
+        </button>
+      </div>
+      
+      <div className="metrics">
+        <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} />
+        <Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} />
+        <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
+        <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
+        <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
+      </div>
+
+      {relativePos && (
+        <div className="relative-metrics" style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid #334155' }}>
+          <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#94a3b8', marginBottom: '8px', textTransform: 'uppercase' }}>
+            Ship Reference Frame (FLU)
           </div>
-          <button className="icon-button" title="Close" onClick={onClose}>
-            <X size={20} />
-          </button>
-        </div>
-        <div className="metrics">
-          <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} />
-          <Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} />
-          <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
-          <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
-          <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
-        </div>
-        <div className="modal-actions">
-          {canCommand && (
-            <button className="danger" onClick={onRtb}>
-              <RotateCcw size={18} />
-              RTB
-            </button>
-          )}
-          <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
-            <Brush size={18} />
-            Color
-          </button>
-          {vehicle.vehicle_type === "usv" && (
-            <button className="stream" onClick={onStreamVideo}>
-              <Video size={18} />
-              Stream Video
-            </button>
-          )}
-          {canCommand && (
-            <button className="primary" onClick={onWaypoint}>
-              <Route size={18} />
-              Waypoint
-            </button>
-          )}
-        </div>
-        {showColorPalette && (
-          <div className="color-panel">
-            <div className="color-swatches">
-              {VEHICLE_COLOR_PALETTE.map((color) => (
-                <button
-                  key={color}
-                  className={draftColor === color ? "color-swatch selected" : "color-swatch"}
-                  style={{ backgroundColor: color }}
-                  title={color}
-                  onClick={() => {
-                    setDraftColor(color);
-                    onColorSave(color);
-                  }}
-                />
-              ))}
-            </div>
+          <div className="metrics">
+            <Metric label="X (Forward)" value={`${relativePos.x > 0 ? '+' : ''}${relativePos.x.toFixed(1)} m`} />
+            <Metric label="Y (Left/Port)" value={`${relativePos.y > 0 ? '+' : ''}${relativePos.y.toFixed(1)} m`} />
+            <Metric label="Z (Up)" value={`${relativePos.z > 0 ? '+' : ''}${relativePos.z.toFixed(1)} m`} />
+            <Metric label="Radial Dist." value={`${relativePos.distance.toFixed(1)} m`} />
           </div>
+        </div>
+      )}
+
+      <div className="modal-actions" style={{ marginTop: '15px' }}>
+        {canCommand && (
+          <button className="danger" onClick={onRtb}>
+            <RotateCcw size={18} />
+            RTB
+          </button>
         )}
+        <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
+          <Brush size={18} />
+          Color
+        </button>
+        {canStreamVideo && (
+          <button className="stream" onClick={onStreamVideo}>
+            <Video size={18} />
+            Stream Video
+          </button>
+        )}
+        {canCommand && (
+          <button className="primary" onClick={onWaypoint}>
+            <Route size={18} />
+            Waypoint
+          </button>
+        )}
+      </div>
+      
+      {showColorPalette && (
+        <div className="color-panel">
+          <div className="color-swatches">
+            {VEHICLE_COLOR_PALETTE.map((color) => (
+              <button
+                key={color}
+                className={draftColor === color ? "color-swatch selected" : "color-swatch"}
+                style={{ backgroundColor: color }}
+                title={color}
+                onClick={() => {
+                  setDraftColor(color);
+                  onColorSave(color);
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Resize Handle at the bottom right */}
+      <div 
+         style={{
+           position: 'absolute',
+           bottom: 0,
+           right: 0,
+           width: '24px',
+           height: '24px',
+           cursor: 'nwse-resize',
+           display: 'flex',
+           alignItems: 'flex-end',
+           justifyContent: 'flex-end',
+           padding: '4px'
+         }}
+         onPointerDown={(e) => startDrag("resize", e)}
+         onPointerMove={moveDrag}
+         onPointerUp={endDrag}
+      >
+         <Maximize2 size={14} color="#64748b" style={{ transform: 'rotate(90deg)' }} />
       </div>
     </div>
   );
@@ -2750,7 +3000,7 @@ function VehicleModal({
 
 function UsvVideoViewer({
   vehicleId,
-  src,
+  src, // This must now be the WHEP URL (e.g., http://10.10.30.50:8889/blueboat/whep)
   onClose,
 }: {
   vehicleId: string;
@@ -2763,6 +3013,7 @@ function UsvVideoViewer({
     width: Math.min(420, window.innerWidth - 32),
     height: 320,
   }));
+  
   const dragRef = useRef<{
     mode: "move" | "resize";
     pointerId: number;
@@ -2770,6 +3021,77 @@ function UsvVideoViewer({
     startY: number;
     frame: typeof frame;
   } | null>(null);
+  
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const node = videoRef.current;
+    // Skip if no video element, or if the source is just your demo mp4
+    if (!node || !src || src.endsWith('.mp4')) {
+      if (node && src.endsWith('.mp4')) node.src = src;
+      return;
+    }
+
+    let pc: RTCPeerConnection | null = new RTCPeerConnection();
+    let isActive = true;
+
+    const startWebRTC = async () => {
+      try {
+        // Tell the browser we only want to receive video
+        pc!.addTransceiver('video', { direction: 'recvonly' });
+
+        // When the WebRTC track arrives, pipe it directly into the HTML5 video element
+        pc!.ontrack = (event) => {
+          if (node.srcObject !== event.streams[0]) {
+            node.srcObject = event.streams[0];
+          }
+        };
+
+        // 1. Browser creates an SDP Offer
+        const offer = await pc!.createOffer();
+        await pc!.setLocalDescription(offer);
+
+        // 2. Send the Offer to MediaMTX via the WHEP protocol
+        const response = await fetch(src, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/sdp',
+          },
+          body: offer.sdp,
+        });
+
+        if (!response.ok) {
+          throw new Error(`WHEP stream failed: ${response.status} ${response.statusText}`);
+        }
+
+        const answerSdp = await response.text();
+
+        // 3. MediaMTX replies with an Answer, feed it back to the browser
+        if (isActive) {
+          await pc!.setRemoteDescription({
+            type: 'answer',
+            sdp: answerSdp,
+          });
+        }
+      } catch (error) {
+        console.error("WebRTC Streaming Error:", error);
+      }
+    };
+
+    startWebRTC();
+
+    // Cleanup: Stop the stream and sever the connection when the window is closed
+    return () => {
+      isActive = false;
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (node) {
+        node.srcObject = null;
+      }
+    };
+  }, [src]);
 
   const updateFrame = (next: typeof frame) => {
     const maxWidth = Math.max(280, window.innerWidth - 24);
@@ -2788,20 +3110,12 @@ function UsvVideoViewer({
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = {
-      mode,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      frame,
-    };
+    dragRef.current = { mode, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, frame };
   };
 
   const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
+    if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     if (drag.mode === "move") {
@@ -2812,9 +3126,7 @@ function UsvVideoViewer({
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
-      dragRef.current = null;
-    }
+    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
   };
 
   return (
@@ -2832,7 +3144,7 @@ function UsvVideoViewer({
           <X size={17} />
         </button>
       </header>
-      <video className="video-viewer-media" src={src} autoPlay muted loop playsInline controls />
+      <video ref={videoRef} className="video-viewer-media" autoPlay muted playsInline />
       <button
         className="video-resize-handle"
         title="Resize stream"
