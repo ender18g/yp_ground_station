@@ -5,6 +5,7 @@ export interface ServerSettings {
   message_cleanup_interval_seconds: number;
   influx_max_write_hz: number;
   tile_max_cache_age_seconds: number;
+  yp_role_vehicle_id?: string | null;
 }
 
 export function websocketUrl(path: string): string {
@@ -28,6 +29,19 @@ export async function updateSettings(settings: Pick<ServerSettings, "message_ret
   });
   if (!response.ok) {
     throw new Error(`settings update failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/** Designate a vehicle as the YP (mother vessel), or pass null to clear. */
+export async function setYpRole(vehicleId: string | null): Promise<{ ok: boolean; vehicle_id: string | null }> {
+  const response = await fetch("/api/yp/role", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vehicle_id: vehicleId }),
+  });
+  if (!response.ok) {
+    throw new Error(`YP role update failed: ${response.status}`);
   }
   return response.json();
 }

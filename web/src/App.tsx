@@ -30,7 +30,7 @@ import {
 import { useEffect, useMemo, useRef, useState, Suspense, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, listSerialPorts, sendCommand, triggerMOB, updateSettings, websocketUrl } from "./api";
+import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl } from "./api";
 import type { SITLBridge, SerialPortInfo } from "./api";
 import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
 import { Canvas } from "@react-three/fiber";
@@ -124,9 +124,10 @@ export function App() {
   const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
   const [mobSwathM, setMobSwathM] = useState(20);
   const [mobAltM, setMobAltM] = useState(30);
-  const [settingsTab, setSettingsTab] = useState<"display" | "mob">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel">("display");
   const [showSITL, setShowSITL] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
+  const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -317,6 +318,7 @@ export function App() {
       .then((serverSettings) => {
         if (cancelled) return;
         setMessageRetentionMinutes(Math.round(serverSettings.message_retention_seconds / 60));
+        setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         setSettingsLoaded(true);
       })
       .catch(() => setSettingsLoaded(true));
@@ -635,6 +637,12 @@ export function App() {
             >
               Man Overboard
             </button>
+            <button
+              className={settingsTab === "vessel" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("vessel")}
+            >
+              Vessel
+            </button>
           </div>
           {settingsTab === "display" && (
             <>
@@ -660,6 +668,33 @@ export function App() {
                 disabled={DEMO_MODE}
                 onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
               />
+            </>
+          )}
+          {settingsTab === "vessel" && (
+            <>
+              <label>YP vessel role</label>
+              <p className="settings-hint">
+                Designate any connected vehicle (e.g. a BlueBoat) to act as the YP mother vessel.
+                Its type will be overridden to &ldquo;yp&rdquo;, enabling range rings, MOB track
+                recording, and ship-relative commands.
+              </p>
+              <select
+                value={ypRoleVehicleId ?? ""}
+                onChange={(e) => {
+                  const newId = e.target.value || null;
+                  setYpRoleVehicleId(newId);
+                  setYpRole(newId).catch(() => undefined);
+                }}
+              >
+                <option value="">— dedicated yp_gps service —</option>
+                {Object.values(vehicles)
+                  .filter((v) => v.connected && (v.vehicle_type !== "yp" || v.vehicle_id === ypRoleVehicleId))
+                  .map((v) => (
+                    <option key={v.vehicle_id} value={v.vehicle_id}>
+                      {v.vehicle_id} ({v.vehicle_type})
+                    </option>
+                  ))}
+              </select>
             </>
           )}
           {settingsTab === "mob" && (

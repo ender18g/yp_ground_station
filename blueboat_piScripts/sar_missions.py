@@ -474,3 +474,255 @@ def execute_mob_search(
         f"{corridor_half_width_m}m half-width, {swath_m}m swath, {len(waypoints)} waypoints"
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Streaming / carrot-chasing mission executors
+# ---------------------------------------------------------------------------
+
+def stream_waypoints_guided(
+    master,
+    waypoints: list[tuple[float, float, float]],
+    include_takeoff: bool = False,
+    takeoff_altitude_m: float = 30.0,
+    climb_speed_ms: float = 8.0,
+    force_arm: bool = False,
+    arrival_radius_m: float = 10.0,
+    wp_resend_interval_s: float = 2.0,
+    stop_event: Optional = None,
+) -> bool:
+    """
+    Stream waypoints one at a time in GUIDED mode (chasing-the-carrot pattern).
+
+    Instead of uploading the full mission at once (which can fail on lossy radio
+    links), this function sends a single SET_POSITION_TARGET_GLOBAL_INT command
+    per waypoint and only advances to the next once the vehicle is within
+    arrival_radius_m.  The target is periodically resent to handle dropped UDP
+    packets.
+
+    For UAVs (include_takeoff=True):
+        Uploads a minimal 2-item takeoff mission first (far less likely to fail
+        than a full grid upload), waits until the vehicle reaches cruise
+        altitude, then switches to GUIDED and streams the waypoints.
+
+    For surface vehicles (include_takeoff=False):
+        Arms in GUIDED mode and streams waypoints directly — no mission upload
+        is needed at all.
+    """
+    if not waypoints:
+        logger.error("stream_waypoints_guided: no waypoints provided")
+        return False
+
+    is_surface = not include_takeoff
+
+    def _send_wp(lat: float, lon: float, alt: float) -> None:
+        master.mav.set_position_target_global_int_send(
+            0,
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            int(0b110111111000),  # use position only (ignore velocity/accel)
+            int(lat * 1e7), int(lon * 1e7),
+            0.0 if is_surface else alt,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, 0.0,
+        )
+
+    def _get_pos():
+        """Poll for GLOBAL_POSITION_INT, return (lat, lon, rel_alt_m) or Nones."""
+        for _ in range(5):
+            msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=0.5)
+            if msg:
+                return msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
+        return None, None, None
+
+    # ---- Initial setup ----
+    if include_takeoff and not is_surface:
+        # Upload a minimal 2-waypoint takeoff-only mission.  Much smaller than a
+        # full grid upload so far less likely to fail over a lossy radio link.
+        start_lat, start_lon = waypoints[0][0], waypoints[0][1]
+        takeoff_data = [
+            (
+                start_lat, start_lon, 0.0,
+                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                2.0, climb_speed_ms, -1.0, 0.0,
+            ),
+            (
+                start_lat, start_lon, takeoff_altitude_m,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0.0, 0.0, 0.0, float("nan"),
+            ),
+        ]
+        if not upload_mission(master, takeoff_data):
+            logger.error("Streaming: minimal takeoff mission upload failed")
+            return False
+
+        set_mode(master, "GUIDED")
+        time.sleep(1.0)
+        if not arm_vehicle(master, force=force_arm):
+            logger.error("Streaming: arming failed")
+            return False
+        time.sleep(0.5)
+        set_mode(master, "AUTO")
+        time.sleep(1.0)
+        if not start_mission(master):
+            logger.error("Streaming: mission start failed")
+            return False
+
+        logger.info(f"Streaming: waiting for takeoff to {takeoff_altitude_m:.0f} m")
+        takeoff_deadline = time.monotonic() + 180.0
+        while time.monotonic() < takeoff_deadline:
+            if stop_event and stop_event.is_set():
+                logger.info("Streaming: cancelled during takeoff")
+                return False
+            _, _, cur_alt = _get_pos()
+            if cur_alt is not None and cur_alt >= takeoff_altitude_m * 0.85:
+                logger.info(f"Streaming: cruise altitude reached ({cur_alt:.1f} m), switching to GUIDED")
+                break
+        else:
+            logger.error("Streaming: takeoff timed out after 3 min")
+            return False
+
+        set_mode(master, "GUIDED")
+        time.sleep(0.5)
+
+    else:
+        # Surface vehicle / no-takeoff: set GUIDED mode and arm
+        set_mode(master, "GUIDED")
+        time.sleep(0.5)
+        if not arm_vehicle(master, force=force_arm):
+            logger.error("Streaming: arming failed")
+            return False
+        time.sleep(0.5)
+
+    # ---- Carrot-chase waypoint loop ----
+    logger.info(f"Streaming: chasing {len(waypoints)} waypoints in GUIDED mode")
+    for i, (lat, lon, alt) in enumerate(waypoints):
+        if stop_event and stop_event.is_set():
+            logger.info(f"Streaming: cancelled at waypoint {i + 1}/{len(waypoints)}")
+            return False
+
+        _send_wp(lat, lon, alt)
+        logger.info(
+            f"Streaming: waypoint {i + 1}/{len(waypoints)}"
+            f" ({lat:.6f}, {lon:.6f}, alt={0.0 if is_surface else alt:.0f}m)"
+        )
+        last_send = time.monotonic()
+        wp_deadline = time.monotonic() + 600.0  # 10 min per-waypoint timeout
+
+        while time.monotonic() < wp_deadline:
+            if stop_event and stop_event.is_set():
+                logger.info(f"Streaming: cancelled at waypoint {i + 1}/{len(waypoints)}")
+                return False
+
+            cur_lat, cur_lon, cur_alt = _get_pos()
+            if cur_lat is not None:
+                dist = _haversine_m(cur_lat, cur_lon, lat, lon)
+                if is_surface or cur_alt is None:
+                    arrived = dist <= arrival_radius_m
+                else:
+                    alt_err = abs(cur_alt - alt)
+                    arrived = dist <= arrival_radius_m and alt_err <= max(3.0, arrival_radius_m * 0.5)
+                if arrived:
+                    logger.info(
+                        f"Streaming: reached waypoint {i + 1}/{len(waypoints)}"
+                        f" (dist={dist:.1f}m)"
+                    )
+                    break
+
+            # Resend periodically to recover from dropped UDP packets
+            if time.monotonic() - last_send >= wp_resend_interval_s:
+                _send_wp(lat, lon, alt)
+                last_send = time.monotonic()
+        else:
+            logger.warning(
+                f"Streaming: waypoint {i + 1}/{len(waypoints)} timed out after 10 min, advancing"
+            )
+
+    logger.info("Streaming: all waypoints complete")
+    return True
+
+
+def execute_search_grid_streaming(
+    master,
+    center_lat: float,
+    center_lon: float,
+    grid_size_m: float,
+    swath_m: float,
+    altitude_m: float,
+    include_takeoff: bool = True,
+    takeoff_altitude_m: float = 30.0,
+    climb_speed_ms: float = 8.0,
+    arrival_radius_m: float = 10.0,
+    stop_event: Optional = None,
+) -> bool:
+    """
+    Streaming version of execute_search_grid.  Generates the lawnmower pattern
+    then calls stream_waypoints_guided instead of uploading the full mission.
+    """
+    waypoints = calculate_search_grid_waypoints(center_lat, center_lon, grid_size_m, swath_m, altitude_m)
+    if not waypoints:
+        logger.error("Streaming: failed to generate search grid waypoints")
+        return False
+
+    logger.info(
+        f"Streaming search grid: {len(waypoints)} waypoints, "
+        f"{grid_size_m}m grid, {swath_m}m swath, {altitude_m}m alt"
+    )
+    return stream_waypoints_guided(
+        master, waypoints,
+        include_takeoff=include_takeoff,
+        takeoff_altitude_m=takeoff_altitude_m,
+        climb_speed_ms=climb_speed_ms,
+        force_arm=include_takeoff,
+        arrival_radius_m=arrival_radius_m,
+        stop_event=stop_event,
+    )
+
+
+def execute_mob_search_streaming(
+    master,
+    track_points: list,
+    corridor_half_width_m: float = 50.0,
+    swath_m: float = 20.0,
+    altitude_m: float = 30.0,
+    takeoff_altitude_m: float = 30.0,
+    climb_speed_ms: float = 8.0,
+    include_takeoff: bool = True,
+    arrival_radius_m: float = 10.0,
+    stop_event: Optional = None,
+) -> bool:
+    """
+    Streaming version of execute_mob_search.  Generates MOB waypoints then
+    calls stream_waypoints_guided instead of uploading the full mission.
+    """
+    waypoints = calculate_mob_waypoints(track_points, corridor_half_width_m, swath_m, altitude_m)
+    if not waypoints:
+        logger.error("Streaming: failed to generate MOB waypoints")
+        return False
+
+    # Orient so the vehicle starts from the nearest end
+    try:
+        msg = master.messages.get("GLOBAL_POSITION_INT") if hasattr(master, "messages") else None
+        if msg:
+            d_lat, d_lon = msg.lat / 1e7, msg.lon / 1e7
+            dist_first = _haversine_m(d_lat, d_lon, waypoints[0][0], waypoints[0][1])
+            dist_last = _haversine_m(d_lat, d_lon, waypoints[-1][0], waypoints[-1][1])
+            if dist_last < dist_first:
+                waypoints = list(reversed(waypoints))
+    except Exception as exc:
+        logger.warning(f"Streaming: could not orient MOB pattern: {exc}")
+
+    logger.info(
+        f"Streaming MOB search: {len(track_points)} track points → {len(waypoints)} waypoints, "
+        f"{corridor_half_width_m}m half-width, {swath_m}m swath"
+    )
+    return stream_waypoints_guided(
+        master, waypoints,
+        include_takeoff=include_takeoff,
+        takeoff_altitude_m=takeoff_altitude_m,
+        climb_speed_ms=climb_speed_ms,
+        force_arm=True,  # MOB always force-arms (emergency scenario)
+        arrival_radius_m=arrival_radius_m,
+        stop_event=stop_event,
+    )

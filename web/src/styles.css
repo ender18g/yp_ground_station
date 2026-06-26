@@ -324,6 +324,24 @@ input {
   width: 100%;
 }
 
+.settings-panel select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-hint {
+  margin: 0 0 10px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .settings-tabs {
   display: flex;
   gap: 4px;

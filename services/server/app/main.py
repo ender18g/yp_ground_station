@@ -129,6 +129,12 @@ tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
 delete_api = None
 cleanup_task: Optional[asyncio.Task[None]] = None
+
+# YP role assignment: any vehicle whose vehicle_id matches this value will be
+# treated as vehicle_type="yp" regardless of what it reports in its messages.
+# Set via POST /api/yp/role; persists for the server's lifetime.
+_yp_role_vehicle_id: Optional[str] = None
+
 settings = {
     "message_retention_seconds": MESSAGE_RETENTION_SECONDS,
     "message_cleanup_interval_seconds": MESSAGE_CLEANUP_INTERVAL_SECONDS,
@@ -742,7 +748,7 @@ async def delete_video_stream(vehicle_id: str) -> JSONResponse:
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
-    return dict(settings)
+    return {**settings, "yp_role_vehicle_id": _yp_role_vehicle_id}
 
 
 @app.put("/api/settings")
@@ -757,7 +763,53 @@ async def update_settings(payload: dict[str, Any]) -> JSONResponse:
     if retention_seconds < 60 or retention_seconds > 30 * 24 * 60 * 60:
         return JSONResponse({"error": "message_retention_seconds must be between 60 seconds and 30 days"}, status_code=400)
     settings["message_retention_seconds"] = retention_seconds
-    return JSONResponse(dict(settings))
+    return JSONResponse({**settings, "yp_role_vehicle_id": _yp_role_vehicle_id})
+
+
+# ---------------------------------------------------------------------------
+# YP role assignment endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/yp/role")
+async def get_yp_role() -> dict[str, Any]:
+    """Return the vehicle currently designated to act as the YP (mother vessel)."""
+    return {"vehicle_id": _yp_role_vehicle_id}
+
+
+@app.post("/api/yp/role")
+async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """
+    Designate a connected vehicle as the YP (mother vessel).
+
+    Body: { "vehicle_id": "blueboat" }  — assign a vehicle.
+           { "vehicle_id": null }        — clear the assignment.
+
+    The designated vehicle's type will be overridden to ``"yp"`` for all
+    subsequent telemetry.  Clearing the assignment reverts the vehicle to
+    its natural type on its next incoming message.
+    """
+    global _yp_role_vehicle_id
+
+    raw = payload.get("vehicle_id")
+    new_role_id: Optional[str] = str(raw).strip() if raw and str(raw).strip() else None
+    old_role_id = _yp_role_vehicle_id
+    _yp_role_vehicle_id = new_role_id
+
+    async with state_lock:
+        # Promote new role vehicle to "yp" immediately (don't wait for next message)
+        if new_role_id and new_role_id in vehicles:
+            vehicles[new_role_id]["vehicle_type"] = "yp"
+            snap = {k: v for k, v in public_vehicle(vehicles[new_role_id]).items() if k != "history"}
+            await broadcast_ui({"op": "vehicle_update", "vehicle": snap})
+
+        # Revert previous role vehicle to its stored natural type
+        if old_role_id and old_role_id != new_role_id and old_role_id in vehicles:
+            old_v = vehicles[old_role_id]
+            old_v["vehicle_type"] = old_v.get("_natural_type") or infer_vehicle_type(old_role_id)
+            snap = {k: v for k, v in public_vehicle(old_v).items() if k != "history"}
+            await broadcast_ui({"op": "vehicle_update", "vehicle": snap})
+
+    return JSONResponse({"ok": True, "vehicle_id": _yp_role_vehicle_id})
 
 
 @app.get("/api/vehicles/{vehicle_id}")
@@ -1240,7 +1292,10 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     now = float(payload.get("stamp") or time.time())
     vehicle_id = str(payload.get("vehicle_id") or topic_vehicle_id(payload.get("topic", "")) or "unknown")
-    vehicle_type = normalize_vehicle_type(payload.get("vehicle_type") or infer_vehicle_type(vehicle_id))
+    # Natural type from the message payload; stored so clearing the YP role can revert it.
+    natural_type = normalize_vehicle_type(payload.get("vehicle_type") or infer_vehicle_type(vehicle_id))
+    # Apply YP role override: designate this vehicle as the mother vessel.
+    vehicle_type = "yp" if _yp_role_vehicle_id and vehicle_id == _yp_role_vehicle_id else natural_type
     topic = str(payload.get("topic") or f"/vehicles/{vehicle_id}/unknown")
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
@@ -1267,6 +1322,7 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
             },
         )
         vehicle["vehicle_type"] = vehicle_type
+        vehicle["_natural_type"] = natural_type  # retained for YP role revert
         vehicle["connected"] = True
         vehicle["last_seen"] = now
         vehicle["last_seen_age"] = 0
@@ -1543,7 +1599,8 @@ def ros_publish_to_vehicle_message(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
-    snapshot = dict(vehicle)
+    # Exclude private/internal keys (prefixed with "_") from the public representation.
+    snapshot = {k: v for k, v in vehicle.items() if not k.startswith("_")}
     if isinstance(snapshot.get("history"), deque):
         snapshot["history"] = list(snapshot["history"])
     entry = video_streams.get(str(snapshot.get("vehicle_id") or ""))

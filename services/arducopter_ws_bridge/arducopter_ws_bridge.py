@@ -23,10 +23,16 @@ SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 # Set to "false" for surface vehicles (USV/UGV) that don't take off
 SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
+# Set to "false" to use the legacy full-mission-upload approach instead of streaming
+SAR_STREAMING_MODE = os.getenv("SAR_STREAMING_MODE", "true").lower() != "false"
+# Arrival radius used by the streaming carrot-chase loop (metres)
+SAR_ARRIVAL_RADIUS_M = float(os.getenv("SAR_ARRIVAL_RADIUS_M", "10.0"))
 
 # Held by SAR mission threads so the telemetry loop skips MAVLink reads during
 # blocking mission upload / arm / start sequences.
 _sar_mission_lock = threading.Lock()
+# Set this event to cancel an in-progress streaming SAR mission.
+_sar_stop_event = threading.Event()
 
 SHIP_STATE_TIMEOUT_S = float(os.getenv("SHIP_STATE_TIMEOUT_S", "2.0"))
 SHIP_RELATIVE_DEFAULT_UPDATE_HZ = float(os.getenv("SHIP_RELATIVE_UPDATE_HZ", "10.0"))
@@ -542,16 +548,33 @@ def _run_search_grid(
     lat: float, lon: float,
     grid_size_m: float, swath_m: float, altitude_m: float,
 ) -> None:
-    """Blocking: generate, upload, arm, and start a search grid mission."""
+    """Blocking: generate and execute a search grid mission.
+
+    In streaming mode (SAR_STREAMING_MODE=true, the default) waypoints are sent
+    one at a time in GUIDED mode (carrot-chase) instead of uploading the full
+    mission at once.  This is far more reliable over lossy radio links.
+    """
     with _sar_mission_lock:
+        _sar_stop_event.clear()
         try:
-            ok = sar_missions.execute_search_grid(
-                master, lat, lon, grid_size_m, swath_m, altitude_m,
-                include_takeoff=SAR_INCLUDE_TAKEOFF,
-                takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
-                climb_speed_ms=SAR_CLIMB_SPEED_MS,
-            )
-            print(f"[SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
+            if SAR_STREAMING_MODE:
+                ok = sar_missions.execute_search_grid_streaming(
+                    master, lat, lon, grid_size_m, swath_m, altitude_m,
+                    include_takeoff=SAR_INCLUDE_TAKEOFF,
+                    takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
+                    climb_speed_ms=SAR_CLIMB_SPEED_MS,
+                    arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
+                    stop_event=_sar_stop_event,
+                )
+                print(f"[SAR] Search grid mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
+            else:
+                ok = sar_missions.execute_search_grid(
+                    master, lat, lon, grid_size_m, swath_m, altitude_m,
+                    include_takeoff=SAR_INCLUDE_TAKEOFF,
+                    takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
+                    climb_speed_ms=SAR_CLIMB_SPEED_MS,
+                )
+                print(f"[SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
         except Exception as exc:
             print(f"[SAR] Search grid error: {exc}")
             traceback.print_exc()
@@ -566,19 +589,39 @@ def _run_mob_search(
     takeoff_altitude_m: float,
     climb_speed_ms: float,
 ) -> None:
-    """Blocking: generate, upload, arm, and start a MOB curved-track search mission."""
+    """Blocking: generate and execute a MOB curved-track search mission.
+
+    In streaming mode (SAR_STREAMING_MODE=true, the default) waypoints are sent
+    one at a time in GUIDED mode (carrot-chase) instead of uploading the full
+    mission at once.  This is far more reliable over lossy radio links.
+    """
     with _sar_mission_lock:
+        _sar_stop_event.clear()
         try:
-            ok = sar_missions.execute_mob_search(
-                master, track_points,
-                corridor_half_width_m=corridor_half_width_m,
-                swath_m=swath_m,
-                altitude_m=altitude_m,
-                takeoff_altitude_m=takeoff_altitude_m,
-                climb_speed_ms=climb_speed_ms,
-                include_takeoff=SAR_INCLUDE_TAKEOFF,
-            )
-            print(f"[SAR] MOB search mission {'STARTED' if ok else 'FAILED'}")
+            if SAR_STREAMING_MODE:
+                ok = sar_missions.execute_mob_search_streaming(
+                    master, track_points,
+                    corridor_half_width_m=corridor_half_width_m,
+                    swath_m=swath_m,
+                    altitude_m=altitude_m,
+                    takeoff_altitude_m=takeoff_altitude_m,
+                    climb_speed_ms=climb_speed_ms,
+                    include_takeoff=SAR_INCLUDE_TAKEOFF,
+                    arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
+                    stop_event=_sar_stop_event,
+                )
+                print(f"[SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
+            else:
+                ok = sar_missions.execute_mob_search(
+                    master, track_points,
+                    corridor_half_width_m=corridor_half_width_m,
+                    swath_m=swath_m,
+                    altitude_m=altitude_m,
+                    takeoff_altitude_m=takeoff_altitude_m,
+                    climb_speed_ms=climb_speed_ms,
+                    include_takeoff=SAR_INCLUDE_TAKEOFF,
+                )
+                print(f"[SAR] MOB search mission {'STARTED' if ok else 'FAILED'}")
         except Exception as exc:
             print(f"[SAR] MOB search error: {exc}")
             traceback.print_exc()
