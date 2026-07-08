@@ -107,13 +107,20 @@ def calculate_mob_waypoints(
     corridor_half_width_m: float,
     swath_m: float,
     altitude_m: float,
+    min_leg_m: float = 30.0,
+    start_from_newest: bool = False,
 ) -> list[tuple[float, float, float]]:
     """
     Return curved-track-following MOB search waypoints as (lat, lon, alt) tuples.
 
-    track_points: list of [lat, lon] pairs (JSON arrays or tuples), oldest first.
-    Lanes expand outward from the ship track: on-track, +swath stbd, -swath port, etc.
-    Boustrophedon order: even lanes oldest→newest, odd lanes newest→oldest.
+    track_points    : list of [lat, lon] pairs, oldest first.
+    min_leg_m       : minimum distance between consecutive waypoints within each
+                      lane.  Decimates the raw GPS track so the mission stays
+                      manageable; 30 m default keeps waypoint counts low while
+                      preserving enough curve fidelity.
+    start_from_newest: if True the centre lane is traversed newest→oldest so the
+                      vehicle begins near the most recent YP position.  Lane
+                      ordering is always centre-outward regardless of this flag.
     """
     if len(track_points) < 2 or swath_m <= 0 or corridor_half_width_m <= 0:
         return []
@@ -121,7 +128,7 @@ def calculate_mob_waypoints(
     # Unpack whether each point is a tuple or a list
     pts = [(float(p[0]), float(p[1])) for p in track_points]
 
-    # Discard consecutive near-duplicate GPS samples (12 m threshold)
+    # 1. Remove near-duplicate GPS samples caused by stationary periods / jitter
     MIN_SEP_M = 12.0
     filtered = [pts[0]]
     for pt in pts[1:]:
@@ -129,7 +136,16 @@ def calculate_mob_waypoints(
             filtered.append(pt)
     if len(filtered) < 2:
         filtered = list(pts)
-    pts = filtered
+
+    # 2. Decimate to min_leg_m spacing so each lane has a manageable waypoint count
+    decimated = [filtered[0]]
+    for pt in filtered[1:]:
+        if _haversine_m(*decimated[-1], *pt) >= min_leg_m:
+            decimated.append(pt)
+    # Always keep the last (most-recent) fix so the search reaches the MOB site
+    if decimated[-1] != filtered[-1]:
+        decimated.append(filtered[-1])
+    pts = decimated if len(decimated) >= 2 else filtered
     n = len(pts)
 
     # Per-point bearing: average of in/out bearings at interior points
@@ -171,7 +187,10 @@ def calculate_mob_waypoints(
                 perp = (local_bearings[i] + (90.0 if offset_m > 0 else 270.0)) % 360.0
                 p_lat, p_lon = _offset_position(lat, lon, perp, abs(offset_m))
                 lane.append((p_lat, p_lon, altitude_m))
-        if lane_idx % 2 != 0:
+        # Boustrophedon: alternate traversal direction per lane.
+        # XOR with start_from_newest so that lane 0 (centre) always begins at
+        # the requested track end, keeping lane ordering centre-outward.
+        if (lane_idx % 2 != 0) ^ start_from_newest:
             lane = list(reversed(lane))
         waypoints.extend(lane)
 
@@ -402,47 +421,50 @@ def execute_mob_search(
     swath_m: float = 20.0,
     altitude_m: float = 30.0,
     takeoff_altitude_m: float = 30.0,
-    climb_speed_ms: float = 8.0,
+    climb_speed_ms: float = 9.0,
     include_takeoff: bool = True,
 ) -> bool:
     """
     Generate, upload, arm, and start a curved-track-following MOB search mission.
     Returns True on success.
     """
+    # Choose traversal direction: start from whichever track end is closest to the
+    # vehicle so it reaches the search area as quickly as possible.  Lane ordering
+    # is always centre-outward regardless.
+    start_from_newest = False
+    try:
+        msg = master.messages.get("GLOBAL_POSITION_INT") if hasattr(master, "messages") else None
+        if msg and len(track_points) >= 2:
+            v_lat, v_lon = msg.lat / 1e7, msg.lon / 1e7
+            dist_oldest = _haversine_m(v_lat, v_lon, float(track_points[0][0]), float(track_points[0][1]))
+            dist_newest = _haversine_m(v_lat, v_lon, float(track_points[-1][0]), float(track_points[-1][1]))
+            start_from_newest = dist_newest < dist_oldest
+    except Exception as exc:
+        logger.warning(f"Could not orient MOB pattern from current position: {exc}")
+
     waypoints = calculate_mob_waypoints(
-        track_points, corridor_half_width_m, swath_m, altitude_m
+        track_points, corridor_half_width_m, swath_m, altitude_m,
+        start_from_newest=start_from_newest,
     )
     if not waypoints:
         logger.error("Failed to generate MOB waypoints")
         return False
 
-    # Orient pattern so vehicle starts from the end closest to its current position
-    try:
-        msg = master.messages.get("GLOBAL_POSITION_INT") if hasattr(master, "messages") else None
-        if msg:
-            d_lat, d_lon = msg.lat / 1e7, msg.lon / 1e7
-            dist_first = _haversine_m(d_lat, d_lon, waypoints[0][0], waypoints[0][1])
-            dist_last = _haversine_m(d_lat, d_lon, waypoints[-1][0], waypoints[-1][1])
-            if dist_last < dist_first:
-                waypoints = list(reversed(waypoints))
-    except Exception as exc:
-        logger.warning(f"Could not orient MOB pattern from current position: {exc}")
-
-    waypoints_data: list = []
+    # Speed command is always the first mission item (covers both UAV and surface vehicles)
+    start_lat, start_lon = waypoints[0][0], waypoints[0][1]
+    waypoints_data: list = [
+        (
+            start_lat, start_lon, 0.0,
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+            2.0, climb_speed_ms, -1.0, 0.0,
+        ),
+    ]
     if include_takeoff:
-        start_lat, start_lon = waypoints[0][0], waypoints[0][1]
-        waypoints_data += [
-            (
-                start_lat, start_lon, 0.0,
-                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
-                2.0, climb_speed_ms, -1.0, 0.0,
-            ),
-            (
-                start_lat, start_lon, takeoff_altitude_m,
-                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-                0.0, 0.0, 0.0, float("nan"),
-            ),
-        ]
+        waypoints_data.append((
+            start_lat, start_lon, takeoff_altitude_m,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0.0, 0.0, 0.0, float("nan"),
+        ))
         logger.info(f"MOB takeoff: {takeoff_altitude_m}m at {climb_speed_ms}m/s")
 
     for lat, lon, alt in waypoints:
@@ -470,8 +492,8 @@ def execute_mob_search(
         return False
 
     logger.info(
-        f"MOB search mission running: {len(track_points)} track points, "
-        f"{corridor_half_width_m}m half-width, {swath_m}m swath, {len(waypoints)} waypoints"
+        f"MOB search mission running: {len(track_points)} track points → {len(waypoints)} waypoints, "
+        f"{corridor_half_width_m}m half-width, {swath_m}m swath, {altitude_m}m alt"
     )
     return True
 
@@ -587,13 +609,25 @@ def stream_waypoints_guided(
         time.sleep(0.5)
 
     else:
-        # Surface vehicle / no-takeoff: set GUIDED mode and arm
+        # Surface vehicle / no-takeoff: set GUIDED mode, arm, then set cruise speed
         set_mode(master, "GUIDED")
         time.sleep(0.5)
         if not arm_vehicle(master, force=force_arm):
             logger.error("Streaming: arming failed")
             return False
         time.sleep(0.5)
+        # Surface vehicles ignore mission DO_CHANGE_SPEED; send it as a command_long
+        if climb_speed_ms > 0:
+            master.mav.command_long_send(
+                master.target_system, master.target_component,
+                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                0,               # confirmation
+                1,               # param1: 1 = groundspeed
+                climb_speed_ms,  # param2: speed in m/s
+                -1,              # param3: no throttle change
+                0, 0, 0, 0,
+            )
+            time.sleep(0.2)
 
     # ---- Carrot-chase waypoint loop ----
     logger.info(f"Streaming: chasing {len(waypoints)} waypoints in GUIDED mode")
@@ -687,7 +721,7 @@ def execute_mob_search_streaming(
     swath_m: float = 20.0,
     altitude_m: float = 30.0,
     takeoff_altitude_m: float = 30.0,
-    climb_speed_ms: float = 8.0,
+    climb_speed_ms: float = 9.0,
     include_takeoff: bool = True,
     arrival_radius_m: float = 10.0,
     stop_event: Optional = None,
@@ -696,22 +730,25 @@ def execute_mob_search_streaming(
     Streaming version of execute_mob_search.  Generates MOB waypoints then
     calls stream_waypoints_guided instead of uploading the full mission.
     """
-    waypoints = calculate_mob_waypoints(track_points, corridor_half_width_m, swath_m, altitude_m)
+    # Determine traversal direction from vehicle position vs track endpoints
+    start_from_newest = False
+    try:
+        msg = master.messages.get("GLOBAL_POSITION_INT") if hasattr(master, "messages") else None
+        if msg and len(track_points) >= 2:
+            v_lat, v_lon = msg.lat / 1e7, msg.lon / 1e7
+            dist_oldest = _haversine_m(v_lat, v_lon, float(track_points[0][0]), float(track_points[0][1]))
+            dist_newest = _haversine_m(v_lat, v_lon, float(track_points[-1][0]), float(track_points[-1][1]))
+            start_from_newest = dist_newest < dist_oldest
+    except Exception as exc:
+        logger.warning(f"Streaming: could not orient MOB pattern: {exc}")
+
+    waypoints = calculate_mob_waypoints(
+        track_points, corridor_half_width_m, swath_m, altitude_m,
+        start_from_newest=start_from_newest,
+    )
     if not waypoints:
         logger.error("Streaming: failed to generate MOB waypoints")
         return False
-
-    # Orient so the vehicle starts from the nearest end
-    try:
-        msg = master.messages.get("GLOBAL_POSITION_INT") if hasattr(master, "messages") else None
-        if msg:
-            d_lat, d_lon = msg.lat / 1e7, msg.lon / 1e7
-            dist_first = _haversine_m(d_lat, d_lon, waypoints[0][0], waypoints[0][1])
-            dist_last = _haversine_m(d_lat, d_lon, waypoints[-1][0], waypoints[-1][1])
-            if dist_last < dist_first:
-                waypoints = list(reversed(waypoints))
-    except Exception as exc:
-        logger.warning(f"Streaming: could not orient MOB pattern: {exc}")
 
     logger.info(
         f"Streaming MOB search: {len(track_points)} track points \u2192 {len(waypoints)} waypoints, "
