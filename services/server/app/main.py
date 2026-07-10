@@ -606,8 +606,8 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         lat = command.get("lat")
         lon = command.get("lon")
         grid_size_m = float(command.get("grid_size_m", 200))
-        swath_m = float(command.get("swath_m", 20))
-        altitude_m = float(command.get("altitude_m", 30))
+        swath_m = float(command.get("swath_m", SAR_SWATH_M))
+        altitude_m = float(command.get("altitude_m", SAR_ALTITUDE_M))
         if lat is None or lon is None:
             print("[SITL][SAR] search_grid command missing lat/lon")
             return
@@ -617,18 +617,18 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             float(lat), float(lon),
             grid_size_m, swath_m, altitude_m,
             include_takeoff=True,
-            takeoff_altitude_m=30.0,
-            climb_speed_ms=8.0,
+            takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
+            climb_speed_ms=SAR_CLIMB_SPEED_MS,
         )
         print(f"[SITL][SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
 
     elif cmd_type == "mob":
         track_points = command.get("track_points", [])
-        corridor_half_width_m = float(command.get("corridor_half_width_m", 50.0))
-        swath_m = float(command.get("swath_m", 20.0))
-        altitude_m = float(command.get("altitude_m", 30.0))
-        takeoff_altitude_m = float(command.get("takeoff_altitude_m", 30.0))
-        climb_speed_ms = float(command.get("climb_speed_ms", 8.0))
+        corridor_half_width_m = float(command.get("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M))
+        swath_m = float(command.get("swath_m", SAR_SWATH_M))
+        altitude_m = float(command.get("altitude_m", SAR_ALTITUDE_M))
+        takeoff_altitude_m = float(command.get("takeoff_altitude_m", SAR_TAKEOFF_ALT_M))
+        climb_speed_ms = float(command.get("climb_speed_ms", SAR_CLIMB_SPEED_MS))
         if len(track_points) < 2:
             print(f"[SITL][SAR] MOB command needs at least 2 track points, got {len(track_points)}")
             return
@@ -910,14 +910,20 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                 )
             target_vehicle_id = target["vehicle_id"]
 
+    def _get_float(name: str, default: float) -> float:
+        value = payload.get(name) if payload else None
+        if value is None:
+            return default
+        return float(value)
+
     mob_command: dict[str, Any] = {
         "type": "mob",
         "track_points": track_points,
-        "corridor_half_width_m": SAR_CORRIDOR_HALF_WIDTH_M,
-        "swath_m": SAR_SWATH_M,
-        "altitude_m": SAR_ALTITUDE_M,
-        "takeoff_altitude_m": SAR_TAKEOFF_ALT_M,
-        "climb_speed_ms": SAR_CLIMB_SPEED_MS,
+        "corridor_half_width_m": _get_float("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M),
+        "swath_m": _get_float("swath_m", SAR_SWATH_M),
+        "altitude_m": _get_float("altitude_m", SAR_ALTITUDE_M),
+        "takeoff_altitude_m": _get_float("takeoff_altitude_m", SAR_TAKEOFF_ALT_M),
+        "climb_speed_ms": _get_float("climb_speed_ms", SAR_CLIMB_SPEED_MS),
     }
 
     await route_command(target_vehicle_id, mob_command, source="sar_api")
@@ -1374,8 +1380,8 @@ def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]
             wps = _sar_missions.calculate_search_grid_waypoints(
                 float(lat), float(lon),
                 float(command.get("grid_size_m", 200)),
-                float(command.get("swath_m", 20)),
-                float(command.get("altitude_m", 30)),
+                float(command.get("swath_m", SAR_SWATH_M)),
+                float(command.get("altitude_m", SAR_ALTITUDE_M)),
             )
         elif cmd_type == "mob":
             track_points = command.get("track_points", [])
@@ -1383,9 +1389,9 @@ def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]
                 return []
             wps = _sar_missions.calculate_mob_waypoints(
                 track_points,
-                float(command.get("corridor_half_width_m", 50.0)),
-                float(command.get("swath_m", 20.0)),
-                float(command.get("altitude_m", 30.0)),
+                float(command.get("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M)),
+                float(command.get("swath_m", SAR_SWATH_M)),
+                float(command.get("altitude_m", SAR_ALTITUDE_M)),
             )
         else:
             return []
