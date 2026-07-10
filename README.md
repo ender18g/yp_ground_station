@@ -8,7 +8,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 ## What Is Included
 
 - `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, and InfluxDB logging.
-- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, and view-only mode.
+- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, and view-only mode.
 - `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution via embedded waypoints from the server.
 - `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
 - `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
@@ -32,38 +32,19 @@ Then open:
 - API root/status links: `http://localhost:8000`
 - InfluxDB: `http://localhost:8086`
 
-The default compose file starts one existing simulated UAV, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
+The default compose file starts two simulated UAVs, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
 
 ## PX4/MAVROS UAV Simulation
 
-The PX4 UAV path is intentionally separate from the existing `sim-vehicle` containers. It only starts when the `px4` compose profile is enabled:
+The PX4 UAV path is intentionally separate from the existing `sim-vehicle` containers. The repo includes the PX4 SITL container, `ros-master`, `mavros`, `rosbridge`, and `px4-yp-bridge` services for that path.
+
+The PX4 setup is intended to run with the `px4` compose profile enabled:
 
 ```bash
 docker compose --profile px4 up --build
 ```
 
-The PX4 profile starts:
-
-- `px4-sitl-uav`: builds PX4 Autopilot `v1.15.4` inside `px4io/px4-dev-simulation-jammy`, bakes the `px4_sitl_default` binary into the image, and runs the Gazebo `gz_x500` multicopter SITL model with `PX4_SYS_AUTOSTART=4001`.
-- `ros-master`: ROS Noetic master.
-- `mavros`: connects to PX4 over MAVLink using `fcu_url:=udp://:14540@px4-sitl-uav:14580`.
-- `rosbridge`: exposes the ROS graph over WebSocket at `ws://localhost:9090`.
-- `px4-yp-bridge`: connects to rosbridge, subscribes to MAVROS telemetry topics, and connects to `yp-server` as vehicle `px4-uav`.
-
-You can now also enable an ArduCopter profile with:
-
-```bash
-docker compose --profile arducopter up --build
-```
-
-That profile starts:
-
-- `arducopter-sitl`: ArduPilot SITL configured to send MAVLink to the listening bridge on UDP port `14600`.
-- `arducopter-bridge`: a direct MAVLink-to-WebSocket bridge that listens on `udpin:0.0.0.0:14600` and forwards `GLOBAL_POSITION_INT` telemetry into `yp-server`.
-
-The first ArduCopter image build may also require internet access for the base SITL image and its dependencies.
-
-The first PX4 image build may take a while and needs internet access to clone PX4, its submodules, and Docker image layers. PX4 submodules are shallow-cloned for speed, with NuttX tags fetched explicitly because PX4's version-generation step reads those tags during the SITL build. The image also applies a small PX4 SITL compatibility patch that keeps the daemon socket alive when startup child processes interrupt `poll()`, and enables MAVLink broadcast on the offboard link so MAVROS can run in a separate Compose container. The SITL binary is built into the image so container startup does not rerun the full PX4 compile. The profile is not part of the normal quick start so day-to-day lightweight simulation still comes up quickly.
+The PX4 path connects PX4 SITL to MAVROS over MAVLink, exposes the ROS graph over WebSocket, and forwards MAVROS telemetry into `yp-server` as vehicle `px4-uav`.
 
 ### MAVROS Topics Forwarded
 
@@ -88,7 +69,15 @@ The bridge also publishes canonical aliases that the existing map understands:
 - `/vehicles/px4-uav/battery`
 - `/vehicles/px4-uav/heading`
 
-Every forwarded topic is written into the ground station under `/vehicles/px4-uav/mavros/...`, ingested by `yp-server`, written to InfluxDB as `yp_messages`, and broadcast to the web UI message drawer.
+Every forwarded topic is written into the ground station under `/vehicles/px4-uav/mavros/...`, ingested by `yp-server`, written to InfluxDB, and broadcast to the web UI message drawer.
+
+## Demo Mode
+
+The UI also supports a static demo mode for local previews and screenshots.
+
+Open the app on `/demo`, add `?demo=true` to any URL, or build the frontend with `VITE_STATIC_DEMO=true`.
+
+In demo mode the UI renders simulated vehicles locally instead of connecting to the live server.
 
 ## Scaling Existing Simulated Vehicles
 
@@ -119,55 +108,15 @@ The map shows:
 - Live message drawer opened with the message icon
 - Vehicle Connections panel (cable icon) to connect ArduPilot SITL instances or RFD-900 radios at runtime
 - SAR mission patterns overlaid on the map when a grid search or MOB mission is dispatched; click the filled start dot to open a popup and clear the pattern manually
+- YP role override in the Settings menu for assigning another connected vessel as the mother ship
 
 The top bar also contains a **Waypoint Planner** tab (chart icon) for visual top-down mission planning, and a **View only** badge is shown when the UI is loaded in view-only mode (see [View-Only Mode](#view-only-mode)).
 
 The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
 
-## Multi-Vehicle Video Streams (RTSP -> HLS)
+## Video Streams
 
-Browsers cannot play RTSP directly. The stack uses a media gateway (`mediamtx`) to pull per-vehicle RTSP feeds and expose HLS playlists that the web UI can play.
-
-### Data Flow
-
-1. Camera source: each vehicle publishes RTSP.
-2. Media gateway: `mediamtx` ingests RTSP and serves HLS.
-3. Web server: Nginx proxies `/hls/...` to `mediamtx`.
-4. UI: vehicle modal opens the stream URL from the server's vehicle metadata.
-
-### Configure MediaMTX Paths
-
-Edit `services/mediamtx/mediamtx.yml` and add one path per vehicle under `paths:`:
-
-```yaml
-paths:
-  blueboat-01:
-    source: rtsp://user:pass@10.0.0.21:554/stream1
-    sourceProtocol: tcp
-  blueboat-02:
-    source: rtsp://user:pass@10.0.0.22:554/stream1
-    sourceProtocol: tcp
-```
-
-Each path is then available as:
-
-```text
-/hls/<stream_id>/index.m3u8
-```
-
-### Register Streams In `yp-server`
-
-Provide a vehicle-to-stream map in `docker-compose.yml` using `VIDEO_STREAMS_JSON` (under `yp-server`):
-
-```yaml
-VIDEO_STREAMS_JSON: >-
-  {
-    "blueboat-01": {"source_rtsp_url": "rtsp://user:pass@10.0.0.21:554/stream1", "stream_id": "blueboat-01"},
-    "blueboat-02": {"source_rtsp_url": "rtsp://user:pass@10.0.0.22:554/stream1", "stream_id": "blueboat-02"}
-  }
-```
-
-The server adds `video.playback_url` to each vehicle snapshot (for example `/hls/blueboat-01/index.m3u8`), and the UI enables the **Stream Video** button when that metadata is present.
+The UI can open vehicle video feeds when the server supplies a `video.playback_url`. The current browser player uses WebRTC/WHEP in the frontend, and the backend exposes stream metadata through the video stream API.
 
 ### Video Stream API
 
@@ -312,6 +261,14 @@ serial:/dev/ttyUSB0:57600
 GET /api/serial-ports   → list serial ports visible to the server container
 ```
 
+## Bridge Utilities
+
+The repository also includes a few standalone bridge scripts that are useful outside the main compose stack:
+
+- `services/telemetry_radio_bridge.py`: direct serial-radio to YP WebSocket bridge with MAVLink telemetry forwarding.
+- `blueboat_piScripts/blueboat_bridge.py`: BlueBoat/ArduPilot bridge with SAR mission handling.
+- `blueboat_piScripts/simplified_bridge.py`: minimal MAVLink-to-YP telemetry bridge example.
+
 ## View-Only Mode
 
 The UI can be opened in view-only mode by navigating to the `/view` path or appending `?view=true` to any URL:
@@ -333,9 +290,7 @@ This is useful for displaying the situational picture on secondary screens or fo
 
 ## Waypoint Planner
 
-A visual **Waypoint Planner** tab is available in the top bar (chart/ruler icon). It provides a top-down lateral planning view for building waypoint routes before dispatching them. The planner displays vehicle positions and the current YP position for spatial context.
-
-> **Note:** Command-and-control (C2) integration is not yet implemented. The planner is currently a visual aid only.
+A visual **Waypoint Planner** tab is available in the top bar (chart/ruler icon). It provides a top-down planning view for building waypoint routes before dispatching them, and it can send ship-relative trajectories using the current YP position for spatial context.
 
 ## Waypoint And RTB Commands
 
@@ -562,7 +517,7 @@ Clear the cache:
 rm -rf data/tile-cache
 ```
 
-The app does not bulk download, pre-seed, or scan map areas. It caches only tiles requested by the active map viewport. OpenStreetMap's public tile service allows normal interactive viewing and local caching according to HTTP cache headers, but prohibits bulk downloads and offline prefetch features. If this system later needs guaranteed offline maps for large areas, use a self-hosted tile server or a provider that explicitly allows offline packages.
+The runtime app does not bulk download, pre-seed, or scan map areas. It caches only tiles requested by the active map viewport. OpenStreetMap's public tile service allows normal interactive viewing and local caching according to HTTP cache headers, but prohibits bulk downloads and offline prefetch features. The separate `scripts/download_tiles.py` helper exists for offline tile sources that explicitly permit preloading.
 
 ## Configuration
 
