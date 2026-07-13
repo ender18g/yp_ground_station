@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from doctest import master
 import email.utils
 import hashlib
 import json
@@ -580,6 +581,8 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
     finally:
         _stop.set()
+        if master is not None:
+            master.close()       
         vehicle_queues.pop(vehicle_id, None)
         if info.get("status") == "connected":
             info["status"] = "disconnected"
