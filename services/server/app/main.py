@@ -1337,6 +1337,12 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         vehicle["last_seen_age"] = 0
         vehicle["messages"][topic] = {"type": msg_type, "stamp": now, "msg": msg}
 
+        # Extract dynamic video streams from the payload ---
+        if "video" in payload:
+            vehicle["video"] = payload["video"]
+        elif "video" in msg:
+            vehicle["video"] = msg["video"]
+
         nav = extract_navsatfix(topic, msg_type, msg)
         if nav:
             vehicle["position"] = nav
@@ -1612,9 +1618,13 @@ def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
     snapshot = {k: v for k, v in vehicle.items() if not k.startswith("_")}
     if isinstance(snapshot.get("history"), deque):
         snapshot["history"] = list(snapshot["history"])
-    entry = video_streams.get(str(snapshot.get("vehicle_id") or ""))
-    if entry:
-        snapshot["video"] = public_video_stream(entry)
+    
+    # Allow the vehicle's dynamic video payload to override the static server config
+    if "video" not in snapshot:
+        entry = video_streams.get(str(snapshot.get("vehicle_id") or ""))
+        if entry:
+            snapshot["video"] = public_video_stream(entry)
+            
     return snapshot
 
 

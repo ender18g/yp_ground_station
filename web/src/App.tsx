@@ -175,8 +175,6 @@ export function App() {
           const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
           setVehicles((current) => {
             const prev = current[incoming.vehicle_id];
-            // Server no longer sends history in vehicle_update to avoid megabyte-sized
-            // payloads growing over time. Accumulate the trail locally here instead.
             const prevHistory: Position[] = prev?.history ?? [];
             const msgType: string = (payload.message as { type?: string } | undefined)?.type ?? "";
             const pos = incoming.position;
@@ -185,8 +183,16 @@ export function App() {
               msgType.includes("NavSatFix") && pos
                 ? [...prevHistory, { latitude: pos.latitude, longitude: pos.longitude, altitude: pos.altitude, stamp }].slice(-500)
                 : prevHistory;
-            return { ...current, [incoming.vehicle_id]: { ...incoming, history: newHistory } };
+            
+            return { 
+              ...current, 
+              [incoming.vehicle_id]: { 
+                ...incoming, 
+                history: newHistory 
+              } 
+            };
           });
+          
           if (payload.message) {
             setMessageLog((current) => [streamMessageFromPayload(payload.message), ...current].slice(0, MAX_MESSAGE_LOG));
           }
@@ -855,8 +861,11 @@ export function App() {
       {streamVehicleId && (
         <UsvVideoViewer
           vehicleId={streamVehicleId}
-          // Pulls from backend if available, otherwise defaults to your Pi's WebRTC bridge!
-          src={vehicles[streamVehicleId]?.video?.playback_url ?? `http://10.10.130.3:8889/blueboat`}
+          // Pulls the dynamic streams array from the vehicle, or falls back to a hardcoded default for testing
+          streams={vehicles[streamVehicleId]?.video?.streams ?? [{ 
+            label: "Default Stream", 
+            url: `http://192.168.0.126:8889/${streamVehicleId}/whep` 
+          }]}
           onClose={() => setStreamVehicleId(null)}
         />
       )}
@@ -2808,7 +2817,11 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const altitude = vehicle.position?.altitude ?? 0;
   const color = vehicleMarkerColor(vehicle);
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
-  const hasVideo = Boolean(vehicle.video?.enabled && vehicle.video.playback_url);
+  const hasVideo = Boolean(
+    vehicle.video?.enabled && 
+    Array.isArray(vehicle.video?.streams) && 
+    vehicle.video.streams.length > 0
+  );
   
   const baseSizes: Record<string, [number, number]> = {
     yp:  [120, 60],
@@ -2943,7 +2956,12 @@ function VehicleModal({
   const position = vehicle.position;
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
-  const canStreamVideo = Boolean(vehicle.video?.enabled && vehicle.video.playback_url);
+  // Checks if the video property exists, is enabled, and has at least one stream in the array
+  const canStreamVideo = Boolean(
+    vehicle.video?.enabled && 
+    Array.isArray(vehicle.video?.streams) && 
+    vehicle.video.streams.length > 0
+  );
   const modalRef = useRef<HTMLDivElement | null>(null);
 
   // Calculate relative position
@@ -3170,11 +3188,11 @@ function VehicleModal({
 
 function UsvVideoViewer({
   vehicleId,
-  src, // This must now be the WHEP URL (e.g., http://10.10.30.50:8889/blueboat/whep)
+  streams,
   onClose,
 }: {
   vehicleId: string;
-  src: string;
+  streams: { label: string; url: string }[];
   onClose: () => void;
 }) {
   const [frame, setFrame] = useState(() => ({
@@ -3184,6 +3202,9 @@ function UsvVideoViewer({
     height: 320,
   }));
   
+  // Track which camera URL is currently selected. Defaults to the first camera in the array.
+  const [activeUrl, setActiveUrl] = useState<string>(streams[0]?.url || "");
+
   const dragRef = useRef<{
     mode: "move" | "resize";
     pointerId: number;
@@ -3194,74 +3215,56 @@ function UsvVideoViewer({
   
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
+  // The WebRTC logic watches 'activeUrl' so it automatically re-negotiates when the user switches cameras
   useEffect(() => {
     const node = videoRef.current;
-    // Skip if no video element, or if the source is just your demo mp4
-    if (!node || !src || src.endsWith('.mp4')) {
-      if (node && src.endsWith('.mp4')) node.src = src;
-      return;
-    }
+    if (!node || !activeUrl) return;
 
     let pc: RTCPeerConnection | null = new RTCPeerConnection();
     let isActive = true;
 
     const startWebRTC = async () => {
       try {
-        // Tell the browser we only want to receive video
         pc!.addTransceiver('video', { direction: 'recvonly' });
 
-        // When the WebRTC track arrives, pipe it directly into the HTML5 video element
         pc!.ontrack = (event) => {
           if (node.srcObject !== event.streams[0]) {
             node.srcObject = event.streams[0];
           }
         };
 
-        // 1. Browser creates an SDP Offer
         const offer = await pc!.createOffer();
         await pc!.setLocalDescription(offer);
 
-        // 2. Send the Offer to MediaMTX via the WHEP protocol
-        const response = await fetch(src, {
+        const response = await fetch(activeUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/sdp',
-          },
+          headers: { 'Content-Type': 'application/sdp' },
           body: offer.sdp,
         });
 
-        if (!response.ok) {
-          throw new Error(`WHEP stream failed: ${response.status} ${response.statusText}`);
-        }
-
+        if (!response.ok) throw new Error(`WHEP stream failed: ${response.status}`);
+        
         const answerSdp = await response.text();
 
-        // 3. MediaMTX replies with an Answer, feed it back to the browser
         if (isActive) {
-          await pc!.setRemoteDescription({
-            type: 'answer',
-            sdp: answerSdp,
-          });
+          await pc!.setRemoteDescription({ type: 'answer', sdp: answerSdp });
         }
       } catch (error) {
-        console.error("WebRTC Streaming Error:", error);
+        console.error(`WebRTC Error on ${activeUrl}:`, error);
       }
     };
 
     startWebRTC();
 
-    // Cleanup: Stop the stream and sever the connection when the window is closed
     return () => {
       isActive = false;
       if (pc) {
         pc.close();
         pc = null;
       }
-      if (node) {
-        node.srcObject = null;
-      }
+      if (node) node.srcObject = null;
     };
-  }, [src]);
+  }, [activeUrl]);
 
   const updateFrame = (next: typeof frame) => {
     const maxWidth = Math.max(280, window.innerWidth - 24);
@@ -3269,8 +3272,7 @@ function UsvVideoViewer({
     const width = Math.min(maxWidth, Math.max(280, next.width));
     const height = Math.min(maxHeight, Math.max(220, next.height));
     setFrame({
-      width,
-      height,
+      width, height,
       x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
       y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
     });
@@ -3306,9 +3308,32 @@ function UsvVideoViewer({
       onMouseDown={(event) => event.stopPropagation()}
     >
       <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <Video size={16} />
           <strong>{vehicleId}</strong>
+          
+          {/* Render the dropdown if the vehicle provided more than 1 camera feed */}
+          {streams.length > 1 && (
+            <select 
+              value={activeUrl} 
+              onChange={(e) => setActiveUrl(e.target.value)}
+              onPointerDown={(e) => e.stopPropagation()} // Prevents dropdown click from dragging the window
+              style={{
+                background: '#1e293b', 
+                color: 'white', 
+                border: '1px solid #475569', 
+                borderRadius: '4px', 
+                padding: '2px 6px',
+                fontSize: '12px',
+                outline: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              {streams.map((stream, index) => (
+                <option key={index} value={stream.url}>{stream.label}</option>
+              ))}
+            </select>
+          )}
         </div>
         <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
           <X size={17} />
