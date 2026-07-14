@@ -108,6 +108,7 @@ export function App() {
   const [messageLog, setMessageLog] = useState<StreamMessage[]>([]);
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
   const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
+  const [mapMenuExpanded, setMapMenuExpanded] = useState(false);
   const [mapZoom, setMapZoom] = useState(17);
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
@@ -133,6 +134,14 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
   const localVehicleColorsRef = useRef<Record<string, string>>({});
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const sitlPanelRef = useRef<HTMLDivElement | null>(null);
+  const messageDrawerRef = useRef<HTMLDivElement | null>(null);
+  const mapMenuRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const sitlButtonRef = useRef<HTMLButtonElement | null>(null);
+  const messagesButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   
   const [activeTab, setActiveTab] = useState<"map" | "planner">("map");
 
@@ -335,6 +344,50 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [messageRetentionMinutes, settingsLoaded]);
 
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      if (showSettings) {
+        const insideSettingsPanel = settingsPanelRef.current?.contains(target) ?? false;
+        const onSettingsButton = settingsButtonRef.current?.contains(target) ?? false;
+        if (!insideSettingsPanel && !onSettingsButton) {
+          setShowSettings(false);
+        }
+      }
+
+      if (showSITL) {
+        const insideSITLPanel = sitlPanelRef.current?.contains(target) ?? false;
+        const onSITLButton = sitlButtonRef.current?.contains(target) ?? false;
+        if (!insideSITLPanel && !onSITLButton) {
+          setShowSITL(false);
+        }
+      }
+
+      if (showMessages) {
+        const insideMessageDrawer = messageDrawerRef.current?.contains(target) ?? false;
+        const onMessagesButton = messagesButtonRef.current?.contains(target) ?? false;
+        if (!insideMessageDrawer && !onMessagesButton) {
+          setShowMessages(false);
+        }
+      }
+
+      if (mapMenuExpanded) {
+        const insideMapMenu = mapMenuRef.current?.contains(target) ?? false;
+        const onMapMenuToggle = mapMenuToggleRef.current?.contains(target) ?? false;
+        if (!insideMapMenu && !onMapMenuToggle) {
+          setMapMenuExpanded(false);
+        }
+      }
+    };
+
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [showSettings, showSITL, showMessages, mapMenuExpanded]);
+
   const vehicleList = useMemo(() => Object.values(vehicles).filter((vehicle) => vehicle.position), [vehicles]);
   const yp = vehicleList.find((vehicle) => vehicle.vehicle_type === "yp");
   const ypGpsLinked = Boolean(yp?.connected);
@@ -524,7 +577,20 @@ export function App() {
       )}
 
       {activeTab === "map" && (
-        <MapMenu mapBase={mapBase} mapSource={mapSource} onMapBaseChange={setMapBase} onMapSourceChange={setMapSource} />
+        <MapMenu
+          mapBase={mapBase}
+          mapSource={mapSource}
+          expanded={mapMenuExpanded}
+          setMenuRef={(node) => {
+            mapMenuRef.current = node;
+          }}
+          setToggleRef={(node) => {
+            mapMenuToggleRef.current = node;
+          }}
+          onExpandedChange={setMapMenuExpanded}
+          onMapBaseChange={setMapBase}
+          onMapSourceChange={setMapSource}
+        />
       )}
 
       <div className="trident-tagline">Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol</div>
@@ -574,6 +640,7 @@ export function App() {
           </button>
           {!VIEW_MODE && (
             <button
+              ref={sitlButtonRef}
               className={showSITL ? "icon-button active" : "icon-button"}
               title="Vehicle Connections"
               onClick={() => { setShowSITL((v) => !v); setShowSettings(false); }}
@@ -582,44 +649,47 @@ export function App() {
             </button>
           )}
           <button
+            ref={settingsButtonRef}
             className={showSettings ? "icon-button active" : "icon-button"}
             title="Settings"
             onClick={() => { setShowSettings((value) => !value); setShowSITL(false); }}
           >
             <Settings size={19} />
           </button>
-          <button className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
+          <button ref={messagesButtonRef} className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
             <MessageSquare size={19} />
           </button>
         </div>
       </div>
 
       {showSITL && !DEMO_MODE && (
-        <SITLPanel
-          bridges={sitlBridges}
-          onConnect={(url, vehicleId) =>
-            connectSITL(url, vehicleId || undefined)
-              .then((result) => {
-                if (!result.ok) return;
-              })
-              .catch(() => undefined)
-          }
-          onDisconnect={(vehicleId) =>
-            disconnectSITL(vehicleId)
-              .then(() =>
-                setSitlBridges((current) => {
-                  const next = { ...current };
-                  delete next[vehicleId];
-                  return next;
+        <div ref={sitlPanelRef}>
+          <SITLPanel
+            bridges={sitlBridges}
+            onConnect={(url, vehicleId) =>
+              connectSITL(url, vehicleId || undefined)
+                .then((result) => {
+                  if (!result.ok) return;
                 })
-              )
-              .catch(() => undefined)
-          }
-        />
+                .catch(() => undefined)
+            }
+            onDisconnect={(vehicleId) =>
+              disconnectSITL(vehicleId)
+                .then(() =>
+                  setSitlBridges((current) => {
+                    const next = { ...current };
+                    delete next[vehicleId];
+                    return next;
+                  })
+                )
+                .catch(() => undefined)
+            }
+          />
+        </div>
       )}
 
       {showSettings && (
-        <div className="settings-panel">
+        <div className="settings-panel" ref={settingsPanelRef}>
           <div className="panel-title">
             <Settings size={17} />
             <strong>Settings</strong>
@@ -720,15 +790,17 @@ export function App() {
       )}
 
       {showMessages && (
-        <MessageDrawer
-          messages={messageLog}
-          filteredMessages={filteredMessages}
-          filters={topicFilters}
-          width={messagePanelWidth}
-          onClose={() => setShowMessages(false)}
-          onResize={setMessagePanelWidth}
-          onFiltersChange={setTopicFilters}
-        />
+        <div ref={messageDrawerRef}>
+          <MessageDrawer
+            messages={messageLog}
+            filteredMessages={filteredMessages}
+            filters={topicFilters}
+            width={messagePanelWidth}
+            onClose={() => setShowMessages(false)}
+            onResize={setMessagePanelWidth}
+            onFiltersChange={setTopicFilters}
+          />
+        </div>
       )}
 
       {selected && (
@@ -1704,23 +1776,29 @@ function SITLPanel({
 function MapMenu({
   mapBase,
   mapSource,
+  expanded,
+  setMenuRef,
+  setToggleRef,
+  onExpandedChange,
   onMapBaseChange,
   onMapSourceChange,
 }: {
   mapBase: MapBase;
   mapSource: MapSource;
+  expanded: boolean;
+  setMenuRef: (node: HTMLDivElement | null) => void;
+  setToggleRef: (node: HTMLButtonElement | null) => void;
+  onExpandedChange: (expanded: boolean) => void;
   onMapBaseChange: (base: MapBase) => void;
   onMapSourceChange: (source: MapSource) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-
   return (
     <div className="map-menu-shell" aria-label="Map options">
-      <button className="map-menu-toggle" title="Map layers" onClick={() => setExpanded((value) => !value)}>
+      <button ref={setToggleRef} className="map-menu-toggle" title="Map layers" onClick={() => onExpandedChange(!expanded)}>
         <Layers size={19} />
       </button>
       {expanded && (
-        <div className="map-menu">
+        <div className="map-menu" ref={setMenuRef}>
           <fieldset>
             <legend>Map</legend>
             <label>
@@ -1781,16 +1859,45 @@ function MapActionMenu({
   onSendAll: () => void;
   onSearchGrid: (vehicleId: string, gridSizeM: number, swathM: number, altM: number) => void;
 }) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [showVehicles, setShowVehicles] = useState(false);
   const [showSearchGrid, setShowSearchGrid] = useState(false);
   const [gridSlider, setGridSlider] = useState(() => gridMetersToSlider(200));
   const gridSizeM = gridSliderToMeters(gridSlider);
   const [swathM, setSwathM] = useState(20);
   const [altM, setAltM] = useState(30);
+  const [position, setPosition] = useState<{ left: number; top: number }>({ left: menu.x + 8, top: menu.y + 8 });
   const commandableVehicles = vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp");
   const preferredVehicle = commandableVehicles.find((vehicle) => vehicle.vehicle_id === preferredVehicleId);
+
+  useEffect(() => {
+    const clampToViewport = () => {
+      const panel = menuRef.current;
+      if (!panel) {
+        return;
+      }
+      const padding = 8;
+      const offset = 8;
+      const width = panel.offsetWidth;
+      const height = panel.offsetHeight;
+      const desiredLeft = menu.x + offset;
+      const desiredTop = menu.y + offset;
+      const maxLeft = Math.max(padding, window.innerWidth - width - padding);
+      const maxTop = Math.max(padding, window.innerHeight - height - padding);
+
+      setPosition({
+        left: Math.min(Math.max(padding, desiredLeft), maxLeft),
+        top: Math.min(Math.max(padding, desiredTop), maxTop),
+      });
+    };
+
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, [menu.x, menu.y, showVehicles, showSearchGrid, gridSlider, swathM, altM, commandableVehicles.length, preferredVehicleId]);
+
   return (
-    <div className="map-action-menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
+    <div ref={menuRef} className="map-action-menu" style={{ left: position.left, top: position.top }} onClick={(event) => event.stopPropagation()}>
       <div className="map-action-title">Waypoint</div>
       <div className="map-coordinates">
         <span>Lat {menu.lat.toFixed(6)}</span>
@@ -2837,6 +2944,7 @@ function VehicleModal({
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
   const canStreamVideo = Boolean(vehicle.video?.enabled && vehicle.video.playback_url);
+  const modalRef = useRef<HTMLDivElement | null>(null);
 
   // Calculate relative position
   const relativePos = shipVehicle && vehicle.vehicle_id !== shipVehicle.vehicle_id
@@ -2847,8 +2955,33 @@ function VehicleModal({
   const [frame, setFrame] = useState(() => ({
     x: 20,
     y: Math.max(20, window.innerHeight - 480),
-    width: 340,
+    width: Math.min(340, Math.max(280, window.innerWidth - 24)),
   }));
+
+  const clampFrameToViewport = (candidate: typeof frame) => {
+    const padding = 12;
+    const maxWidth = Math.max(280, Math.min(600, window.innerWidth - padding * 2));
+    const width = Math.min(maxWidth, Math.max(280, candidate.width));
+    const measuredHeight = modalRef.current?.offsetHeight ?? 420;
+    const maxX = Math.max(padding, window.innerWidth - width - padding);
+    const maxY = Math.max(padding, window.innerHeight - measuredHeight - padding);
+
+    return {
+      width,
+      x: Math.min(Math.max(padding, candidate.x), maxX),
+      y: Math.min(Math.max(padding, candidate.y), maxY),
+    };
+  };
+
+  useEffect(() => {
+    setFrame((current) => clampFrameToViewport(current));
+  }, [vehicle.vehicle_id, showColorPalette]);
+
+  useEffect(() => {
+    const onResize = () => setFrame((current) => clampFrameToViewport(current));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const dragRef = useRef<{
     mode: "move" | "resize";
@@ -2880,16 +3013,16 @@ function VehicleModal({
     const dy = event.clientY - drag.startY;
 
     if (drag.mode === "move") {
-      setFrame({
+      setFrame(clampFrameToViewport({
         ...drag.frame,
-        x: Math.max(0, Math.min(drag.frame.x + dx, window.innerWidth - drag.frame.width)),
-        y: Math.max(0, Math.min(drag.frame.y + dy, window.innerHeight - 100)),
-      });
+        x: drag.frame.x + dx,
+        y: drag.frame.y + dy,
+      }));
     } else if (drag.mode === "resize") {
-      setFrame({
+      setFrame(clampFrameToViewport({
         ...drag.frame,
-        width: Math.max(280, Math.min(600, drag.frame.width + dx)),
-      });
+        width: drag.frame.width + dx,
+      }));
     }
   };
 
@@ -2902,6 +3035,7 @@ function VehicleModal({
   return (
     // Note: The <div className="modal-backdrop"> has been completely removed
     <div 
+      ref={modalRef}
       className="vehicle-modal" 
       style={{
         position: 'fixed',
@@ -2912,8 +3046,9 @@ function VehicleModal({
         zIndex: 5000,
         boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)',
         cursor: 'default',
-        maxHeight: '90vh',
-        overflowY: 'auto'
+        maxHeight: 'calc(100vh - 24px)',
+        overflowY: 'auto',
+        overscrollBehavior: 'contain'
       }}
       // Stop clicks from falling through to the map underneath
       onMouseDown={(event) => event.stopPropagation()}

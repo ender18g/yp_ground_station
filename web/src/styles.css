@@ -214,12 +214,15 @@ input {
   display: grid;
   gap: 4px;
   width: 220px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   border: 1px solid rgba(21, 32, 43, 0.16);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 16px 38px rgba(15, 23, 42, 0.2);
-  transform: translate(8px, 8px);
 }
 
 .map-action-title {
@@ -301,6 +304,9 @@ input {
   top: 72px;
   right: 16px;
   width: min(300px, calc(100vw - 32px));
+  max-height: calc(100vh - 88px);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   border-radius: 8px;
 }
@@ -1571,6 +1577,9 @@ input {
   top: 72px;
   right: 16px;
   width: min(320px, calc(100vw - 32px));
+  max-height: calc(100vh - 88px);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   border: 1px solid rgba(21, 32, 43, 0.16);
   border-radius: 8px;
