@@ -167,11 +167,14 @@ DEL  /api/sitl/{vehicle_id}         → close and remove a bridge
 | Command type | Behaviour |
 | --- | --- |
 | `waypoint` | Sets the target lat/lon/alt |
-| `rtb` | Commands RTL mode |
-| `search_grid` | Generates and uploads a boustrophedon lawnmower mission, arms, and starts AUTO mode |
-| `mob` | Generates and uploads a curved track-following MOB search mission, force-arms, and starts AUTO mode |
+| `rtb` | Starts server-side return-to-boat follow (continuous waypoint updates to a stern offset from the current YP vessel) |
+| `search_grid` | Runs a streaming boustrophedon lawnmower mission (carrot-chase waypoints) |
+| `mob` | Runs a streaming curved track-following MOB mission (carrot-chase waypoints) |
+| `cancel_sar` | Cancels an in-progress streaming SAR mission |
 
-For `search_grid` and `mob`, the server holds the MAVLink connection exclusively during mission upload and arms the vehicle. The IO telemetry thread is paused while the mission is being uploaded to prevent ACK races.
+For `search_grid` and `mob`, the bridge now executes missions in streaming mode (one waypoint at a time) instead of full mission upload. During streaming, the mission worker keeps forwarding position telemetry so vehicle updates and map motion remain live.
+
+For `rtb`, the server does not send a one-shot RTL command. It computes a dynamic stern target behind the selected YP vessel and pushes periodic waypoint updates until the vehicle settles inside the configured arrival radius.
 
 ## SAR Missions
 
@@ -213,7 +216,7 @@ When a SAR mission is dispatched the full flight path is broadcast to all connec
 
 ### SAR With Hardware Bridges
 
-The `arducopter_ws_bridge` service supports the same `search_grid` and `mob` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over its WebSocket, pauses telemetry, uploads the mission via direct MAVLink, arms, and starts AUTO mode. The pattern overlay is shown on the map at dispatch time.
+The `arducopter_ws_bridge` service supports the same `search_grid` and `mob` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over WebSocket and executes it in streaming carrot-chase mode over direct MAVLink. The pattern overlay is shown on the map at dispatch time.
 
 ## RFD-900 / Telemetry Radio Support
 
@@ -340,13 +343,11 @@ RTB sends:
 { "type": "rtb" }
 ```
 
-For the existing simulator this returns to its configured home point. For the PX4/MAVROS vehicle, the bridge calls:
+On the server, this command starts return-to-boat follow mode for that vehicle. The server continuously emits waypoint commands (`source="rtb_follow"`) toward a stern offset from the current YP vessel at `rtb_update_hz` until arrival.
 
-```text
-/mavros/set_mode AUTO.RTL
-```
+Bridge implementations treat `source="rtb_follow"` as a lightweight stream and skip repeated mode/arm transitions so telemetry remains responsive while tracking the moving stern target.
 
-PX4 may reject arming, Offboard, or RTL if its simulated sensors, EKF state, preflight checks, or failsafe state are not ready. Check the `mavros`, `px4-sitl-uav`, and `px4-yp-bridge` logs when a command is acknowledged by the UI but not acted on by PX4.
+For the PX4/MAVROS vehicle, behavior still depends on bridge configuration and PX4 state. PX4 may reject arming, Offboard, or streamed setpoints if its simulated sensors, EKF state, preflight checks, or failsafe state are not ready. Check the `mavros`, `px4-sitl-uav`, and `px4-yp-bridge` logs when a command is acknowledged by the UI but not acted on by PX4.
 
 ## Message Transport
 
@@ -449,10 +450,13 @@ The default compose file runs:
 
 ```yaml
 GPS_MODE: sim
-HOME_LAT: "38.984764"
+HOME_LAT: "38.989639"
 HOME_LON: "-76.478643"
 HEADING_DEG: "330"
 SPEED_KNOTS: "3"
+CIRCLE_LEFT_LON: "-76.487031"
+CIRCLE_RIGHT_LON: "-76.479393"
+CIRCLE_CW: "true"
 ```
 
 To use a real serial GPS, change the `yp-gps` service:
@@ -468,7 +472,7 @@ devices:
 
 The GPS container publishes the YP as a `yp` vehicle with `NavSatFix`, `Pose`, `BatteryState`, and heartbeat messages so the map can center on the ship.
 
-In simulated mode, the YP starts at latitude `38.984764`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
+In simulated mode, the YP starts at latitude `38.989639`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
 
 ## Map Tiles
 
@@ -538,8 +542,12 @@ Useful environment variables:
 | `yp-server` | `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | MOB search corridor half-width in metres |
 | `yp-server` | `SAR_SWATH_M` | `20.0` | SAR lane spacing in metres |
 | `yp-server` | `SAR_ALTITUDE_M` | `30.0` | SAR search altitude in metres |
+| `yp-server` | `SAR_MOB_TRACK_SECONDS` | `120.0` | Default YP history window used for MOB mission generation |
 | `yp-server` | `SAR_TAKEOFF_ALT_M` | `30.0` | SAR takeoff altitude in metres |
 | `yp-server` | `SAR_CLIMB_SPEED_MS` | `8.0` | SAR climb speed in m/s |
+| `yp-server` | `RTB_STERN_DISTANCE_M` | `35.0` | Distance behind YP heading used as RTB-follow target |
+| `yp-server` | `RTB_UPDATE_HZ` | `2.0` | Default RTB-follow waypoint update rate |
+| `yp-server` | `RTB_ARRIVAL_RADIUS_M` | `15.0` | Radius for considering RTB-follow complete |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
