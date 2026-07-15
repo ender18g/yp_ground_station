@@ -33,6 +33,14 @@ SAR_ARRIVAL_RADIUS_M = float(os.getenv("SAR_ARRIVAL_RADIUS_M", "10.0"))
 _sar_mission_lock = threading.Lock()
 # Set this event to cancel an in-progress streaming SAR mission.
 _sar_stop_event = threading.Event()
+_sar_telemetry_lock = threading.Lock()
+_sar_latest_nav = {
+    "lat": None,
+    "lon": None,
+    "alt": None,
+    "heading": None,
+    "stamp": 0.0,
+}
 
 SHIP_STATE_TIMEOUT_S = float(os.getenv("SHIP_STATE_TIMEOUT_S", "2.0"))
 SHIP_RELATIVE_DEFAULT_UPDATE_HZ = float(os.getenv("SHIP_RELATIVE_UPDATE_HZ", "10.0"))
@@ -153,6 +161,31 @@ def _update_vehicle_state(lat: float, lon: float, alt: float, heading: float | N
         _vehicle_state["alt"] = alt
         _vehicle_state["heading_deg"] = heading
         _vehicle_state["stamp"] = time.time()
+
+
+def _capture_sar_telemetry(msg) -> None:
+    heading_raw = getattr(msg, "hdg", None)
+    heading = (heading_raw / 100.0) if heading_raw is not None and heading_raw != 65535 else None
+    with _sar_telemetry_lock:
+        _sar_latest_nav["lat"] = msg.lat / 1e7
+        _sar_latest_nav["lon"] = msg.lon / 1e7
+        _sar_latest_nav["alt"] = msg.relative_alt / 1000.0
+        _sar_latest_nav["heading"] = heading
+        _sar_latest_nav["stamp"] = time.time()
+
+
+def _snapshot_sar_telemetry(max_age_s: float = 2.0) -> tuple[float, float, float, float | None] | None:
+    with _sar_telemetry_lock:
+        stamp = float(_sar_latest_nav.get("stamp") or 0.0)
+        lat = _sar_latest_nav.get("lat")
+        lon = _sar_latest_nav.get("lon")
+        alt = _sar_latest_nav.get("alt")
+        heading = _sar_latest_nav.get("heading")
+    if lat is None or lon is None or alt is None:
+        return None
+    if (time.time() - stamp) > max_age_s:
+        return None
+    return float(lat), float(lon), float(alt), (float(heading) if heading is not None else None)
 
 
 def _snapshot_vehicle_state() -> dict:
@@ -486,6 +519,10 @@ async def telemetry_loop() -> None:
                                     ).start()
                                 else:
                                     print(f"[ERROR] MOB command needs at least 2 track points, got {len(track_points)}")
+
+                            elif cmd_type == "cancel_sar":
+                                _sar_stop_event.set()
+                                print("[SAR] Cancel requested by operator.")
                             elif cmd_type == "ship_relative_trajectory": # follow a trajectory as specified in ship-fixed coordinates
                                 _launch_ship_relative_mission(master, command_data)
                                 print("[INFO] Ship-relative trajectory command launched.")
@@ -508,18 +545,24 @@ async def telemetry_loop() -> None:
                 
                 # 3. Process and send telemetry at the specified SEND_HZ rate
                 now = time.time()
+                telemetry_sample = None
                 if msg is not None:
                     lat = msg.lat / 1e7
                     lon = msg.lon / 1e7
                     alt = msg.relative_alt / 1000.0
-                    heading = getattr(msg, "hdg", None)
-                    if heading is not None:
-                        heading = heading / 100.0
-
+                    heading_raw = getattr(msg, "hdg", None)
+                    heading = (heading_raw / 100.0) if heading_raw is not None and heading_raw != 65535 else None
                     _update_vehicle_state(lat, lon, alt, heading)
+                    telemetry_sample = (lat, lon, alt, heading)
+                else:
+                    telemetry_sample = _snapshot_sar_telemetry()
+                    if telemetry_sample is not None:
+                        _update_vehicle_state(*telemetry_sample)
 
-                if msg is not None and (now - last_send_time) >= (1.0 / SEND_HZ):
+                if telemetry_sample is not None and (now - last_send_time) >= (1.0 / SEND_HZ):
                     counter += 1
+
+                    lat, lon, alt, heading = telemetry_sample
 
                     payload = create_navsatfix_message(lat, lon, alt, heading)
                     json_payload = json.dumps(payload)
@@ -557,24 +600,18 @@ def _run_search_grid(
     with _sar_mission_lock:
         _sar_stop_event.clear()
         try:
-            if SAR_STREAMING_MODE:
-                ok = sar_missions.execute_search_grid_streaming(
-                    master, lat, lon, grid_size_m, swath_m, altitude_m,
-                    include_takeoff=SAR_INCLUDE_TAKEOFF,
-                    takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
-                    climb_speed_ms=SAR_CLIMB_SPEED_MS,
-                    arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
-                    stop_event=_sar_stop_event,
-                )
-                print(f"[SAR] Search grid mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
-            else:
-                ok = sar_missions.execute_search_grid(
-                    master, lat, lon, grid_size_m, swath_m, altitude_m,
-                    include_takeoff=SAR_INCLUDE_TAKEOFF,
-                    takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
-                    climb_speed_ms=SAR_CLIMB_SPEED_MS,
-                )
-                print(f"[SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
+            if not SAR_STREAMING_MODE:
+                print("[SAR] SAR_STREAMING_MODE=false ignored; forcing streaming carrot-chase mode.")
+            ok = sar_missions.execute_search_grid_streaming(
+                master, lat, lon, grid_size_m, swath_m, altitude_m,
+                include_takeoff=SAR_INCLUDE_TAKEOFF,
+                takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
+                climb_speed_ms=SAR_CLIMB_SPEED_MS,
+                arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
+                stop_event=_sar_stop_event,
+                telemetry_callback=_capture_sar_telemetry,
+            )
+            print(f"[SAR] Search grid mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
         except Exception as exc:
             print(f"[SAR] Search grid error: {exc}")
             traceback.print_exc()
@@ -598,30 +635,21 @@ def _run_mob_search(
     with _sar_mission_lock:
         _sar_stop_event.clear()
         try:
-            if SAR_STREAMING_MODE:
-                ok = sar_missions.execute_mob_search_streaming(
-                    master, track_points,
-                    corridor_half_width_m=corridor_half_width_m,
-                    swath_m=swath_m,
-                    altitude_m=altitude_m,
-                    takeoff_altitude_m=takeoff_altitude_m,
-                    climb_speed_ms=climb_speed_ms,
-                    include_takeoff=SAR_INCLUDE_TAKEOFF,
-                    arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
-                    stop_event=_sar_stop_event,
-                )
-                print(f"[SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
-            else:
-                ok = sar_missions.execute_mob_search(
-                    master, track_points,
-                    corridor_half_width_m=corridor_half_width_m,
-                    swath_m=swath_m,
-                    altitude_m=altitude_m,
-                    takeoff_altitude_m=takeoff_altitude_m,
-                    climb_speed_ms=climb_speed_ms,
-                    include_takeoff=SAR_INCLUDE_TAKEOFF,
-                )
-                print(f"[SAR] MOB search mission {'STARTED' if ok else 'FAILED'}")
+            if not SAR_STREAMING_MODE:
+                print("[SAR] SAR_STREAMING_MODE=false ignored; forcing streaming carrot-chase mode.")
+            ok = sar_missions.execute_mob_search_streaming(
+                master, track_points,
+                corridor_half_width_m=corridor_half_width_m,
+                swath_m=swath_m,
+                altitude_m=altitude_m,
+                takeoff_altitude_m=takeoff_altitude_m,
+                climb_speed_ms=climb_speed_ms,
+                include_takeoff=SAR_INCLUDE_TAKEOFF,
+                arrival_radius_m=SAR_ARRIVAL_RADIUS_M,
+                stop_event=_sar_stop_event,
+                telemetry_callback=_capture_sar_telemetry,
+            )
+            print(f"[SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
         except Exception as exc:
             print(f"[SAR] MOB search error: {exc}")
             traceback.print_exc()

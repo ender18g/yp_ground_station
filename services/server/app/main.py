@@ -14,7 +14,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     from pymavlink import mavutil as _mavutil
@@ -480,6 +480,7 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         # connection for mission upload/arm/start.  The IO thread checks this
         # before calling recv_match so the two never race on ACK messages.
         _sar_active = threading.Event()
+        _sar_stop_event = threading.Event()
 
         io_thread = threading.Thread(target=_io_thread, args=(master,), daemon=True)
         io_thread.start()
@@ -492,14 +493,31 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
                 try:
                     payload = cmd_queue.get_nowait()
                     cmd_type = payload.get("command", {}).get("type")
+                    if cmd_type == "cancel_sar":
+                        _sar_stop_event.set()
+                        print(f"[SITL][SAR] Cancel requested for {vehicle_id}")
+                        continue
                     if cmd_type in ("search_grid", "mob"):
                         # SAR missions need exclusive MAVLink access; run in a
                         # dedicated thread and signal the IO thread to pause.
                         _loop = asyncio.get_event_loop()
+
+                        def _forward_sar_telemetry(msg: Any) -> None:
+                            try:
+                                _inbound.put_nowait(("GLOBAL_POSITION_INT", msg, time.time()))
+                            except _stdlib_queue.Full:
+                                pass
+
                         def _run_sar(p: dict[str, Any] = payload) -> None:
+                            _sar_stop_event.clear()
                             _sar_active.set()
                             try:
-                                _execute_sar_command(master, p)
+                                _execute_sar_command(
+                                    master,
+                                    p,
+                                    telemetry_callback=_forward_sar_telemetry,
+                                    stop_event=_sar_stop_event,
+                                )
                             except Exception as exc:
                                 print(f"[SITL][SAR] Unhandled error: {exc}")
                             finally:
@@ -533,7 +551,7 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
                     lon = msg.lon / 1e7
                     alt = msg.relative_alt / 1000.0
                     hdg = getattr(msg, "hdg", None)
-                    heading = (hdg / 100.0) if hdg is not None and hdg != 0 else None
+                    heading = (hdg / 100.0) if hdg is not None and hdg != 65535 else None
 
                     nav_msg: dict[str, Any] = {
                         "header": {
@@ -593,7 +611,12 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
 
 
-def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
+def _execute_sar_command(
+    master: Any,
+    cmd_payload: dict[str, Any],
+    telemetry_callback: Optional[Callable[[Any], None]] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
     """Blocking: run a SAR mission (search_grid or mob) in the calling thread.
 
     Must be called from a dedicated thread that holds the MAVLink connection
@@ -615,15 +638,18 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             print("[SITL][SAR] search_grid command missing lat/lon")
             return
         print(f"[SITL][SAR] Launching search grid at ({lat}, {lon}), {grid_size_m}m grid")
-        ok = _sar_missions.execute_search_grid(
+        ok = _sar_missions.execute_search_grid_streaming(
             master,
             float(lat), float(lon),
             grid_size_m, swath_m, altitude_m,
             include_takeoff=True,
             takeoff_altitude_m=SAR_TAKEOFF_ALT_M,
             climb_speed_ms=SAR_CLIMB_SPEED_MS,
+            arrival_radius_m=10.0,
+            stop_event=stop_event,
+            telemetry_callback=telemetry_callback,
         )
-        print(f"[SITL][SAR] Search grid mission {'STARTED' if ok else 'FAILED'}")
+        print(f"[SITL][SAR] Search grid mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
 
     elif cmd_type == "mob":
         track_points = command.get("track_points", [])
@@ -636,7 +662,7 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             print(f"[SITL][SAR] MOB command needs at least 2 track points, got {len(track_points)}")
             return
         print(f"[SITL][SAR] MAN OVERBOARD — launching search on {len(track_points)}-point track")
-        ok = _sar_missions.execute_mob_search(
+        ok = _sar_missions.execute_mob_search_streaming(
             master, track_points,
             corridor_half_width_m=corridor_half_width_m,
             swath_m=swath_m,
@@ -644,8 +670,11 @@ def _execute_sar_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             takeoff_altitude_m=takeoff_altitude_m,
             climb_speed_ms=climb_speed_ms,
             include_takeoff=True,
+            arrival_radius_m=10.0,
+            stop_event=stop_event,
+            telemetry_callback=telemetry_callback,
         )
-        print(f"[SITL][SAR] MOB search mission {'STARTED' if ok else 'FAILED'}")
+        print(f"[SITL][SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
 
 
 def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
@@ -1427,9 +1456,10 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
                 "waypoints": pattern_pts,
             })
 
-        # For sim (WebSocket) vehicles that have no MAVLink, embed the full 3-D
-        # waypoint list so sim_vehicle.py can navigate the pattern visually.
-        if vehicle_id not in sitl_bridges and _sar_missions is not None:
+        # For websocket sim vehicles only, embed full 3-D waypoints so
+        # sim_vehicle.py can navigate the pattern visually. Do not attach this
+        # list for hardware bridges.
+        if vehicle_id.startswith("sim-") and _sar_missions is not None:
             command = dict(command)  # shallow copy — don't mutate the caller's dict
             try:
                 if cmd_type == "search_grid":

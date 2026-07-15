@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from typing import Callable
 from typing import Optional
 
 from pymavlink import mavutil, mavwp
@@ -512,6 +513,7 @@ def stream_waypoints_guided(
     arrival_radius_m: float = 10.0,
     wp_resend_interval_s: float = 2.0,
     stop_event: Optional = None,
+    telemetry_callback: Optional[Callable[[object], None]] = None,
 ) -> bool:
     """
     Stream waypoints one at a time in GUIDED mode (chasing-the-carrot pattern).
@@ -555,6 +557,11 @@ def stream_waypoints_guided(
         for _ in range(5):
             msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=0.5)
             if msg:
+                if telemetry_callback is not None:
+                    try:
+                        telemetry_callback(msg)
+                    except Exception as exc:
+                        logger.debug(f"Streaming telemetry callback error: {exc}")
                 return msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
         return None, None, None
 
@@ -689,6 +696,7 @@ def execute_search_grid_streaming(
     climb_speed_ms: float = 8.0,
     arrival_radius_m: float = 10.0,
     stop_event: Optional = None,
+    telemetry_callback: Optional[Callable[[object], None]] = None,
 ) -> bool:
     """
     Streaming version of execute_search_grid.  Generates the lawnmower pattern
@@ -711,6 +719,7 @@ def execute_search_grid_streaming(
         force_arm=include_takeoff,
         arrival_radius_m=arrival_radius_m,
         stop_event=stop_event,
+        telemetry_callback=telemetry_callback,
     )
 
 
@@ -725,6 +734,7 @@ def execute_mob_search_streaming(
     include_takeoff: bool = True,
     arrival_radius_m: float = 10.0,
     stop_event: Optional = None,
+    telemetry_callback: Optional[Callable[[object], None]] = None,
 ) -> bool:
     """
     Streaming version of execute_mob_search.  Generates MOB waypoints then
@@ -762,4 +772,5 @@ def execute_mob_search_streaming(
         force_arm=True,  # MOB always force-arms (emergency scenario)
         arrival_radius_m=arrival_radius_m,
         stop_event=stop_event,
+        telemetry_callback=telemetry_callback,
     )

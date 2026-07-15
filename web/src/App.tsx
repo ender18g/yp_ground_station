@@ -130,6 +130,7 @@ export function App() {
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
+  const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const demoSimsRef = useRef<DemoVehicle[]>([]);
@@ -144,6 +145,18 @@ export function App() {
   const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   
   const [activeTab, setActiveTab] = useState<"map" | "planner">("map");
+
+  const updateSarMissionState = (vehicleId: string, commandType: string) => {
+    setSarMissionActiveByVehicle((current) => {
+      const next = { ...current };
+      if (commandType === "search_grid" || commandType === "mob") {
+        next[vehicleId] = true;
+      } else if (commandType === "cancel_sar" || commandType === "rtb" || commandType === "waypoint") {
+        next[vehicleId] = false;
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!DEMO_MODE || !("serviceWorker" in navigator)) {
@@ -199,6 +212,11 @@ export function App() {
         }
         if (payload.op === "command_ack") {
           setMessageLog((current) => [streamMessageFromCommandAck(payload), ...current].slice(0, MAX_MESSAGE_LOG));
+            const ackVehicleId = payload.vehicle_id as string | undefined;
+            const ackCommandType = (payload.command as { type?: string } | undefined)?.type;
+            if (ackVehicleId && ackCommandType) {
+              updateSarMissionState(ackVehicleId, ackCommandType);
+            }
         }
         if (payload.op === "sitl_bridge_update") {
           const bridge = payload.bridge as SITLBridge;
@@ -214,6 +232,11 @@ export function App() {
         if (payload.op === "vehicle_removed") {
           const removedId = payload.vehicle_id as string;
           setVehicles((current) => {
+            const next = { ...current };
+            delete next[removedId];
+            return next;
+          });
+          setSarMissionActiveByVehicle((current) => {
             const next = { ...current };
             delete next[removedId];
             return next;
@@ -403,6 +426,7 @@ export function App() {
   const mapLayer = useMemo(() => tileLayerFor(mapBase, renderedMapSource), [mapBase, renderedMapSource]);
 
   const command = (vehicleId: string, body: Command) => {
+    updateSarMissionState(vehicleId, body.type);
     if (DEMO_MODE) {
       handleDemoCommand(demoSimsRef.current, vehicleId, body);
       return;
@@ -414,6 +438,8 @@ export function App() {
   };
 
   const sendWaypoint = (vehicleId: string, lat: number, lon: number, altitude?: number) => {
+    // Right-click "Send Vehicle" should interrupt any active SAR mission first.
+    command(vehicleId, { type: "cancel_sar" });
     command(vehicleId, { type: "waypoint", target: { latitude: lat, longitude: lon, altitude: altitude ?? vehicles[vehicleId]?.position?.altitude ?? 0 } });
     setWaypointMarkers((current) => ({
       ...current,
@@ -468,6 +494,7 @@ export function App() {
     const nextMarkers: Record<string, WaypointMarker> = {};
     commandableVehicles.forEach((vehicle, index) => {
       const offset = waypointOffset(lat, lon, index, commandableVehicles.length);
+      command(vehicle.vehicle_id, { type: "cancel_sar" });
       command(vehicle.vehicle_id, { type: "waypoint", target: { latitude: offset.latitude, longitude: offset.longitude, altitude: vehicle.position?.altitude ?? 0 } });
       nextMarkers[vehicle.vehicle_id] = { vehicle_id: vehicle.vehicle_id, latitude: offset.latitude, longitude: offset.longitude };
     });
@@ -524,6 +551,15 @@ export function App() {
               waypoint={waypoint}
               vehicle={vehicles[waypoint.vehicle_id]}
               yp={yp}
+              onClick={() => {
+                const selectedVehicle = vehicles[waypoint.vehicle_id];
+                if (!selectedVehicle) return;
+                setMapActionMenu(null);
+                if (selectedVehicle.vehicle_type === "yp") {
+                  setFollowYp(true);
+                }
+                setSelected(selectedVehicle);
+              }}
               onDragStart={() => {
                 followBeforeWaypointDragRef.current = followYp;
                 setFollowYp(false);
@@ -814,6 +850,7 @@ export function App() {
           // Lookup the live vehicle data, fallback to the snapshot if it briefly disconnects
           vehicle={vehicles[selected.vehicle_id] || selected}
           shipVehicle={yp}
+          sarMissionActive={Boolean(sarMissionActiveByVehicle[selected.vehicle_id])}
           canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
           onClose={() => setSelected(null)}
           onRtb={() => {
@@ -835,6 +872,10 @@ export function App() {
               }));
             }
 
+            setSelected(null);
+          }}
+          onEndSar={() => {
+            command(selected.vehicle_id, { type: "cancel_sar" });
             setSelected(null);
           }}
           onWaypoint={() => {
@@ -2191,6 +2232,10 @@ function VehicleLayer({
         icon={vehicleIcon(vehicle, isPhoneViewer, mapZoom)}
         zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
         eventHandlers={{
+          mousedown: (event) => {
+            L.DomEvent.stopPropagation(event.originalEvent);
+            onClick();
+          },
           click: (event) => {
             L.DomEvent.stopPropagation(event.originalEvent);
             onClick();
@@ -2355,6 +2400,7 @@ function WaypointCrosshair({
   waypoint,
   vehicle,
   yp,
+  onClick,
   onDragStart,
   onDragEnd,
   onMove,
@@ -2362,6 +2408,7 @@ function WaypointCrosshair({
   waypoint: WaypointMarker;
   vehicle?: Vehicle;
   yp?: Vehicle;
+  onClick: () => void;
   onDragStart: () => void;
   onDragEnd: () => void;
   onMove: (lat: number, lon: number) => void;
@@ -2382,7 +2429,10 @@ function WaypointCrosshair({
       zIndexOffset={6000}
       draggable
       eventHandlers={{
-        click: (event) => L.DomEvent.stopPropagation(event.originalEvent),
+        click: (event) => {
+          L.DomEvent.stopPropagation(event.originalEvent);
+          onClick();
+        },
         dragstart: onDragStart,
         dragend: (event) => {
           const newPos = event.target.getLatLng();
@@ -2937,18 +2987,22 @@ function lightenHex(hex: string, amount: number): string {
 function VehicleModal({
   vehicle,
   shipVehicle,
+  sarMissionActive = false,
   canCommand = true,
   onClose,
   onRtb,
+  onEndSar,
   onWaypoint,
   onStreamVideo,
   onColorSave,
 }: {
   vehicle: Vehicle;
   shipVehicle?: Vehicle;
+  sarMissionActive?: boolean;
   canCommand?: boolean;
   onClose: () => void;
   onRtb: () => void;
+  onEndSar: () => void;
   onWaypoint: () => void;
   onStreamVideo: () => void;
   onColorSave: (color: string) => void;
@@ -3102,6 +3156,7 @@ function VehicleModal({
         <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
         <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
         <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
+        <Metric label="SAR Mission" value={sarMissionActive ? "Running" : "Idle"} />
       </div>
 
       {relativePos && (
@@ -3119,6 +3174,12 @@ function VehicleModal({
       )}
 
       <div className="modal-actions" style={{ marginTop: '15px' }}>
+        {canCommand && (
+          <button className="secondary" onClick={onEndSar} disabled={!sarMissionActive} title={sarMissionActive ? "Stop active SAR mission" : "No active SAR mission"}>
+            <CircleDashed size={18} />
+            End SAR Mission
+          </button>
+        )}
         {canCommand && (
           <button className="danger" onClick={onRtb}>
             <RotateCcw size={18} />
