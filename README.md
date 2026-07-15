@@ -116,7 +116,17 @@ The Settings menu controls trail duration and YP range rings. The message drawer
 
 ## Video Streams
 
-The UI can open vehicle video feeds when the server supplies a `video.playback_url`. The current browser player uses WebRTC/WHEP in the frontend, and the backend exposes stream metadata through the video stream API.
+The UI shows the **Stream Video** action when a vehicle payload includes `video.enabled=true` and at least one entry in `video.streams`.
+
+Each stream entry is expected to look like:
+
+```json
+{ "label": "Bow Camera", "url": "http://<whep-host>/<stream-id>/whep" }
+```
+
+The current frontend player negotiates WebRTC using WHEP by POSTing SDP offers directly to the selected stream `url`.
+
+The backend video stream API remains available for storing per-vehicle stream metadata (`stream_id`, `source_rtsp_url`, `playback_url`). Those API-managed fields are useful for control/config workflows, but the current UI video modal consumes `video.streams` from live vehicle data.
 
 ### Video Stream API
 
