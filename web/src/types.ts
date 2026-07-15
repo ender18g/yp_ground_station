@@ -27,9 +27,11 @@ export interface Vehicle {
   last_seen_age?: number;
   video?: {
     vehicle_id: string;
-    stream_id: string;
-    playback_url: string;
-    enabled: boolean;
+    enabled?: boolean;
+    streams?: {
+      label: string;
+      url: string;
+    }[];
   };
   position?: Position;
   history?: Position[];
