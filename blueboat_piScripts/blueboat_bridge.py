@@ -379,8 +379,12 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
     print("[SHIP-REL] Mission complete.")
 
 
-def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30):
-    """Send vehicle to a waypoint and wait for arrival"""
+def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_guided=True):
+    """Send vehicle to a waypoint.
+
+    For high-rate RTB-follow updates, skip repeated mode changes to reduce
+    command chatter and keep telemetry flowing.
+    """
    
     # --- OVERRIDE FOR SURFACE VEHICLES ---
     if VEHICLE_TYPE in ["usv", "ugv"]:
@@ -388,8 +392,9 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30):
        
     print(f"\n[NAV] Flying/Driving to waypoint: {target_lat:.6f}, {target_lon:.6f}, alt={target_alt}m")
     
-    # Force the vehicle into GUIDED mode so it accepts the command
-    master.set_mode('GUIDED')
+    # Avoid forcing GUIDED on every RTB-follow waypoint update.
+    if force_guided:
+        master.set_mode('GUIDED')
                                 
     master.mav.set_position_target_global_int_send(
         0,
@@ -472,6 +477,7 @@ async def telemetry_loop() -> None:
 
                             if cmd_type == "waypoint":
                                 target = command_data.get("target", {})
+                                source = server_msg.get("source")
                                
                                 target_lat = target.get("latitude")
                                 target_lon = target.get("longitude")
@@ -479,7 +485,13 @@ async def telemetry_loop() -> None:
 
                                 
                                 if None not in (target_lat, target_lon, target_alt):
-                                    goto_waypoint(master, target_lat, target_lon, target_alt)
+                                    goto_waypoint(
+                                        master,
+                                        target_lat,
+                                        target_lon,
+                                        target_alt,
+                                        force_guided=(source != "rtb_follow"),
+                                    )
                                     print("[SUCCESS] Waypoint command routed to vehicle.")
                                 else:
                                     print("[ERROR] Missing coordinates in waypoint command payload.")

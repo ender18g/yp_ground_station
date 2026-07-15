@@ -113,6 +113,7 @@ export function App() {
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
+  const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -356,6 +357,9 @@ export function App() {
       .then((serverSettings) => {
         if (cancelled) return;
         setMessageRetentionMinutes(Math.round(serverSettings.message_retention_seconds / 60));
+        if (typeof serverSettings.rtb_update_hz === "number") {
+          setRtbUpdateHz(serverSettings.rtb_update_hz);
+        }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         setSettingsLoaded(true);
       })
@@ -368,10 +372,13 @@ export function App() {
   useEffect(() => {
     if (DEMO_MODE || !settingsLoaded) return;
     const timeout = window.setTimeout(() => {
-      updateSettings({ message_retention_seconds: messageRetentionMinutes * 60 }).catch(() => undefined);
+      updateSettings({
+        message_retention_seconds: messageRetentionMinutes * 60,
+        rtb_update_hz: rtbUpdateHz,
+      }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [messageRetentionMinutes, settingsLoaded]);
+  }, [messageRetentionMinutes, rtbUpdateHz, settingsLoaded]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -475,6 +482,7 @@ export function App() {
       setMessageLog((current) => [mobMessage, ...current].slice(0, MAX_MESSAGE_LOG));
 
       if (result.ok) {
+        updateSarMissionState(vehicleId, "mob");
         setMobModalOpen(false);
       } else {
         setMobError(result.error ?? "Dispatch failed");
@@ -807,6 +815,19 @@ export function App() {
                     </option>
                   ))}
               </select>
+              <label>
+                RTB update rate
+                <span>{rtbUpdateHz.toFixed(1)} Hz</span>
+              </label>
+              <input
+                min={0.2}
+                max={10}
+                step={0.1}
+                type="range"
+                value={rtbUpdateHz}
+                disabled={DEMO_MODE}
+                onChange={(event) => setRtbUpdateHz(Number(event.target.value))}
+              />
             </>
           )}
           {settingsTab === "mob" && (
@@ -854,6 +875,7 @@ export function App() {
           canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
           onClose={() => setSelected(null)}
           onRtb={() => {
+            command(selected.vehicle_id, { type: "cancel_sar" });
             command(selected.vehicle_id, { type: "rtb" });
             // Extract the coordinates into strictly typed local variables first
             const ypLat = yp?.position?.latitude;

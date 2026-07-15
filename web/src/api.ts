@@ -5,6 +5,7 @@ export interface ServerSettings {
   message_cleanup_interval_seconds: number;
   influx_max_write_hz: number;
   tile_max_cache_age_seconds: number;
+  rtb_update_hz?: number;
   yp_role_vehicle_id?: string | null;
 }
 
@@ -21,7 +22,7 @@ export async function fetchSettings(): Promise<ServerSettings> {
   return response.json();
 }
 
-export async function updateSettings(settings: Pick<ServerSettings, "message_retention_seconds">): Promise<ServerSettings> {
+export async function updateSettings(settings: Pick<ServerSettings, "message_retention_seconds"> | Pick<ServerSettings, "rtb_update_hz"> | Pick<ServerSettings, "message_retention_seconds" | "rtb_update_hz">): Promise<ServerSettings> {
   const response = await fetch("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

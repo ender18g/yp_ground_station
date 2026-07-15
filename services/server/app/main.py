@@ -63,8 +63,13 @@ KNOWN_BLOCKED_TILE_SHA1 = {
 SAR_CORRIDOR_HALF_WIDTH_M = float(os.getenv("SAR_CORRIDOR_HALF_WIDTH_M", "50.0"))
 SAR_SWATH_M = float(os.getenv("SAR_SWATH_M", "20.0"))
 SAR_ALTITUDE_M = float(os.getenv("SAR_ALTITUDE_M", "30.0"))
+SAR_MOB_TRACK_SECONDS = float(os.getenv("SAR_MOB_TRACK_SECONDS", "120.0"))
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
+RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "35.0"))
+RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
+RTB_ARRIVAL_RADIUS_M = float(os.getenv("RTB_ARRIVAL_RADIUS_M", "15.0"))
+EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
@@ -87,6 +92,7 @@ tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 # SITL MAVLink bridge state
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
 sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
+_rtb_follow_tasks: dict[str, asyncio.Task[None]] = {}
 
 # MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
 _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
@@ -141,6 +147,7 @@ settings = {
     "message_cleanup_interval_seconds": MESSAGE_CLEANUP_INTERVAL_SECONDS,
     "influx_max_write_hz": INFLUX_MAX_WRITE_HZ,
     "tile_max_cache_age_seconds": TILE_MAX_CACHE_AGE_SECONDS,
+    "rtb_update_hz": RTB_UPDATE_HZ,
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
@@ -785,16 +792,29 @@ async def get_settings() -> dict[str, Any]:
 
 @app.put("/api/settings")
 async def update_settings(payload: dict[str, Any]) -> JSONResponse:
-    retention = payload.get("message_retention_seconds")
-    if retention is None:
-        return JSONResponse({"error": "message_retention_seconds is required"}, status_code=400)
-    try:
-        retention_seconds = float(retention)
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "message_retention_seconds must be a number"}, status_code=400)
-    if retention_seconds < 60 or retention_seconds > 30 * 24 * 60 * 60:
-        return JSONResponse({"error": "message_retention_seconds must be between 60 seconds and 30 days"}, status_code=400)
-    settings["message_retention_seconds"] = retention_seconds
+    if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
+        return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
+
+    if payload.get("message_retention_seconds") is not None:
+        retention = payload.get("message_retention_seconds")
+        try:
+            retention_seconds = float(retention)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "message_retention_seconds must be a number"}, status_code=400)
+        if retention_seconds < 60 or retention_seconds > 30 * 24 * 60 * 60:
+            return JSONResponse({"error": "message_retention_seconds must be between 60 seconds and 30 days"}, status_code=400)
+        settings["message_retention_seconds"] = retention_seconds
+
+    if payload.get("rtb_update_hz") is not None:
+        rtb_update_hz = payload.get("rtb_update_hz")
+        try:
+            rtb_update_hz_value = float(rtb_update_hz)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "rtb_update_hz must be a number"}, status_code=400)
+        if rtb_update_hz_value < 0.2 or rtb_update_hz_value > 20.0:
+            return JSONResponse({"error": "rtb_update_hz must be between 0.2 and 20.0"}, status_code=400)
+        settings["rtb_update_hz"] = rtb_update_hz_value
+
     return JSONResponse({**settings, "yp_role_vehicle_id": _yp_role_vehicle_id})
 
 
@@ -853,6 +873,33 @@ async def get_vehicle(vehicle_id: str) -> JSONResponse:
     return JSONResponse(public_vehicle(vehicle))
 
 
+def _select_yp_vehicle_locked() -> Optional[dict[str, Any]]:
+    """Pick the mother-vessel source while holding ``state_lock``.
+
+    Priority:
+    1) Explicit YP-role assignment via /api/yp/role.
+    2) Any vehicle currently typed as "yp" (deterministic fallback).
+    """
+    if _yp_role_vehicle_id:
+        role_vehicle = vehicles.get(_yp_role_vehicle_id)
+        if role_vehicle is not None:
+            return role_vehicle
+
+    yp_candidates = [v for v in vehicles.values() if v.get("vehicle_type") == "yp"]
+    if not yp_candidates:
+        return None
+
+    # Prefer connected, non-sim vehicles first for operational behavior.
+    return min(
+        yp_candidates,
+        key=lambda v: (
+            0 if v.get("connected") else 1,
+            0 if not str(v.get("vehicle_id") or "").startswith("sim-") else 1,
+            str(v.get("vehicle_id") or ""),
+        ),
+    )
+
+
 @app.post("/api/sar/mob")
 async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
     """
@@ -864,12 +911,19 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
     Optional body: { "vehicle_id": "uav-001" } to target a specific vehicle.
     """
+    track_window_s = SAR_MOB_TRACK_SECONDS
+    if payload and payload.get("track_seconds") is not None:
+        try:
+            track_window_s = float(payload.get("track_seconds"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "track_seconds must be a number"}, status_code=400)
+        if track_window_s <= 0:
+            return JSONResponse({"error": "track_seconds must be > 0"}, status_code=400)
+
     async with state_lock:
-        # Find YP (ship) vehicle and extract track points from its position history
-        yp_vehicle = next(
-            (v for v in vehicles.values() if v.get("vehicle_type") == "yp"),
-            None,
-        )
+        # Find YP (ship) vehicle and extract track points from its position history.
+        # Always honor explicit role assignment first.
+        yp_vehicle = _select_yp_vehicle_locked()
         if not yp_vehicle:
             return JSONResponse({"error": "No YP vessel tracked"}, status_code=404)
 
@@ -880,7 +934,24 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
                 status_code=409,
             )
 
-        track_points = [[p["latitude"], p["longitude"]] for p in yp_history]
+        latest_stamp = float(yp_history[-1].get("stamp") or time.time())
+        cutoff_stamp = latest_stamp - track_window_s
+        windowed_history = [
+            p for p in yp_history
+            if float(p.get("stamp") or 0.0) >= cutoff_stamp
+        ]
+        if len(windowed_history) < 2:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"Insufficient YP fixes in requested track window ({track_window_s:.0f}s). "
+                        "Increase Track length or wait for more YP telemetry."
+                    )
+                },
+                status_code=409,
+            )
+
+        track_points = [[p["latitude"], p["longitude"]] for p in windowed_history]
 
         # Resolve target vehicle
         requested_id: Optional[str] = payload.get("vehicle_id") if payload else None
@@ -1445,6 +1516,15 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
 
     cmd_type = command.get("type")
 
+    # Any operator command except RTB should terminate active RTB-follow.
+    if source != "rtb_follow" and cmd_type != "rtb":
+        await _stop_rtb_follow(vehicle_id)
+
+    if cmd_type == "rtb":
+        await _start_rtb_follow(vehicle_id, source)
+        await _emit_command_ack(vehicle_id, command, source)
+        return
+
     # Broadcast SAR flight-path pattern to the UI before dispatching
     if cmd_type in ("search_grid", "mob"):
         pattern_pts = _compute_sar_pattern_points({"command": command})
@@ -1486,6 +1566,17 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
             except Exception as exc:
                 print(f"[SAR][sim] Waypoint embed error: {exc}")
 
+    await _dispatch_vehicle_command(vehicle_id, command, source, emit_ack=True, write_log=True)
+
+
+async def _dispatch_vehicle_command(
+    vehicle_id: str,
+    command: dict[str, Any],
+    source: str,
+    *,
+    emit_ack: bool,
+    write_log: bool,
+) -> dict[str, Any]:
     payload = {
         "op": "command",
         "vehicle_id": vehicle_id,
@@ -1499,6 +1590,37 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         payload["delivered"] = True
     else:
         payload["delivered"] = False
+
+    if write_log:
+        write_influx(
+            {
+                "vehicle_id": vehicle_id,
+                "vehicle_type": infer_vehicle_type(vehicle_id),
+                "topic": f"/vehicles/{vehicle_id}/commands",
+                "type": "yp_ground_station/Command",
+                "stamp": payload["stamp"],
+                "msg": command,
+            }
+        )
+        await broadcast_ros(f"/vehicles/{vehicle_id}/commands", command, "yp_ground_station/Command")
+
+    if emit_ack:
+        ack_payload = dict(payload)
+        ack_payload["op"] = "command_ack"
+        await broadcast_ui(ack_payload)
+
+    return payload
+
+
+async def _emit_command_ack(vehicle_id: str, command: dict[str, Any], source: str) -> None:
+    payload = {
+        "op": "command_ack",
+        "vehicle_id": vehicle_id,
+        "source": source,
+        "stamp": time.time(),
+        "command": command,
+        "delivered": vehicle_id in vehicle_queues,
+    }
     write_influx(
         {
             "vehicle_id": vehicle_id,
@@ -1509,8 +1631,130 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
             "msg": command,
         }
     )
-    await broadcast_ui({"op": "command_ack", **payload})
+    await broadcast_ui(payload)
     await broadcast_ros(f"/vehicles/{vehicle_id}/commands", command, "yp_ground_station/Command")
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    la1, la2 = math.radians(lat1), math.radians(lat2)
+    dlo = math.radians(lon2 - lon1)
+    dlat = la2 - la1
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(la1) * math.cos(la2) * math.sin(dlo / 2) ** 2)
+    return EARTH_RADIUS_M * 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+
+
+def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
+    lat_r = math.radians(lat)
+    lon_r = math.radians(lon)
+    bearing_r = math.radians(bearing_deg)
+    d = distance_m / EARTH_RADIUS_M
+    lat2 = math.asin(
+        math.sin(lat_r) * math.cos(d)
+        + math.cos(lat_r) * math.sin(d) * math.cos(bearing_r)
+    )
+    lon2 = lon_r + math.atan2(
+        math.sin(bearing_r) * math.sin(d) * math.cos(lat_r),
+        math.cos(d) - math.sin(lat_r) * math.sin(lat2),
+    )
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+async def _stop_rtb_follow(vehicle_id: str) -> None:
+    task = _rtb_follow_tasks.pop(vehicle_id, None)
+    if not task:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[RTB] Stop task error for {vehicle_id}: {exc}")
+
+
+async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
+    await _stop_rtb_follow(vehicle_id)
+    task = asyncio.create_task(_rtb_follow_loop(vehicle_id), name=f"rtb-follow-{vehicle_id}")
+    _rtb_follow_tasks[vehicle_id] = task
+    print(f"[RTB] Started return-to-boat follow for {vehicle_id} (source={source})")
+
+
+async def _rtb_follow_loop(vehicle_id: str) -> None:
+    stable_arrival_hits = 0
+    try:
+        while True:
+            rtb_update_hz = float(settings.get("rtb_update_hz") or RTB_UPDATE_HZ)
+            period_s = 1.0 / max(rtb_update_hz, 0.2)
+
+            async with state_lock:
+                target_vehicle = vehicles.get(vehicle_id)
+                yp_vehicle = _select_yp_vehicle_locked()
+
+                if not target_vehicle or not target_vehicle.get("connected"):
+                    print(f"[RTB] Target vehicle {vehicle_id} unavailable; stopping follow")
+                    return
+
+                target_pos = target_vehicle.get("position") or {}
+                yp_pos = (yp_vehicle or {}).get("position") or {}
+                if yp_pos.get("latitude") is None or yp_pos.get("longitude") is None:
+                    # No YP fix yet; keep trying.
+                    target_snapshot = None
+                else:
+                    yp_heading = float((yp_vehicle or {}).get("heading") or 0.0) % 360.0
+                    stern_lat, stern_lon = _destination_point(
+                        float(yp_pos["latitude"]),
+                        float(yp_pos["longitude"]),
+                        yp_heading + 180.0,
+                        RTB_STERN_DISTANCE_M,
+                    )
+                    target_alt = float(target_pos.get("altitude") or 0.0)
+                    target_snapshot = {
+                        "lat": stern_lat,
+                        "lon": stern_lon,
+                        "alt": target_alt,
+                        "veh_lat": float(target_pos.get("latitude")) if target_pos.get("latitude") is not None else None,
+                        "veh_lon": float(target_pos.get("longitude")) if target_pos.get("longitude") is not None else None,
+                    }
+
+            if target_snapshot is None:
+                await asyncio.sleep(period_s)
+                continue
+
+            await _dispatch_vehicle_command(
+                vehicle_id,
+                {
+                    "type": "waypoint",
+                    "target": {
+                        "latitude": target_snapshot["lat"],
+                        "longitude": target_snapshot["lon"],
+                        "altitude": target_snapshot["alt"],
+                    },
+                },
+                source="rtb_follow",
+                emit_ack=False,
+                write_log=False,
+            )
+
+            veh_lat = target_snapshot["veh_lat"]
+            veh_lon = target_snapshot["veh_lon"]
+            if veh_lat is not None and veh_lon is not None:
+                dist_m = _haversine_m(veh_lat, veh_lon, target_snapshot["lat"], target_snapshot["lon"])
+                if dist_m <= RTB_ARRIVAL_RADIUS_M:
+                    stable_arrival_hits += 1
+                else:
+                    stable_arrival_hits = 0
+                if stable_arrival_hits >= 3:
+                    print(f"[RTB] {vehicle_id} reached return-to-boat radius ({dist_m:.1f}m)")
+                    return
+
+            await asyncio.sleep(period_s)
+    except asyncio.CancelledError:
+        return
+    finally:
+        current_task = _rtb_follow_tasks.get(vehicle_id)
+        if current_task is asyncio.current_task():
+            _rtb_follow_tasks.pop(vehicle_id, None)
 
 
 async def broadcast_ui(payload: dict[str, Any]) -> None:

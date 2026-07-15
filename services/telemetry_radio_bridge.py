@@ -129,7 +129,11 @@ def build_mavlink_connection(port: str, baud: int) -> mavutil.mavlink_connection
     return mavutil.mavlink_connection(f"serial:{port}:{baud}", source_system=255, autoreconnect=False)
 
 
-def send_radio_command(master: mavutil.mavlink_connection, command: dict[str, object]) -> None:
+def send_radio_command(
+    master: mavutil.mavlink_connection,
+    command: dict[str, object],
+    source: Optional[str] = None,
+) -> None:
     cmd_type = command.get("type")
     if cmd_type == "waypoint":
         target = command.get("target", {})
@@ -140,35 +144,36 @@ def send_radio_command(master: mavutil.mavlink_connection, command: dict[str, ob
             print("[COMMAND] waypoint command missing latitude/lon")
             return
 
-        mode_mapping = master.mode_mapping()
-        if mode_mapping and "GUIDED" in mode_mapping:
+        if source != "rtb_follow":
+            mode_mapping = master.mode_mapping()
+            if mode_mapping and "GUIDED" in mode_mapping:
+                try:
+                    master.mav.set_mode_send(
+                        master.target_system,
+                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        mode_mapping["GUIDED"],
+                    )
+                    time.sleep(0.1)
+                except Exception as exc:
+                    print(f"[COMMAND] failed to request GUIDED mode: {exc}")
+
             try:
-                master.mav.set_mode_send(
+                master.mav.command_long_send(
                     master.target_system,
-                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                    mode_mapping["GUIDED"],
+                    master.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
                 )
                 time.sleep(0.1)
             except Exception as exc:
-                print(f"[COMMAND] failed to request GUIDED mode: {exc}")
-
-        try:
-            master.mav.command_long_send(
-                master.target_system,
-                master.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                0,
-                1,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            )
-            time.sleep(0.1)
-        except Exception as exc:
-            print(f"[COMMAND] failed to arm vehicle: {exc}")
+                print(f"[COMMAND] failed to arm vehicle: {exc}")
 
         try:
             master.mav.set_position_target_global_int_send(
@@ -302,7 +307,7 @@ async def handle_server_messages(
             continue
 
         print(f"[WEBSOCKET] received command: {command}")
-        await asyncio.to_thread(send_radio_command, master, command)
+        await asyncio.to_thread(send_radio_command, master, command, payload.get("source"))
 
 
 async def read_mavlink_telemetry(
