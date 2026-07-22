@@ -495,10 +495,14 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         last_battery_pct: Optional[float] = None
 
         while True:
-            # Route asyncio command queue -> IO thread or SAR mission thread
-            while not cmd_queue.empty():
+            # Route asyncio command queue -> IO thread or SAR mission thread.
+            # Cap per-cycle command draining so high-rate RTB-follow updates
+            # cannot starve inbound telemetry processing on the same event loop.
+            queued_commands_processed = 0
+            while queued_commands_processed < 8 and not cmd_queue.empty():
                 try:
                     payload = cmd_queue.get_nowait()
+                    queued_commands_processed += 1
                     cmd_type = payload.get("command", {}).get("type")
                     if cmd_type == "cancel_sar":
                         _sar_stop_event.set()
@@ -690,6 +694,7 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         return
     command = cmd_payload.get("command", {})
     cmd_type = command.get("type")
+    source = cmd_payload.get("source")
 
     if cmd_type == "waypoint":
         target = command.get("target", {})
@@ -697,25 +702,28 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         lon = target.get("longitude")
         alt = float(target.get("altitude") or 30.0)
         if lat is not None and lon is not None:
-            # Fire-and-forget: set GUIDED mode then arm without waiting for ACKs
-            # so the IO thread is never stalled over a radio link.  ArduPilot
-            # processes MAVLink messages in order, so the position target arrives
-            # after the mode change and arm are applied.
-            mode_mapping = master.mode_mapping()
-            if mode_mapping and "GUIDED" in mode_mapping:
-                master.mav.set_mode_send(
+            # RTB-follow emits frequent waypoint updates; avoid repeated mode/arm
+            # chatter so telemetry processing stays responsive.
+            if source != "rtb_follow":
+                # Fire-and-forget: set GUIDED mode then arm without waiting for ACKs
+                # so the IO thread is never stalled over a radio link. ArduPilot
+                # processes MAVLink messages in order, so the position target
+                # arrives after mode/arm are applied.
+                mode_mapping = master.mode_mapping()
+                if mode_mapping and "GUIDED" in mode_mapping:
+                    master.mav.set_mode_send(
+                        master.target_system,
+                        _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        mode_mapping["GUIDED"],
+                    )
+                    time.sleep(0.1)
+                master.mav.command_long_send(
                     master.target_system,
-                    _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                    mode_mapping["GUIDED"],
+                    master.target_component,
+                    _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0, 1, 0, 0, 0, 0, 0, 0,
                 )
                 time.sleep(0.1)
-            master.mav.command_long_send(
-                master.target_system,
-                master.target_component,
-                _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                0, 1, 0, 0, 0, 0, 0, 0,
-            )
-            time.sleep(0.1)
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,

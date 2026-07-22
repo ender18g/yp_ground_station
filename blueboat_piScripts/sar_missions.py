@@ -283,8 +283,18 @@ def upload_mission(master, waypoints_data: list) -> bool:
         return False
 
 
-def set_mode(master, mode_name: str) -> bool:
-    """Set vehicle flight mode. Returns True on success (or assumed success on ACK timeout)."""
+def set_mode(
+    master,
+    mode_name: str,
+    *,
+    wait_for_ack: bool = True,
+    ack_timeout_s: float = 5.0,
+) -> bool:
+    """Set vehicle flight mode.
+
+    Latency-sensitive callers can skip the COMMAND_ACK wait and rely on MAVLink
+    message ordering plus a brief settle delay.
+    """
     mode_mapping = master.mode_mapping()
     if mode_mapping is None or mode_name.upper() not in mode_mapping:
         logger.error(f"Unknown mode: {mode_name}")
@@ -295,11 +305,33 @@ def set_mode(master, mode_name: str) -> bool:
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
         mode_id,
     )
-    ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=5)
+    if not wait_for_ack:
+        return True
+    ack = wait_for_command_ack(master, mavutil.mavlink.MAV_CMD_DO_SET_MODE, ack_timeout_s)
     if ack and ack.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
         return ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
     logger.warning(f"No ACK for mode {mode_name}, assuming success")
     return True
+
+
+def wait_for_command_ack(master, command_id: int, timeout_s: float):
+    """Wait for a specific COMMAND_ACK, ignoring stale ACKs for other commands."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=remaining)
+        if not ack:
+            return None
+        if ack.command == command_id:
+            return ack
+        logger.debug(
+            "Ignoring unrelated COMMAND_ACK while waiting for %s: command=%s result=%s",
+            command_id,
+            getattr(ack, "command", None),
+            getattr(ack, "result", None),
+        )
 
 
 def arm_vehicle(master, force: bool = False) -> bool:
@@ -310,7 +342,7 @@ def arm_vehicle(master, force: bool = False) -> bool:
         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
         0, 1, param2, 0, 0, 0, 0, 0,
     )
-    ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=5)
+    ack = wait_for_command_ack(master, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 5.0)
     if ack and ack.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
         if ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
             logger.info(f"Vehicle armed (force={force})")
@@ -319,7 +351,12 @@ def arm_vehicle(master, force: bool = False) -> bool:
     return False
 
 
-def start_mission(master, retries: int = 3, retry_delay: float = 1.5) -> bool:
+def start_mission(
+    master,
+    retries: int = 2,
+    retry_delay: float = 0.35,
+    ack_timeout_s: float = 0.75,
+) -> bool:
     """Send MISSION_START with retries. Returns True on success."""
     for attempt in range(1, retries + 1):
         master.mav.command_long_send(
@@ -327,7 +364,7 @@ def start_mission(master, retries: int = 3, retry_delay: float = 1.5) -> bool:
             mavutil.mavlink.MAV_CMD_MISSION_START,
             0, 0, 0, 0, 0, 0, 0, 0,
         )
-        ack = master.recv_match(type="COMMAND_ACK", blocking=True, timeout=3)
+        ack = wait_for_command_ack(master, mavutil.mavlink.MAV_CMD_MISSION_START, ack_timeout_s)
         if ack and ack.command == mavutil.mavlink.MAV_CMD_MISSION_START:
             if ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
                 logger.info("Mission start accepted")
@@ -586,14 +623,14 @@ def stream_waypoints_guided(
             logger.error("Streaming: minimal takeoff mission upload failed")
             return False
 
-        set_mode(master, "GUIDED")
-        time.sleep(1.0)
+        set_mode(master, "GUIDED", wait_for_ack=False)
+        time.sleep(0.2)
         if not arm_vehicle(master, force=force_arm):
             logger.error("Streaming: arming failed")
             return False
-        time.sleep(0.5)
-        set_mode(master, "AUTO")
-        time.sleep(1.0)
+        time.sleep(0.2)
+        set_mode(master, "AUTO", wait_for_ack=False)
+        time.sleep(0.2)
         if not start_mission(master):
             logger.error("Streaming: mission start failed")
             return False
@@ -612,17 +649,17 @@ def stream_waypoints_guided(
             logger.error("Streaming: takeoff timed out after 3 min")
             return False
 
-        set_mode(master, "GUIDED")
-        time.sleep(0.5)
+        set_mode(master, "GUIDED", wait_for_ack=False)
+        time.sleep(0.2)
 
     else:
         # Surface vehicle / no-takeoff: set GUIDED mode, arm, then set cruise speed
-        set_mode(master, "GUIDED")
-        time.sleep(0.5)
+        set_mode(master, "GUIDED", wait_for_ack=False)
+        time.sleep(0.2)
         if not arm_vehicle(master, force=force_arm):
             logger.error("Streaming: arming failed")
             return False
-        time.sleep(0.5)
+        time.sleep(0.2)
         # Surface vehicles ignore mission DO_CHANGE_SPEED; send it as a command_long
         if climb_speed_ms > 0:
             master.mav.command_long_send(
