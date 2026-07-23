@@ -170,6 +170,19 @@ services:
     depends_on:
       - yp-server
 
+  sim-umaa:
+    build:
+      context: ./services/umaa_bridge
+      network: host
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_ID: sim-umaa
+      VEHICLE_TYPE: usv
+      SEND_HZ: "5"
+      UMAA_BACKEND: loopback
+    depends_on:
+      - yp-server
+
   # px4-sitl-uav:
   #   profiles: ["px4"]
   #   build:
@@ -256,6 +269,28 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       MAVLINK_URL: udpin:0.0.0.0:14600
       SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+  umaa-bridge:
+    profiles: ["umaa-real"]
+    build:
+      context: ./services/umaa_bridge
+    environment:
+      VEHICLE_ID: umaa-01
+      VEHICLE_TYPE: usv
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      SEND_HZ: "5"
+      UMAA_BACKEND: rti
+      RTI_DOMAIN_ID: "1"
+      RTI_QOS_FILE: ""
+      RTI_SOURCE_GUID: ""
+      RTI_COMMAND_TOPIC: ""
+      RTI_ACK_TOPIC: ""
+      RTI_STATUS_TOPIC: ""
+      RTI_NAVSATFIX_TOPIC: ""
+      RTI_BATTERY_TOPIC: ""
+      RTI_HEARTBEAT_TOPIC: ""
     depends_on:
       - yp-server
 

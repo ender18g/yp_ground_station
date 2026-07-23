@@ -10,11 +10,13 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 - `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, and InfluxDB logging.
 - `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, and view-only mode.
 - `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution via embedded waypoints from the server.
+- `sim-umaa`: Lightweight UMAA loopback vehicle for testing the ground-station workflow before real DDS topics are available. Publishes heartbeat, `NavSatFix`, `BatteryState`, and bridge-status messages, accepts waypoint/RTB/SAR commands, and simulates motion toward the received target.
 - `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
 - `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
 - `px4-sitl-uav`: Optional profile-gated PX4 SITL multicopter simulation.
 - `mavros`, `ros-master`, and `rosbridge`: Optional ROS/MAVROS path used by the PX4 UAV simulation.
 - `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into TRIDENT YP, and translates YP waypoint/RTB commands back to MAVROS/PX4.
+- `umaa-bridge`: RTI Connext DDS bridge shell for a real UMAA vehicle once the DDS topic/type map is known.
 - `influxdb`: Time-series storage for telemetry and command messages.
 
 ## Quick Start
@@ -33,6 +35,38 @@ Then open:
 - InfluxDB: `http://localhost:8086`
 
 The default compose file starts two simulated UAVs, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
+
+## UMAA Bridge
+
+The repository now includes a UMAA bridge path for testing a future RTI Connext DDS vehicle alongside the existing MAVLink and PX4 adapters.
+
+### Simulated UMAA Vehicle
+
+The default compose stack includes `sim-umaa`, a loopback vehicle that behaves like a moving USV and is meant for local testing before the real DDS topic map exists.
+
+It starts with:
+
+```bash
+docker compose up --build sim-umaa
+```
+
+The simulated vehicle can be smoke-tested with:
+
+```bash
+python services/umaa_bridge/sim_umaa_smoke_test.py
+```
+
+That smoke test connects to `sim-umaa`, sends a waypoint, watches the simulated telemetry move, and then sends RTB.
+
+### Real UMAA Bridge
+
+When the real UMAA vehicle arrives, enable the `umaa-real` profile and run `umaa-bridge`. At that point you will fill in the RTI topic names and any generated DDS package details for the vehicle.
+
+```bash
+docker compose --profile umaa-real up --build umaa-bridge
+```
+
+The UMAA bridge is intentionally split into a simulation-friendly loopback path and a real DDS adapter shell so the same YP websocket contract can be exercised now and reused later without changing the UI or server command routing.
 
 ## PX4/MAVROS UAV Simulation
 
