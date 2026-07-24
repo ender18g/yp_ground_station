@@ -136,7 +136,7 @@ The map shows:
 - Altitude beside each marker
 - Adjustable recent trail duration
 - Hover popup with telemetry
-- Click modal with `RTB` and waypoint command actions (hidden for non-commandable vehicles in view-only mode)
+- Click modal with `RTB`, `Waypoint`, flight mode control, and stream video actions (hidden for non-commandable vehicles in view-only mode)
 - Hideable map layer/source menu opened with the layer icon
 - Optional YP range rings at 50 m, 100 m, and 200 m
 - Live message drawer opened with the message icon
@@ -147,6 +147,29 @@ The map shows:
 The top bar also contains a **Waypoint Planner** tab (chart icon) for visual top-down mission planning, and a **View only** badge is shown when the UI is loaded in view-only mode (see [View-Only Mode](#view-only-mode)).
 
 The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
+
+### Vehicle Modal Features
+
+When clicking a vehicle marker, a draggable modal window appears with the following features:
+
+- **Position and Telemetry**: Real-time latitude, longitude, altitude, heading, battery percentage, and SAR mission status
+- **Ship Reference Frame**: For vehicles with a selected mother ship, displays forward/left/up distances and radial distance in ship-fixed coordinates (FLU convention)
+- **Commands**: RTB button to return the vehicle to the mother ship, Waypoint button to set a single target waypoint
+- **Flight Mode Control**: For ArduPilot and PX4 vehicles, a Settings button expands to show vehicle-type-specific flight modes. Click any mode to change the vehicle's current flight mode
+- **Video Stream**: If the vehicle has video streams enabled, a Stream Video button opens a WHEP WebRTC player
+- **Color Picker**: A Color button toggles a palette to customize the vehicle marker colour on the map
+
+### Waypoint Planner
+
+The visual **Waypoint Planner** tab provides a dedicated map mode for building waypoint missions before dispatch:
+
+- **Dynamic Scaling**: Vehicle icons scale smoothly when zooming in and out, matching the zoom behavior of Global Map mode
+- **Map Persistence**: When switching between Global Map and Mission Planner modes, the map center position and zoom level are preserved
+- **Waypoint Editing**: Left-click the map to add waypoints; drag to move; click a waypoint to edit altitude and parameters
+- **Waypoint Reordering**: Move waypoints up or down in the sequence using the waypoint list panel
+- **Mission Upload**: Select a target vehicle and click Upload Mission to arm the vehicle, set AUTO mode, and start the waypoint sequence
+- **Optional Force Guided**: Add a GUIDED waypoint at the mission end to hold position after completing all waypoints
+- **File Export**: Download missions as QGC Plan or .wpl format; upload previously saved missions
 
 ## Video Streams
 
@@ -215,10 +238,19 @@ DEL  /api/sitl/{vehicle_id}         → close and remove a bridge
 | `search_grid` | Runs a streaming boustrophedon lawnmower mission (carrot-chase waypoints) |
 | `mob` | Runs a streaming curved track-following MOB mission (carrot-chase waypoints) |
 | `cancel_sar` | Cancels an in-progress streaming SAR mission |
+| `mission_plan` | Uploads a full waypoint sequence and optionally arms + starts the vehicle in AUTO mode |
+| `set_mode` | Changes the vehicle's flight mode (e.g., "AUTO", "RTL", "LOITER") |
 
 For `search_grid` and `mob`, the bridge now executes missions in streaming mode (one waypoint at a time) instead of full mission upload. During streaming, the mission worker keeps forwarding position telemetry so vehicle updates and map motion remain live.
 
 For `rtb`, the server does not send a one-shot RTL command. It computes a dynamic stern target behind the selected YP vessel and pushes periodic waypoint updates until the vehicle settles inside the configured arrival radius.
+
+For `set_mode`, the vehicle modal's Settings button expands to show a grid of available modes for the vehicle type. Supported modes are:
+
+- **ArduPilot Vehicles (UAV/USV/UGV)**: STABILIZE, ACRO, ALT_HOLD, AUTO, GUIDED, LOITER, RTL, CIRCLE, LAND, DRIFT, SPORT, FLIP, AUTOTUNE, POSHOLD
+- **PX4 Vehicles (UAVF)**: MANUAL, ALTITUDE_CONTROL, POSITION_CONTROL, AUTO, OFFBOARD, EMERGENCY
+
+The mode selector automatically appears only for vehicles that have defined modes, and mode changes are sent to all bridge types (SITL, hardware, and distributed bridges).
 
 ## SAR Missions
 
@@ -260,7 +292,7 @@ When a SAR mission is dispatched the full flight path is broadcast to all connec
 
 ### SAR With Hardware Bridges
 
-The `arducopter_ws_bridge` service supports the same `search_grid` and `mob` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over WebSocket and executes it in streaming carrot-chase mode over direct MAVLink. The pattern overlay is shown on the map at dispatch time.
+The `arducopter_ws_bridge` service supports the same `search_grid`, `mob`, and `set_mode` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over WebSocket and executes it in streaming carrot-chase mode over direct MAVLink. The pattern overlay is shown on the map at dispatch time. Flight mode changes are sent immediately to the connected vehicle.
 
 ## RFD-900 / Telemetry Radio Support
 
@@ -312,9 +344,13 @@ GET /api/serial-ports   → list serial ports visible to the server container
 
 The repository also includes a few standalone bridge scripts that are useful outside the main compose stack:
 
-- `services/telemetry_radio_bridge.py`: direct serial-radio to YP WebSocket bridge with MAVLink telemetry forwarding.
-- `blueboat_piScripts/blueboat_bridge.py`: BlueBoat/ArduPilot bridge with SAR mission handling.
-- `blueboat_piScripts/simplified_bridge.py`: minimal MAVLink-to-YP telemetry bridge example.
+- `services/server/app/main.py`: FastAPI SITL bridge with support for waypoints, RTB follow, SAR missions, mission upload, and flight mode changes
+- `services/telemetry_radio_bridge.py`: Direct serial-radio to YP WebSocket bridge with MAVLink telemetry forwarding and command routing
+- `services/arducopter_ws_bridge/arducopter_ws_bridge.py`: ArduPilot WebSocket bridge with SAR mission handling and flight mode control
+- `services/px4_mavros_bridge/px4_mavros_bridge.py`: ROS/MAVROS to YP bridge with PX4-specific mode mapping
+- `services/umaa_bridge/umaa_bridge.py`: RTI Connext DDS bridge for UMAA vehicles
+- `blueboat_piScripts/blueboat_bridge.py`: BlueBoat/ArduPilot bridge with SAR mission handling and flight mode support
+- `blueboat_piScripts/simplified_bridge.py`: Minimal MAVLink-to-YP telemetry bridge example
 
 ## View-Only Mode
 
@@ -338,6 +374,17 @@ This is useful for displaying the situational picture on secondary screens or fo
 ## Waypoint Planner
 
 A visual **Waypoint Planner** tab is available in the top bar (chart/ruler icon). It provides a top-down planning view for building waypoint routes before dispatching them, and it can send ship-relative trajectories using the current YP position for spatial context.
+
+### Mission Planner Features
+
+- **Dynamic Vehicle Scaling**: Vehicle icons automatically scale when zooming the map, providing visual consistency with the Global Map mode
+- **Map Persistence**: Map center and zoom level persist when switching between Global Map and Mission Planner modes
+- **Interactive Waypoints**: Left-click to add waypoints, drag to reposition, click to edit details
+- **Sequence Management**: Reorder waypoints or remove individual waypoints from the mission
+- **Vehicle Selection**: Choose which connected vehicle receives the mission upload
+- **Parameter Configuration**: Set altitude, acceptance radius, hold time, and yaw for each waypoint
+- **Mission File Support**: Export missions in QGC Plan (.plan) or .wpl format; import previously saved missions
+- **One-Click Upload**: Send the complete mission to the selected vehicle with optional auto-arm and mission start
 
 ## Waypoint And RTB Commands
 

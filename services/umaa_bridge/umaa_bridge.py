@@ -94,6 +94,7 @@ class LoopbackUmaaAdapter(UmaaAdapter):
         self._battery = max(0.0, min(1.0, LOOPBACK_BATTERY))
         self._last_tick = time.time()
         self._target: dict[str, float] | None = None
+        self._mission_queue: list[dict[str, float]] = []
         self._mode = "idle"
 
     async def start(self) -> None:
@@ -147,8 +148,12 @@ class LoopbackUmaaAdapter(UmaaAdapter):
                 self._lat = target_lat
                 self._lon = target_lon
                 self._alt = target_alt
-                self._mode = "holding"
-                self._target = None
+                if self._mission_queue:
+                    self._target = self._mission_queue.pop(0)
+                    self._mode = "mission"
+                else:
+                    self._mode = "holding"
+                    self._target = None
             else:
                 step_m = min(distance_m, LOOPBACK_SPEED_MPS * dt)
                 bearing_deg = math.degrees(math.atan2(
@@ -202,6 +207,7 @@ class LoopbackUmaaAdapter(UmaaAdapter):
         cmd_type = str(command.get("type") or "")
         if cmd_type == "waypoint":
             target = command.get("target") or {}
+            self._mission_queue = []
             self._target = {
                 "latitude": float(target.get("latitude", LOOPBACK_LAT)),
                 "longitude": float(target.get("longitude", LOOPBACK_LON)),
@@ -209,6 +215,7 @@ class LoopbackUmaaAdapter(UmaaAdapter):
             }
             self._mode = "guiding"
         elif cmd_type == "rtb":
+            self._mission_queue = []
             self._target = {
                 "latitude": LOOPBACK_LAT,
                 "longitude": LOOPBACK_LON,
@@ -216,11 +223,40 @@ class LoopbackUmaaAdapter(UmaaAdapter):
             }
             self._mode = "returning"
         elif cmd_type == "cancel_sar":
+            self._mission_queue = []
             self._target = None
             self._mode = "holding"
+        elif cmd_type == "mission_plan":
+            waypoints = command.get("waypoints") or []
+            parsed: list[dict[str, float]] = []
+            for waypoint in waypoints:
+                if not isinstance(waypoint, dict):
+                    continue
+                lat = waypoint.get("latitude")
+                lon = waypoint.get("longitude")
+                if lat is None or lon is None:
+                    continue
+                parsed.append(
+                    {
+                        "latitude": float(lat),
+                        "longitude": float(lon),
+                        "altitude": float(waypoint.get("altitude", LOOPBACK_ALT)),
+                    }
+                )
+            if parsed:
+                self._target = parsed[0]
+                self._mission_queue = parsed[1:]
+                self._mode = "mission"
         elif cmd_type in {"search_grid", "mob", "trajectory", "ship_relative_trajectory"}:
+            self._mission_queue = []
             self._target = None
             self._mode = cmd_type
+        elif cmd_type == "set_mode":
+            mode = command.get("mode")
+            if mode:
+                # For UMAA bridge, map mode strings to internal mode states if needed
+                # For now, just log the request
+                print(f"[LOOPBACK] set_mode requested: {mode}")
         print(f"[LOOPBACK] command source={source} payload={command}")
 
     async def _queue_baseline(self) -> None:

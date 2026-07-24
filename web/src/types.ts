@@ -45,12 +45,14 @@ export interface Vehicle {
 }
 
 export interface Command {
-  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar";
+  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar" | "mission_plan" | "set_mode";
   target?: {
     latitude: number;
     longitude: number;
     altitude: number;
   };
+  // set_mode fields
+  mode?: string;
   // search_grid fields
   lat?: number;
   lon?: number;
@@ -61,4 +63,21 @@ export interface Command {
   local_waypoints?: RelativeWaypoint[];
   arrival_radius_m?: number;
   update_hz?: number;
+  // mission_plan fields
+  waypoints?: Array<{
+    latitude: number;
+    longitude: number;
+    altitude: number;
+    item_type?: "waypoint" | "takeoff" | "loiter_time" | "land" | "rtl" | "do_jump";
+    command_id?: number;
+    param1?: number;
+    param2?: number;
+    param3?: number;
+    param4?: number;
+    hold_time_s?: number;
+    acceptance_radius_m?: number;
+    yaw_deg?: number | null;
+  }>;
+  auto_arm_start?: boolean;
+  force_guided_on_complete?: boolean;
 }

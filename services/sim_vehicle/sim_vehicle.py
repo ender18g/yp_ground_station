@@ -75,6 +75,27 @@ class VehicleSim:
                 ]
                 self.mode = "sar_mission"
                 self.target = self.mission_waypoints.pop(0)
+        elif command_type == "mission_plan":
+            mission_wps = command_body.get("waypoints", [])
+            parsed = []
+            for wp in mission_wps:
+                if not isinstance(wp, dict):
+                    continue
+                lat = wp.get("latitude")
+                lon = wp.get("longitude")
+                if lat is None or lon is None:
+                    continue
+                parsed.append(
+                    {
+                        "latitude": float(lat),
+                        "longitude": float(lon),
+                        "altitude": float(wp.get("altitude", HOME_ALT)),
+                    }
+                )
+            if parsed:
+                self.mission_waypoints = parsed
+                self.mode = "mission_plan"
+                self.target = self.mission_waypoints.pop(0)
 
     def step(self) -> None:
         now = time.time()
@@ -85,7 +106,7 @@ class VehicleSim:
         if distance < max(4.0, SPEED_MPS * dt * 2.0):
             if self.mode == "rtb":
                 self.mode = "hold"
-            elif self.mode == "sar_mission":
+            elif self.mode in ("sar_mission", "mission_plan"):
                 if self.mission_waypoints:
                     self.target = self.mission_waypoints.pop(0)
                 else:

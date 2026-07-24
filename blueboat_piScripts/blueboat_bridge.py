@@ -537,6 +537,26 @@ async def telemetry_loop() -> None:
                                 _launch_ship_relative_mission(master, command_data)
                                 print("[INFO] Ship-relative trajectory command launched.")
 
+                            elif cmd_type == "mission_plan":
+                                waypoints = command_data.get("waypoints", [])
+                                auto_arm_start = bool(command_data.get("auto_arm_start", True))
+                                force_guided_on_complete = bool(command_data.get("force_guided_on_complete", False))
+                                if isinstance(waypoints, list) and len(waypoints) > 0:
+                                    threading.Thread(
+                                        target=_run_mission_plan,
+                                        args=(master, waypoints, auto_arm_start, force_guided_on_complete),
+                                        daemon=True,
+                                    ).start()
+                                else:
+                                    print("[ERROR] mission_plan command missing waypoints array.")
+                            elif cmd_type == "set_mode":
+                                mode = command_data.get("mode")
+                                if mode:
+                                    sar_missions.set_mode(master, str(mode), wait_for_ack=False)
+                                    print(f"[INFO] Set vehicle mode to {mode}")
+                                else:
+                                    print("[ERROR] set_mode command missing mode field.")
+
                     except json.JSONDecodeError:
                         print("[WARNING] Server response was not valid JSON.")
 
@@ -666,6 +686,88 @@ def _run_mob_search(
             print(f"[SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
         except Exception as exc:
             print(f"[SAR] MOB search error: {exc}")
+            traceback.print_exc()
+
+
+def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guided_on_complete: bool) -> None:
+    """Blocking: upload a mission plan and optionally arm/start it."""
+    with _sar_mission_lock:
+        try:
+            item_type_to_cmd = {
+                "waypoint": int(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
+                "takeoff": int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
+                "loiter_time": int(mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME),
+                "land": int(mavutil.mavlink.MAV_CMD_NAV_LAND),
+                "rtl": int(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH),
+                "do_jump": int(mavutil.mavlink.MAV_CMD_DO_JUMP),
+            }
+            mission_items = []
+            for wp in waypoints:
+                if not isinstance(wp, dict):
+                    continue
+                lat = wp.get("latitude")
+                lon = wp.get("longitude")
+                if lat is None or lon is None:
+                    continue
+
+                item_type = str(wp.get("item_type") or "waypoint").lower()
+                command_id = int(wp.get("command_id") or item_type_to_cmd.get(item_type, item_type_to_cmd["waypoint"]))
+
+                altitude = float(wp.get("altitude", 30.0))
+                if VEHICLE_TYPE in ["usv", "ugv"]:
+                    altitude = 0.0
+
+                default_p1 = float(wp.get("hold_time_s", 0.0))
+                default_p2 = float(wp.get("acceptance_radius_m", 8.0))
+                default_p3 = 0.0
+                default_p4 = float(wp.get("yaw_deg", 0.0) or 0.0)
+
+                mission_items.append(
+                    (
+                        float(lat),
+                        float(lon),
+                        altitude,
+                        command_id,
+                        float(wp.get("param1", default_p1)),
+                        float(wp.get("param2", default_p2)),
+                        float(wp.get("param3", default_p3)),
+                        float(wp.get("param4", default_p4)),
+                    )
+                )
+
+            if not mission_items:
+                print("[MISSION] mission_plan has no valid waypoints.")
+                return
+
+            if force_guided_on_complete:
+                last_lat, last_lon, last_alt = mission_items[-1][0], mission_items[-1][1], mission_items[-1][2]
+                mission_items.append(
+                    (
+                        float(last_lat),
+                        float(last_lon),
+                        float(last_alt),
+                        int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE),
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
+                )
+
+            print(f"[MISSION] Uploading mission with {len(mission_items)} items")
+            if not sar_missions.upload_mission(master, mission_items):
+                print("[MISSION] Mission upload failed")
+                return
+
+            if auto_arm_start:
+                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+                time.sleep(0.2)
+                sar_missions.arm_vehicle(master)
+                time.sleep(0.2)
+                sar_missions.start_mission(master)
+                print("[MISSION] Mission armed and started")
+        except Exception as exc:
+            print(f"[MISSION] mission_plan error: {exc}")
             traceback.print_exc()
 
 

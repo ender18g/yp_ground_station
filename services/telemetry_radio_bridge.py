@@ -31,6 +31,11 @@ except ImportError as exc:
     ) from exc
 
 try:
+    import sar_missions
+except ImportError:
+    sar_missions = None
+
+try:
     import websockets
 except ImportError as exc:
     raise SystemExit(
@@ -276,6 +281,90 @@ def send_radio_command(
                 print(f"[COMMAND] failed to set mode {mode_name}: {exc}")
         else:
             print(f"[COMMAND] mode {mode_name} not supported by vehicle")
+
+    elif cmd_type == "mission_plan":
+        if sar_missions is None:
+            print("[COMMAND] mission_plan unsupported: sar_missions helpers unavailable")
+            return
+
+        waypoints = command.get("waypoints") or []
+        if not isinstance(waypoints, list) or len(waypoints) == 0:
+            print("[COMMAND] mission_plan missing waypoints")
+            return
+
+        item_type_to_cmd = {
+            "waypoint": int(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
+            "takeoff": int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
+            "loiter_time": int(mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME),
+            "land": int(mavutil.mavlink.MAV_CMD_NAV_LAND),
+            "rtl": int(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH),
+            "do_jump": int(mavutil.mavlink.MAV_CMD_DO_JUMP),
+        }
+        mission_items = []
+        for wp in waypoints:
+            if not isinstance(wp, dict):
+                continue
+            lat = wp.get("latitude")
+            lon = wp.get("longitude")
+            if lat is None or lon is None:
+                continue
+            item_type = str(wp.get("item_type") or "waypoint").lower()
+            command_id = int(wp.get("command_id") or item_type_to_cmd.get(item_type, item_type_to_cmd["waypoint"]))
+            default_p1 = float(wp.get("hold_time_s", 0.0))
+            default_p2 = float(wp.get("acceptance_radius_m", 8.0))
+            default_p3 = 0.0
+            default_p4 = float(wp.get("yaw_deg", 0.0) or 0.0)
+            mission_items.append(
+                (
+                    float(lat),
+                    float(lon),
+                    float(wp.get("altitude", 30.0)),
+                    command_id,
+                    float(wp.get("param1", default_p1)),
+                    float(wp.get("param2", default_p2)),
+                    float(wp.get("param3", default_p3)),
+                    float(wp.get("param4", default_p4)),
+                )
+            )
+
+        if not mission_items:
+            print("[COMMAND] mission_plan has no valid waypoint entries")
+            return
+
+        if bool(command.get("force_guided_on_complete", False)):
+            last_lat, last_lon, last_alt = mission_items[-1][0], mission_items[-1][1], mission_items[-1][2]
+            mission_items.append(
+                (
+                    float(last_lat),
+                    float(last_lon),
+                    float(last_alt),
+                    int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE),
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+            )
+
+        if not sar_missions.upload_mission(master, mission_items):
+            print("[COMMAND] mission_plan upload failed")
+            return
+
+        if bool(command.get("auto_arm_start", True)):
+            sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+            time.sleep(0.2)
+            sar_missions.arm_vehicle(master)
+            time.sleep(0.2)
+            sar_missions.start_mission(master)
+            print("[COMMAND] mission_plan uploaded and started")
+
+    elif cmd_type == "set_mode":
+        mode = command.get("mode")
+        if mode:
+            sar_missions.set_mode(master, str(mode), wait_for_ack=False)
+            print(f"[COMMAND] Set vehicle mode to {mode}")
+        else:
+            print("[COMMAND] set_mode missing mode field")
 
     else:
         print(f"[COMMAND] unsupported command type: {cmd_type}")

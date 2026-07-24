@@ -1560,6 +1560,299 @@ input {
 }
 
 /* -------------------------------------------------------------------------
+ * Global Mission Planner
+ * ---------------------------------------------------------------------- */
+.mission-planner-root {
+  width: 100%;
+  height: 100%;
+}
+
+.mission-planner-panel {
+  position: absolute;
+  z-index: 940;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.18);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.mission-planner-panel-title {
+  margin: -2px -2px 0;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: grab;
+  user-select: none;
+}
+
+.mission-dock-btn {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mission-dock-btn:hover {
+  background: #eef2f7;
+}
+
+.mission-planner-help {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mission-planner-panel label {
+  display: grid;
+  gap: 5px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mission-planner-panel select,
+.mission-planner-panel input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+}
+
+.mission-planner-summary {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mission-waypoint-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.mission-waypoint-table {
+  max-height: none;
+  overflow-y: auto;
+}
+
+.mission-waypoint-row,
+.mission-waypoint-table-header {
+  display: grid;
+  grid-template-columns: 44px 1.2fr 72px 1.8fr;
+}
+
+.mission-waypoint-table-header {
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 6px 8px;
+}
+
+.mission-waypoint-cell {
+  padding: 6px 8px;
+  border-top: 1px solid #e2e8f0;
+  color: #1e293b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.mission-waypoint-actions-cell {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.mission-waypoint-actions-cell button {
+  height: 24px;
+  min-width: 28px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mission-waypoint-actions-cell button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mission-planner-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mission-planner-actions button {
+  height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mission-planner-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mission-planner-actions .mission-upload {
+  border-color: #1d4ed8;
+  background: #2563eb;
+  color: #fff;
+}
+
+.mission-waypoint-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid #1d4ed8;
+  border-radius: 999px;
+  background: #60a5fa;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.28);
+}
+
+.mission-waypoint-dot.selected {
+  border-color: #0f172a;
+  background: #f59e0b;
+}
+
+.mission-waypoint-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1250;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.mission-waypoint-modal {
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 24px));
+  padding: 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.mission-waypoint-modal-title {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.mission-waypoint-modal-drag-handle {
+  cursor: grab;
+  user-select: none;
+}
+
+.mission-guided-toggle {
+  margin-top: 2px;
+}
+
+.mission-guided-toggle input {
+  width: 14px;
+  height: 14px;
+}
+
+.mission-planner-resize-handle {
+  height: 12px;
+  margin: 0 -6px -4px;
+  cursor: ns-resize;
+  border-top: 1px solid #e2e8f0;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent 6px,
+      #cbd5e1 6px,
+      #cbd5e1 12px
+    );
+}
+
+.mission-waypoint-modal label {
+  display: grid;
+  gap: 5px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mission-waypoint-modal input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.mission-waypoint-modal select {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+}
+
+.mission-waypoint-modal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mission-waypoint-modal-actions button {
+  height: 36px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mission-waypoint-modal-actions .danger {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* -------------------------------------------------------------------------
  * Active state for icon buttons (SITL / Settings toggle)
  * ---------------------------------------------------------------------- */
 .icon-button.active {

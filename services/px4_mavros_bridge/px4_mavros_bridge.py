@@ -113,6 +113,10 @@ class Bridge:
                 await self.handle_waypoint(command)
             elif command.get("type") == "rtb":
                 await self.call_service("/mavros/set_mode", "mavros_msgs/SetMode", {"base_mode": 0, "custom_mode": "AUTO.RTL"})
+            elif command.get("type") == "mission_plan":
+                await self.handle_mission_plan(command)
+            elif command.get("type") == "set_mode":
+                await self.handle_set_mode(command)
 
     async def handle_waypoint(self, command: dict[str, Any]) -> None:
         target = command.get("target") or {}
@@ -124,6 +128,96 @@ class Bridge:
         await self.publish_setpoint_once()
         if AUTO_ARM_OFFBOARD:
             asyncio.create_task(self.enter_offboard_after_setpoints())
+
+    async def handle_mission_plan(self, command: dict[str, Any]) -> None:
+        waypoints = command.get("waypoints") or []
+        item_type_to_cmd = {
+            "waypoint": 16,
+            "takeoff": 22,
+            "loiter_time": 19,
+            "land": 21,
+            "rtl": 20,
+            "do_jump": 177,
+        }
+        mav_waypoints: list[dict[str, Any]] = []
+        for index, waypoint in enumerate(waypoints):
+            if not isinstance(waypoint, dict):
+                continue
+            lat = waypoint.get("latitude")
+            lon = waypoint.get("longitude")
+            if lat is None or lon is None:
+                continue
+            item_type = str(waypoint.get("item_type") or "waypoint").lower()
+            command_id = int(waypoint.get("command_id") or item_type_to_cmd.get(item_type, 16))
+            default_p1 = float(waypoint.get("hold_time_s", 0.0))
+            default_p2 = float(waypoint.get("acceptance_radius_m", 8.0))
+            default_p3 = 0.0
+            default_p4 = float(waypoint.get("yaw_deg", 0.0) or 0.0)
+            mav_waypoints.append(
+                {
+                    "frame": 3,
+                    "command": command_id,
+                    "is_current": index == 0,
+                    "autocontinue": True,
+                    "param1": float(waypoint.get("param1", default_p1)),
+                    "param2": float(waypoint.get("param2", default_p2)),
+                    "param3": float(waypoint.get("param3", default_p3)),
+                    "param4": float(waypoint.get("param4", default_p4)),
+                    "x_lat": float(lat),
+                    "y_long": float(lon),
+                    "z_alt": float(waypoint.get("altitude", 45.0)),
+                }
+            )
+
+        if mav_waypoints and bool(command.get("force_guided_on_complete", False)):
+            last = mav_waypoints[-1]
+            mav_waypoints.append(
+                {
+                    "frame": 3,
+                    "command": 92,
+                    "is_current": False,
+                    "autocontinue": True,
+                    "param1": 1.0,
+                    "param2": 0.0,
+                    "param3": 0.0,
+                    "param4": 0.0,
+                    "x_lat": float(last.get("x_lat", 0.0)),
+                    "y_long": float(last.get("y_long", 0.0)),
+                    "z_alt": float(last.get("z_alt", 0.0)),
+                }
+            )
+
+        if not mav_waypoints:
+            return
+
+        await self.call_service("/mavros/mission/clear", "mavros_msgs/WaypointClear", {})
+        await self.call_service(
+            "/mavros/mission/push",
+            "mavros_msgs/WaypointPush",
+            {"start_index": 0, "waypoints": mav_waypoints},
+        )
+
+        if bool(command.get("auto_arm_start", True)):
+            await self.call_service("/mavros/cmd/arming", "mavros_msgs/CommandBool", {"value": True})
+            await self.call_service("/mavros/set_mode", "mavros_msgs/SetMode", {"base_mode": 0, "custom_mode": "AUTO.MISSION"})
+
+    async def handle_set_mode(self, command: dict[str, Any]) -> None:
+        mode = command.get("mode")
+        if not mode:
+            print("[PX4] set_mode missing mode field")
+            return
+        # Convert ArduPilot-style mode names to PX4 custom_mode format
+        # For most modes, wrap with AUTO prefix
+        mode_str = str(mode).upper()
+        if mode_str in ["RTL", "LAND", "LOITER"]:
+            custom_mode = f"AUTO.{mode_str}"
+        elif mode_str in ["OFFBOARD", "STABILIZED", "ALTITUDE_CONTROL", "POSITION_CONTROL"]:
+            custom_mode = mode_str
+        else:
+            # Default to wrapping with AUTO for unknown modes
+            custom_mode = f"AUTO.{mode_str}"
+        await self.call_service("/mavros/set_mode", "mavros_msgs/SetMode", {"base_mode": 0, "custom_mode": custom_mode})
+        print(f"[PX4] Set mode to {custom_mode}")
 
     async def enter_offboard_after_setpoints(self) -> None:
         await asyncio.sleep(1.2)
