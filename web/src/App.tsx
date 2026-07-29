@@ -2071,7 +2071,8 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
     setSelectedId(null);
   };
 
-  const linePoints = waypoints.map((wp) => [wp.x, wp.z, wp.y] as [number, number, number]);
+  // Keep waypoint mission math unchanged, but mirror scene X to match the ship model's lateral orientation.
+  const linePoints = waypoints.map((wp) => [-wp.x, wp.z, wp.y] as [number, number, number]);
 
   return (
     <div className="planner-container" style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", overflow: "hidden", backgroundColor: "#0f172a", color: "white", paddingTop: 60 }}>
@@ -2089,7 +2090,7 @@ export function WaypointPlanner({ yp, vehicles, onCommand }: { yp?: Vehicle, veh
           
           {/* WAYPOINTS: Made 3x larger and glowing so they stand out */}
           {waypoints.map((wp) => (
-            <Sphere key={wp.id} position={[wp.x, wp.z, wp.y]} args={[1.5, 16, 16]}>
+            <Sphere key={wp.id} position={[-wp.x, wp.z, wp.y]} args={[1.5, 16, 16]}>
               <meshStandardMaterial 
                  color={wp.id === selectedId ? "#38bdf8" : "#ef4444"} 
                  emissive={wp.id === selectedId ? "#38bdf8" : "#ef4444"}
