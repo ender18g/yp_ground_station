@@ -934,7 +934,7 @@ export function App() {
                   vehicle_id: selected.vehicle_id,
                   latitude: ypLat,
                   longitude: ypLon,
-                  trackingYp: true,
+                  trackingYP: true,
                 }
               }));
             }

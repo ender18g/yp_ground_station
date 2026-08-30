@@ -1,7 +1,7 @@
+"""FastAPI ground station server: vehicle telemetry ingest, MAVLink SITL bridges, SAR missions, tile caching, and WebSocket fan-out."""
 from __future__ import annotations
 
 import asyncio
-from doctest import master
 import email.utils
 import hashlib
 import json
@@ -158,6 +158,7 @@ _influx_write_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=500)
 
 
 def _influx_writer_loop() -> None:
+    """Drain queued InfluxDB points and write them one at a time, forever."""
     while True:
         point = _influx_write_queue.get()
         if point is None:
@@ -170,16 +171,19 @@ _influx_writer_thread.start()
 
 
 def sanitize_stream_id(value: str) -> str:
+    """Normalize a raw string into a URL-safe stream identifier."""
     text = _VALID_STREAM_ID_CHARS.sub("-", value.strip())
     text = text.strip("-").lower()
     return text or "stream"
 
 
 def default_playback_url(stream_id: str) -> str:
+    """Return the default HLS playback path for a stream id."""
     return f"/hls/{stream_id}/index.m3u8"
 
 
 def upsert_video_stream(vehicle_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create or update the video stream config for a vehicle and return it."""
     current = video_streams.get(vehicle_id, {})
     source_rtsp_url = str(payload.get("source_rtsp_url") or current.get("source_rtsp_url") or "").strip()
     stream_id = sanitize_stream_id(str(payload.get("stream_id") or current.get("stream_id") or vehicle_id))
@@ -198,6 +202,7 @@ def upsert_video_stream(vehicle_id: str, payload: dict[str, Any]) -> dict[str, A
 
 
 def public_video_stream(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the client-facing subset of a video stream entry (no source URL)."""
     return {
         "vehicle_id": entry.get("vehicle_id"),
         "stream_id": entry.get("stream_id"),
@@ -207,6 +212,7 @@ def public_video_stream(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_video_streams_from_env() -> None:
+    """Populate ``video_streams`` from the VIDEO_STREAMS_JSON environment variable."""
     try:
         raw = json.loads(VIDEO_STREAMS_JSON)
     except json.JSONDecodeError as exc:
@@ -230,6 +236,7 @@ def load_video_streams_from_env() -> None:
 
 @app.get("/")
 async def root() -> dict[str, Any]:
+    """Return API metadata and links to key endpoints."""
     return {
         "name": "YP Ground Station API",
         "status": "ok",
@@ -244,6 +251,7 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
+    """Initialize the tile cache dir, HTTP/InfluxDB clients, and background tasks."""
     global cleanup_task, delete_api, influx_client, tile_http_client, write_api
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
@@ -259,6 +267,7 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    """Cancel background tasks and close external clients on server shutdown."""
     for task in list(sitl_bridges.values()):
         task.cancel()
     if cleanup_task:
@@ -271,6 +280,7 @@ async def shutdown() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Liveness probe endpoint."""
     return {"status": "ok"}
 
 
@@ -738,18 +748,6 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                 0, 0,
             )
 
-    elif cmd_type == "rtb":
-        try:
-            master.set_mode("RTL")
-        except Exception:
-            # Fallback: send RTL via command long
-            master.mav.command_long_send(
-                master.target_system,
-                master.target_component,
-                _mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
-                0, 0, 0, 0, 0, 0, 0, 0,
-            )
-
     elif cmd_type == "mission_plan":
         if _sar_missions is None:
             print("[SITL] mission_plan ignored: sar_missions helpers unavailable")
@@ -838,12 +836,14 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
 
 @app.get("/api/vehicles")
 async def get_vehicles() -> dict[str, Any]:
+    """Return the public snapshot of every known vehicle."""
     async with state_lock:
         return {"vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]}
 
 
 @app.get("/api/video/streams")
 async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, Any]:
+    """List configured video streams, optionally including source RTSP URLs."""
     streams: list[dict[str, Any]] = []
     for entry in video_streams.values():
         streams.append(dict(entry) if include_sources else public_video_stream(entry))
@@ -852,6 +852,7 @@ async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, 
 
 @app.put("/api/video/streams/{vehicle_id}")
 async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """Create or update a vehicle's video stream configuration."""
     vehicle_id = vehicle_id.strip()
     if not vehicle_id:
         return JSONResponse({"error": "vehicle_id is required"}, status_code=400)
@@ -871,6 +872,7 @@ async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(defau
 
 @app.delete("/api/video/streams/{vehicle_id}")
 async def delete_video_stream(vehicle_id: str) -> JSONResponse:
+    """Remove a vehicle's video stream configuration."""
     if vehicle_id not in video_streams:
         return JSONResponse({"error": "stream not found"}, status_code=404)
     video_streams.pop(vehicle_id, None)
@@ -880,11 +882,13 @@ async def delete_video_stream(vehicle_id: str) -> JSONResponse:
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
+    """Return the current server-wide runtime settings."""
     return {**settings, "yp_role_vehicle_id": _yp_role_vehicle_id}
 
 
 @app.put("/api/settings")
 async def update_settings(payload: dict[str, Any]) -> JSONResponse:
+    """Validate and apply updates to message retention and RTB update rate."""
     if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
 
@@ -959,6 +963,7 @@ async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
 @app.get("/api/vehicles/{vehicle_id}")
 async def get_vehicle(vehicle_id: str) -> JSONResponse:
+    """Return the public snapshot of a single vehicle."""
     async with state_lock:
         vehicle = vehicles.get(vehicle_id)
     if not vehicle:
@@ -1128,6 +1133,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
 @app.get("/api/tile-cache")
 async def tile_cache_status() -> dict[str, Any]:
+    """Report tile cache disk usage and settings per map provider."""
     providers = {
         "osm": {
             "name": "OpenStreetMap",
@@ -1159,6 +1165,7 @@ async def tile_cache_status() -> dict[str, Any]:
 
 @app.get("/tiles/{z}/{x}/{y}.png", response_model=None)
 async def tiles(z: int, x: int, y: int):
+    """Serve a pre-provisioned offline tile from TILE_DIR."""
     tile_path = TILE_DIR / str(z) / str(x) / f"{y}.png"
     if not tile_path.is_file():
         return JSONResponse({"error": "offline tile not found"}, status_code=404)
@@ -1169,6 +1176,7 @@ async def tiles(z: int, x: int, y: int):
 
 @app.get("/tiles/osm/{z}/{x}/{y}.png", response_model=None)
 async def cached_osm_tile(z: int, x: int, y: int):
+    """Serve an OpenStreetMap tile, fetching and caching it if needed."""
     return await cached_provider_tile(
         provider="osm",
         source_name="openstreetmap",
@@ -1183,6 +1191,7 @@ async def cached_osm_tile(z: int, x: int, y: int):
 
 @app.get("/tiles/earth/{z}/{x}/{y}.png", response_model=None)
 async def cached_earth_tile(z: int, x: int, y: int):
+    """Serve a satellite imagery tile, fetching and caching it if needed."""
     return await cached_provider_tile(
         provider="earth",
         source_name="earth-view",
@@ -1197,11 +1206,13 @@ async def cached_earth_tile(z: int, x: int, y: int):
 
 @app.get("/tiles/cache/{z}/{x}/{y}.png", response_model=None)
 async def cache_only_tile(z: int, x: int, y: int):
+    """Serve an OSM tile only if already cached; never fetch remotely."""
     return cache_only_provider_tile("osm", "openstreetmap", z, x, y)
 
 
 @app.get("/tiles/earth-cache/{z}/{x}/{y}.png", response_model=None)
 async def earth_cache_only_tile(z: int, x: int, y: int):
+    """Serve a satellite tile only if already cached; never fetch remotely."""
     return cache_only_provider_tile("earth", "earth-view", z, x, y)
 
 
@@ -1215,6 +1226,7 @@ async def cached_provider_tile(
     x: int,
     y: int,
 ):
+    """Return a cached tile if fresh, else fetch, cache, and return it (with stale/fallback handling)."""
     validation_error = validate_tile_coordinates(z, x, y)
     if validation_error:
         return JSONResponse({"error": validation_error}, status_code=400)
@@ -1240,6 +1252,7 @@ async def cached_provider_tile(
 
 
 def cache_only_provider_tile(provider: str, source_name: str, z: int, x: int, y: int):
+    """Return a cached tile for the given provider, or a fallback placeholder."""
     validation_error = validate_tile_coordinates(z, x, y)
     if validation_error:
         return fallback_tile_response("invalid")
@@ -1252,6 +1265,7 @@ def cache_only_provider_tile(provider: str, source_name: str, z: int, x: int, y:
 
 
 def validate_tile_coordinates(z: int, x: int, y: int) -> Optional[str]:
+    """Return an error message if z/x/y are outside the valid slippy-map range, else None."""
     if z < 0 or z > MAX_TILE_ZOOM:
         return f"zoom must be between 0 and {MAX_TILE_ZOOM}"
     limit = 2**z
@@ -1261,14 +1275,17 @@ def validate_tile_coordinates(z: int, x: int, y: int) -> Optional[str]:
 
 
 def provider_tile_path(provider: str, z: int, x: int, y: int) -> Path:
+    """Return the on-disk cache path for a provider's tile image."""
     return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.png"
 
 
 def provider_metadata_path(provider: str, z: int, x: int, y: int) -> Path:
+    """Return the on-disk cache path for a provider's tile metadata JSON."""
     return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.json"
 
 
 def read_tile_metadata(path: Path) -> dict[str, Any]:
+    """Read and parse a tile's metadata JSON, returning {} if missing or invalid."""
     if not path.is_file():
         return {}
     try:
@@ -1278,11 +1295,13 @@ def read_tile_metadata(path: Path) -> dict[str, Any]:
 
 
 def write_tile_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    """Persist tile metadata JSON alongside the cached tile image."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
 
 def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
+    """Return whether a cached tile should be revalidated against its source."""
     now = time.time()
     fetched_at = metadata.get("fetched_at")
     if fetched_at is None:
@@ -1296,6 +1315,7 @@ def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
 
 
 def is_usable_cached_tile(path: Path) -> bool:
+    """Return whether a cached tile file exists and isn't a known blocked placeholder."""
     if not path.is_file():
         return False
     try:
@@ -1316,6 +1336,7 @@ async def fetch_and_cache_tile(
     metadata_path: Path,
     metadata: dict[str, Any],
 ):
+    """Fetch a tile from its source, cache it to disk, and return the HTTP response, or None on failure."""
     if not tile_http_client:
         return None
 
@@ -1374,6 +1395,7 @@ async def fetch_and_cache_tile(
 
 
 def tile_expires_at(headers: httpx.Headers) -> float:
+    """Compute a tile's cache expiry time from response headers, or a default TTL."""
     cache_control = headers.get("cache-control", "")
     for part in cache_control.split(","):
         part = part.strip().lower()
@@ -1394,6 +1416,7 @@ def tile_expires_at(headers: httpx.Headers) -> float:
 
 
 def tile_file_response(path: Path, metadata: dict[str, Any], cache_status: str, source_name: str) -> FileResponse:
+    """Build a FileResponse for a cached tile with cache-status headers."""
     max_age = max(60, int(float(metadata.get("expires_at", time.time() + 60)) - time.time()))
     return FileResponse(
         path,
@@ -1407,6 +1430,7 @@ def tile_file_response(path: Path, metadata: dict[str, Any], cache_status: str, 
 
 
 def fallback_tile_response(cache_status: str) -> Response:
+    """Return a placeholder SVG tile for use when no cached or fetched tile is available."""
     return Response(
         content=FALLBACK_TILE_SVG,
         media_type="image/svg+xml",
@@ -1420,6 +1444,7 @@ def fallback_tile_response(cache_status: str) -> Response:
 
 @app.websocket("/ws/vehicle/{vehicle_id}")
 async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
+    """Bridge a single vehicle's telemetry (inbound) and command queue (outbound) over a WebSocket."""
     await websocket.accept()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     vehicle_queues[vehicle_id] = queue
@@ -1450,6 +1475,7 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
 
 @app.websocket("/ws/ui")
 async def ui_ws(websocket: WebSocket) -> None:
+    """Serve the ground-station UI: send an initial snapshot, then relay commands."""
     await websocket.accept()
     ui_connections.add(websocket)
     try:
@@ -1467,6 +1493,7 @@ async def ui_ws(websocket: WebSocket) -> None:
 
 @app.websocket("/ws/rosbridge")
 async def rosbridge_ws(websocket: WebSocket) -> None:
+    """Minimal rosbridge-protocol WebSocket for subscribe/publish/command ops."""
     await websocket.accept()
     ros_connections[websocket] = set()
     try:
@@ -1492,6 +1519,7 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
 
 
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
+    """Update vehicle state from an incoming telemetry message and fan it out to clients."""
     now = float(payload.get("stamp") or time.time())
     vehicle_id = str(payload.get("vehicle_id") or topic_vehicle_id(payload.get("topic", "")) or "unknown")
     # Natural type from the message payload; stored so clearing the YP role can revert it.
@@ -1604,6 +1632,7 @@ def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]
 
 
 async def route_command(vehicle_id: Optional[str], command: dict[str, Any], source: str) -> None:
+    """Route an operator command to a vehicle, handling RTB-follow and SAR pattern broadcast specially."""
     if not vehicle_id:
         return
 
@@ -1670,6 +1699,7 @@ async def _dispatch_vehicle_command(
     emit_ack: bool,
     write_log: bool,
 ) -> dict[str, Any]:
+    """Queue a command for delivery to a vehicle, optionally logging and acking it."""
     payload = {
         "op": "command",
         "vehicle_id": vehicle_id,
@@ -1706,6 +1736,7 @@ async def _dispatch_vehicle_command(
 
 
 async def _emit_command_ack(vehicle_id: str, command: dict[str, Any], source: str) -> None:
+    """Log a command and broadcast a command_ack event without queuing delivery."""
     payload = {
         "op": "command_ack",
         "vehicle_id": vehicle_id,
@@ -1729,6 +1760,7 @@ async def _emit_command_ack(vehicle_id: str, command: dict[str, Any], source: st
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return the great-circle distance in meters between two lat/lon points."""
     la1, la2 = math.radians(lat1), math.radians(lat2)
     dlo = math.radians(lon2 - lon1)
     dlat = la2 - la1
@@ -1738,6 +1770,7 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
+    """Return the lat/lon reached by traveling distance_m meters along bearing_deg from a point."""
     lat_r = math.radians(lat)
     lon_r = math.radians(lon)
     bearing_r = math.radians(bearing_deg)
@@ -1754,6 +1787,7 @@ def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: f
 
 
 async def _stop_rtb_follow(vehicle_id: str) -> None:
+    """Cancel and await a vehicle's running RTB-follow task, if any."""
     task = _rtb_follow_tasks.pop(vehicle_id, None)
     if not task:
         return
@@ -1767,6 +1801,7 @@ async def _stop_rtb_follow(vehicle_id: str) -> None:
 
 
 async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
+    """Replace any existing RTB-follow task for a vehicle and start a new one."""
     await _stop_rtb_follow(vehicle_id)
     task = asyncio.create_task(_rtb_follow_loop(vehicle_id), name=f"rtb-follow-{vehicle_id}")
     _rtb_follow_tasks[vehicle_id] = task
@@ -1774,6 +1809,7 @@ async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
 
 
 async def _rtb_follow_loop(vehicle_id: str) -> None:
+    """Periodically steer a vehicle toward a point trailing the YP boat's stern until arrival."""
     stable_arrival_hits = 0
     try:
         while True:
@@ -1851,6 +1887,7 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
 
 
 async def broadcast_ui(payload: dict[str, Any]) -> None:
+    """Send a JSON payload to every connected UI WebSocket, dropping stale ones."""
     stale: list[WebSocket] = []
     for websocket in list(ui_connections):
         try:
@@ -1862,6 +1899,7 @@ async def broadcast_ui(payload: dict[str, Any]) -> None:
 
 
 async def broadcast_ros(topic: str, msg: dict[str, Any], msg_type: str) -> None:
+    """Publish a message to rosbridge clients subscribed to its topic (or \"*\")."""
     stale: list[WebSocket] = []
     for websocket, topics in list(ros_connections.items()):
         if topic not in topics and "*" not in topics:
@@ -1883,6 +1921,7 @@ def _do_influx_write(point: Any) -> None:
 
 
 def write_influx(payload: dict[str, Any]) -> None:
+    """Build an InfluxDB point from a message payload and enqueue it for writing."""
     if not write_api:
         return
     if not should_write_influx(payload):
@@ -1908,6 +1947,7 @@ def write_influx(payload: dict[str, Any]) -> None:
 
 
 def should_write_influx(payload: dict[str, Any]) -> bool:
+    """Return whether this (vehicle, message type) pair is due for another Influx write."""
     max_hz = float(settings.get("influx_max_write_hz") or 0)
     if max_hz <= 0:
         return True
@@ -1923,12 +1963,14 @@ def should_write_influx(payload: dict[str, Any]) -> bool:
 
 
 async def influx_retention_loop() -> None:
+    """Periodically purge InfluxDB messages older than the retention window."""
     while True:
         await asyncio.sleep(float(settings["message_cleanup_interval_seconds"]))
         await delete_expired_influx_messages()
 
 
 async def delete_expired_influx_messages() -> None:
+    """Delete yp_messages points older than the configured retention period."""
     if not delete_api:
         return
     retention_seconds = float(settings["message_retention_seconds"])
@@ -1950,6 +1992,7 @@ async def delete_expired_influx_messages() -> None:
 
 
 def add_fields(point: Point, value: Any, prefix: str = "") -> None:
+    """Recursively flatten a nested message value into InfluxDB point fields."""
     if isinstance(value, dict):
         for key, child in value.items():
             safe_key = f"{prefix}_{key}" if prefix else str(key)
@@ -1968,6 +2011,7 @@ def add_fields(point: Point, value: Any, prefix: str = "") -> None:
 
 
 def ros_publish_to_vehicle_message(payload: dict[str, Any]) -> dict[str, Any]:
+    """Convert a rosbridge publish payload into the internal vehicle-message shape."""
     topic = str(payload.get("topic", ""))
     vehicle_id = topic_vehicle_id(topic) or str(payload.get("vehicle_id") or "ros-vehicle")
     return {
@@ -1981,6 +2025,7 @@ def ros_publish_to_vehicle_message(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
+    """Return the client-facing snapshot of a vehicle, stripping private keys."""
     # Exclude private/internal keys (prefixed with "_") from the public representation.
     snapshot = {k: v for k, v in vehicle.items() if not k.startswith("_")}
     if isinstance(snapshot.get("history"), deque):
@@ -1996,6 +2041,7 @@ def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
 
 
 def topic_vehicle_id(topic: str) -> Optional[str]:
+    """Extract the vehicle id from a \"/vehicles/{id}/...\" topic string."""
     parts = [part for part in topic.split("/") if part]
     if len(parts) >= 2 and parts[0] == "vehicles":
         return parts[1]
@@ -2003,6 +2049,7 @@ def topic_vehicle_id(topic: str) -> Optional[str]:
 
 
 def infer_vehicle_type(vehicle_id: str) -> str:
+    """Guess a vehicle's type from a keyword substring in its id, defaulting to \"uav\"."""
     lower = vehicle_id.lower()
     for candidate in ("uav", "usv", "ugv", "uuv", "yp"):
         if candidate in lower:
@@ -2011,11 +2058,13 @@ def infer_vehicle_type(vehicle_id: str) -> str:
 
 
 def normalize_vehicle_type(value: Any) -> str:
+    """Coerce a value to a known vehicle type string, defaulting to \"uav\"."""
     text = str(value or "uav").lower()
     return text if text in {"uav", "usv", "ugv", "uuv", "yp"} else "uav"
 
 
 def extract_navsatfix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, float]]:
+    """Extract lat/lon/alt from a NavSatFix-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "NavSatFix" not in msg_type and not topic.endswith("navsatfix"):
@@ -2030,6 +2079,7 @@ def extract_navsatfix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str,
 
 
 def extract_pose(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]]:
+    """Extract position/orientation/yaw from a Pose-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "Pose" not in msg_type and not topic.endswith("pose"):
@@ -2040,6 +2090,7 @@ def extract_pose(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]
 
 
 def extract_battery(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]]:
+    """Extract percentage/voltage/current from a BatteryState-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "BatteryState" not in msg_type and not topic.endswith("battery"):
@@ -2052,6 +2103,7 @@ def extract_battery(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, A
 
 
 def extract_heading(msg: Any) -> Optional[float]:
+    """Extract a normalized 0-360 degree heading from a message, or None if absent."""
     if not isinstance(msg, dict):
         return None
     if "heading" in msg:
@@ -2060,6 +2112,7 @@ def extract_heading(msg: Any) -> Optional[float]:
 
 
 def quaternion_to_yaw_deg(q: dict[str, Any]) -> Optional[float]:
+    """Convert a quaternion dict to a normalized 0-360 degree yaw angle."""
     try:
         x = float(q.get("x", 0.0))
         y = float(q.get("y", 0.0))
