@@ -1,4 +1,4 @@
-# TRIDENT YP
+l# TRIDENT YP
 ### Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol
 
 ![TRIDENT YP screenshot](screenshots/screen1.png)
@@ -18,6 +18,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 - `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into TRIDENT YP, and translates YP waypoint/RTB commands back to MAVROS/PX4.
 - `umaa-bridge`: RTI Connext DDS bridge shell for a real UMAA vehicle once the DDS topic/type map is known.
 - `influxdb`: Time-series storage for telemetry and command messages.
+- `companion_vehicle_software`: Scripts and containers that run on the companion computer of a mobile vehicle.
 
 ## Quick Start
 
