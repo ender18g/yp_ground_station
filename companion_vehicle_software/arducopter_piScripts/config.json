@@ -1,0 +1,8 @@
+{
+  "server_ws_url": "ws://192.168.0.174:8000/ws/vehicle",
+  "vehicle_id": "quadrotorYP",
+  "mavlink_url": "/dev/serial1",
+  "mavlink_baud": 921600,
+  "send_hz": 5.0,
+  "web_port": 8080
+}
