@@ -973,11 +973,17 @@ export function App() {
       {streamVehicleId && (
         <UsvVideoViewer
           vehicleId={streamVehicleId}
-          // Pulls the dynamic streams array from the vehicle, or falls back to a hardcoded default for testing
-          streams={vehicles[streamVehicleId]?.video?.streams ?? [{ 
-            label: "Default Stream", 
-            url: `http://192.168.0.126:8889/${streamVehicleId}/whep` 
-          }]}
+          // Prefer the dynamic streams array; otherwise turn the canonical
+          // server-published playback_url into a single displayable stream.
+          streams={
+            vehicles[streamVehicleId]?.video?.streams ??
+            (vehicles[streamVehicleId]?.video?.playback_url
+              ? [{ label: "Camera", url: vehicles[streamVehicleId]!.video!.playback_url! }]
+              : [{
+                  label: "Default Stream",
+                  url: `http://192.168.0.126:8889/${streamVehicleId}/whep`,
+                }])
+          }
           onClose={() => setStreamVehicleId(null)}
         />
       )}
@@ -2569,6 +2575,7 @@ function SITLPanel({
   // --- Network tab state ---
   const [url, setUrl] = useState("");
   const [netVehicleId, setNetVehicleId] = useState("");
+  const [netCameraHost, setNetCameraHost] = useState("");
   const [netError, setNetError] = useState<string | null>(null);
   const [netConnecting, setNetConnecting] = useState(false);
 
@@ -2580,6 +2587,7 @@ function SITLPanel({
   const [manualPort, setManualPort] = useState("");
   const [baud, setBaud] = useState("57600");
   const [radioVehicleId, setRadioVehicleId] = useState("");
+  const [radioCameraHost, setRadioCameraHost] = useState("");
   const [radioError, setRadioError] = useState<string | null>(null);
   const [radioConnecting, setRadioConnecting] = useState(false);
 
@@ -2616,10 +2624,10 @@ function SITLPanel({
     }
     setNetError(null);
     setNetConnecting(true);
-    const result = await connectSITL(trimUrl, netVehicleId.trim() || undefined).catch((e) => ({ ok: false as const, error: String(e) }));
+    const result = await connectSITL(trimUrl, netVehicleId.trim() || undefined, netCameraHost.trim() || undefined).catch((e) => ({ ok: false as const, error: String(e) }));
     setNetConnecting(false);
     if (!result.ok) { setNetError(result.error ?? "Connection failed"); }
-    else { setUrl(""); setNetVehicleId(""); }
+    else { setUrl(""); setNetVehicleId(""); setNetCameraHost(""); }
   };
 
   const handleRadioConnect = async () => {
@@ -2630,10 +2638,10 @@ function SITLPanel({
     const mavUrl = `serial:${port}:${baudNum}`;
     setRadioError(null);
     setRadioConnecting(true);
-    const result = await connectSITL(mavUrl, radioVehicleId.trim() || undefined).catch((e) => ({ ok: false as const, error: String(e) }));
+    const result = await connectSITL(mavUrl, radioVehicleId.trim() || undefined, radioCameraHost.trim() || undefined).catch((e) => ({ ok: false as const, error: String(e) }));
     setRadioConnecting(false);
     if (!result.ok) { setRadioError(result.error ?? "Connection failed"); }
-    else { setRadioVehicleId(""); }
+    else { setRadioVehicleId(""); setRadioCameraHost(""); }
   };
 
   const bridgeList = Object.values(bridges);
@@ -2679,6 +2687,16 @@ function SITLPanel({
             placeholder="auto-generated from URL"
             value={netVehicleId}
             onChange={(e) => setNetVehicleId(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !netConnecting && handleNetConnect()}
+            spellCheck={false}
+          />
+          <label className="sitl-field-label">Camera Host <span className="sitl-optional">(optional)</span></label>
+          <input
+            className="sitl-input"
+            type="text"
+            placeholder="defaults to MAVLink URL host, if any"
+            value={netCameraHost}
+            onChange={(e) => setNetCameraHost(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !netConnecting && handleNetConnect()}
             spellCheck={false}
           />
@@ -2801,6 +2819,16 @@ function SITLPanel({
             placeholder="auto-generated"
             value={radioVehicleId}
             onChange={(e) => setRadioVehicleId(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !radioConnecting && handleRadioConnect()}
+            spellCheck={false}
+          />
+          <label className="sitl-field-label">Camera Host <span className="sitl-optional">(optional)</span></label>
+          <input
+            className="sitl-input"
+            type="text"
+            placeholder="e.g. 192.168.1.50"
+            value={radioCameraHost}
+            onChange={(e) => setRadioCameraHost(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !radioConnecting && handleRadioConnect()}
             spellCheck={false}
           />
@@ -3950,8 +3978,8 @@ function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
   const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
   const hasVideo = Boolean(
     vehicle.video?.enabled && 
-    Array.isArray(vehicle.video?.streams) && 
-    vehicle.video.streams.length > 0
+    ((Array.isArray(vehicle.video?.streams) && vehicle.video.streams.length > 0) ||
+      Boolean(vehicle.video?.playback_url))
   );
   
   const baseSizes: Record<string, [number, number]> = {
@@ -4094,11 +4122,12 @@ function VehicleModal({
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [showModeSelector, setShowModeSelector] = useState(false);
   const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
-  // Checks if the video property exists, is enabled, and has at least one stream in the array
+  // Checks if the video property exists, is enabled, and has at least one displayable stream
+  // (either an explicit streams array or the canonical server-published playback_url)
   const canStreamVideo = Boolean(
     vehicle.video?.enabled && 
-    Array.isArray(vehicle.video?.streams) && 
-    vehicle.video.streams.length > 0
+    ((Array.isArray(vehicle.video?.streams) && vehicle.video.streams.length > 0) ||
+      Boolean(vehicle.video?.playback_url))
   );
   const modalRef = useRef<HTMLDivElement | null>(null);
 

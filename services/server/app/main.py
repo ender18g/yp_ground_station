@@ -55,6 +55,9 @@ MESSAGE_RETENTION_SECONDS = float(os.getenv("MESSAGE_RETENTION_SECONDS", str(10 
 MESSAGE_CLEANUP_INTERVAL_SECONDS = float(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", str(10 * 60)))
 INFLUX_MAX_WRITE_HZ = float(os.getenv("INFLUX_MAX_WRITE_HZ", "5"))
 VIDEO_STREAMS_JSON = os.getenv("VIDEO_STREAMS_JSON", "{}")
+CAMERA_DISCOVERY_PORT = int(os.getenv("CAMERA_DISCOVERY_PORT", "8889"))
+CAMERA_PROBE_INTERVAL_SECONDS = float(os.getenv("CAMERA_PROBE_INTERVAL_SECONDS", "60.0"))
+CAMERA_PROBE_TIMEOUT_SECONDS = float(os.getenv("CAMERA_PROBE_TIMEOUT_SECONDS", "2.0"))
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
@@ -206,6 +209,105 @@ def public_video_stream(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# MAVLink camera discovery
+#
+# For built-in UI-created MAVLink bridges, we optionally probe a camera host
+# on TCP CAMERA_DISCOVERY_PORT (default 8889, the MediaMTX WHEP default) and,
+# when reachable, publish the canonical video_stream_update record pointing
+# at http://<camera-host>:8889/cam/whep.  The browser performs the actual
+# WHEP/WebRTC negotiation; this probe is only a raw TCP reachability check.
+# ---------------------------------------------------------------------------
+
+# Hosts that cannot be used as a camera target because they are inbound
+# listener/wildcard addresses, not a reachable peer.
+_WILDCARD_HOSTS = {"0.0.0.0", "::", "*", "localhost", "127.0.0.1"}
+
+
+def derive_camera_host_from_mavlink_url(mavlink_url: str) -> Optional[str]:
+    """Best-effort extraction of a reachable camera host from a MAVLink URL.
+
+    Only host-based TCP/UDP URLs (tcp:, tcpout:, udpout:, udpbcast:) yield a
+    usable host. Serial URLs and inbound/wildcard listeners (tcpin:,
+    udpin:, or an explicit 0.0.0.0/localhost host) return None — those
+    require an explicit camera_host from the caller.
+    """
+    if not mavlink_url:
+        return None
+    lowered = mavlink_url.lower()
+    if lowered.startswith("serial:"):
+        return None
+    if lowered.startswith("tcpin:") or lowered.startswith("udpin:"):
+        return None
+    if not (lowered.startswith("tcp:") or lowered.startswith("tcpout:")
+            or lowered.startswith("udpout:") or lowered.startswith("udpbcast:")):
+        return None
+
+    remainder = mavlink_url.split(":", 1)[-1]
+    host = remainder.rsplit(":", 1)[0] if ":" in remainder else remainder
+    host = host.strip()
+    if not host or host.lower() in _WILDCARD_HOSTS:
+        return None
+    return host
+
+
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$")
+
+
+def normalize_camera_host(value: Optional[str]) -> Optional[str]:
+    """Validate/normalize a user-supplied or derived camera host string.
+
+    Returns None if the value is empty. Raises ValueError if it is present
+    but structurally invalid or a wildcard/listener address.
+    """
+    if value is None:
+        return None
+    host = value.strip()
+    if not host:
+        return None
+    if host.lower() in _WILDCARD_HOSTS:
+        raise ValueError(f"camera_host '{host}' is a wildcard/listener address and cannot be probed")
+    if not _HOSTNAME_RE.match(host):
+        raise ValueError(f"camera_host '{host}' is not a valid hostname or IP address")
+    return host
+
+
+def canonical_whep_url(camera_host: str) -> str:
+    return f"http://{camera_host}:{CAMERA_DISCOVERY_PORT}/cam/whep"
+
+
+async def probe_camera_reachable(camera_host: str, timeout: float = CAMERA_PROBE_TIMEOUT_SECONDS) -> bool:
+    """Raw TCP reachability check against camera_host:CAMERA_DISCOVERY_PORT."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(camera_host, CAMERA_DISCOVERY_PORT), timeout=timeout
+        )
+    except Exception:
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+    return True
+
+
+async def publish_camera_stream_if_reachable(vehicle_id: str, camera_host: str) -> bool:
+    """Probe camera_host and, if reachable, upsert + broadcast the canonical
+    video_stream_update record.  Returns whether the probe succeeded.
+
+    A failed probe intentionally does not remove or overwrite any previously
+    advertised stream — transient camera outages should not erase usable
+    connection metadata.
+    """
+    reachable = await probe_camera_reachable(camera_host)
+    if not reachable:
+        return False
+    entry = upsert_video_stream(vehicle_id, {"playback_url": canonical_whep_url(camera_host)})
+    await broadcast_ui({"op": "video_stream_update", "video": public_video_stream(entry)})
+    return True
+
+
 def load_video_streams_from_env() -> None:
     try:
         raw = json.loads(VIDEO_STREAMS_JSON)
@@ -290,15 +392,22 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
     Open a new MAVLink bridge connection.
 
     Body fields:
-      url        – pymavlink connection string, e.g. ``tcp:localhost:5760``,
-                   ``udpin:0.0.0.0:14551``, ``udpout:host:14550``.
-      vehicle_id – optional; derived from the URL if omitted.
+      url         – pymavlink connection string, e.g. ``tcp:localhost:5760``,
+                    ``udpin:0.0.0.0:14551``, ``udpout:host:14550``.
+      vehicle_id  – optional; derived from the URL if omitted.
+      camera_host – optional hostname/IP of a camera reachable at TCP 8889.
+                    Defaults to the MAVLink URL's host for host-based
+                    TCP/UDP connections; serial and wildcard/listener URLs
+                    require this to be set explicitly. When it cannot be
+                    resolved, camera discovery is simply skipped for that
+                    bridge.
     """
     if _mavutil is None:
         return JSONResponse({"error": "pymavlink is not installed on this server"}, status_code=501)
 
     mavlink_url: str = str(payload.get("url") or "").strip()
     vehicle_id: str = re.sub(r"[^a-zA-Z0-9_-]", "-", str(payload.get("vehicle_id") or "").strip()).strip("-")
+    camera_host_raw = payload.get("camera_host")
 
     if not mavlink_url:
         return JSONResponse({"error": "url is required"}, status_code=400)
@@ -307,6 +416,13 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
             {"error": f"url must start with one of: {', '.join(_VALID_MAVLINK_PREFIXES)}"},
             status_code=400,
         )
+
+    try:
+        camera_host = normalize_camera_host(str(camera_host_raw) if camera_host_raw is not None else None)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not camera_host:
+        camera_host = derive_camera_host_from_mavlink_url(mavlink_url)
 
     if not vehicle_id:
         # Derive a stable ID from the URL: tcp:localhost:5760 -> vehicle-localhost-5760
@@ -317,9 +433,9 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
     if existing_task and not existing_task.done():
         return JSONResponse({"error": f"A bridge for '{vehicle_id}' is already running"}, status_code=409)
 
-    task = asyncio.create_task(_run_mavlink_bridge(vehicle_id, mavlink_url))
+    task = asyncio.create_task(_run_mavlink_bridge(vehicle_id, mavlink_url, camera_host=camera_host))
     sitl_bridges[vehicle_id] = task
-    return JSONResponse({"ok": True, "vehicle_id": vehicle_id, "url": mavlink_url})
+    return JSONResponse({"ok": True, "vehicle_id": vehicle_id, "url": mavlink_url, "camera_host": camera_host})
 
 
 @app.delete("/api/sitl/{vehicle_id}")
@@ -361,7 +477,28 @@ async def list_serial_ports_endpoint() -> dict[str, Any]:
 # SITL bridge async task
 # ---------------------------------------------------------------------------
 
-async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float = 10.0) -> None:
+async def _camera_probe_loop(vehicle_id: str, camera_host: str) -> None:
+    """Probe camera_host:CAMERA_DISCOVERY_PORT once immediately, then every
+    CAMERA_PROBE_INTERVAL_SECONDS, publishing a video_stream_update on each
+    successful probe. Runs until cancelled alongside the owning bridge task.
+    """
+    try:
+        while True:
+            try:
+                await publish_camera_stream_if_reachable(vehicle_id, camera_host)
+            except Exception as exc:
+                print(f"[SITL][camera] probe error for {vehicle_id} ({camera_host}): {exc}")
+            await asyncio.sleep(CAMERA_PROBE_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _run_mavlink_bridge(
+    vehicle_id: str,
+    mavlink_url: str,
+    send_hz: float = 10.0,
+    camera_host: Optional[str] = None,
+) -> None:
     """Asyncio task: connect to a MAVLink endpoint, detect frame type, and
     stream telemetry into the ground station while forwarding commands back.
 
@@ -377,8 +514,10 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         "autopilot": None,
         "vehicle_type": "uav",
         "error": None,
+        "camera_host": camera_host,
     }
     sitl_bridge_info[vehicle_id] = info
+    camera_probe_task: Optional[asyncio.Task[None]] = None
 
     # Command queue registered so route_command can deliver waypoints / RTB
     cmd_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -425,6 +564,9 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         info["status"] = "connected"
         info["error"] = None
         await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
+
+        if camera_host:
+            camera_probe_task = asyncio.create_task(_camera_probe_loop(vehicle_id, camera_host))
 
         # Request position stream at the target Hz and battery at 2 Hz
         for stream_id, hz in [
@@ -609,6 +751,8 @@ async def _run_mavlink_bridge(vehicle_id: str, mavlink_url: str, send_hz: float 
         print(f"[SITL] Bridge error for {vehicle_id}: {exc}")
         await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
     finally:
+        if camera_probe_task is not None:
+            camera_probe_task.cancel()
         _stop.set()
         if master is not None:
             master.close()       

@@ -97,12 +97,14 @@ export interface SITLBridge {
   autopilot: string | null;
   vehicle_type: string;
   error: string | null;
+  camera_host?: string | null;
 }
 
 export interface ConnectSITLResult {
   ok: boolean;
   vehicle_id?: string;
   url?: string;
+  camera_host?: string | null;
   error?: string;
 }
 
@@ -113,9 +115,10 @@ export async function listSITLBridges(): Promise<SITLBridge[]> {
   return data.bridges ?? [];
 }
 
-export async function connectSITL(url: string, vehicleId?: string): Promise<ConnectSITLResult> {
+export async function connectSITL(url: string, vehicleId?: string, cameraHost?: string): Promise<ConnectSITLResult> {
   const body: Record<string, string> = { url };
   if (vehicleId) body.vehicle_id = vehicleId;
+  if (cameraHost) body.camera_host = cameraHost;
   const response = await fetch("/api/sitl", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -28,6 +28,8 @@ export interface Vehicle {
   video?: {
     vehicle_id: string;
     enabled?: boolean;
+    // Canonical server-published stream (e.g. from MAVLink camera discovery).
+    playback_url?: string;
     streams?: {
       label: string;
       url: string;

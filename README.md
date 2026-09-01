@@ -173,17 +173,17 @@ The visual **Waypoint Planner** tab provides a dedicated map mode for building w
 
 ## Video Streams
 
-The UI shows the **Stream Video** action when a vehicle payload includes `video.enabled=true` and at least one entry in `video.streams`.
+The UI shows the **Stream Video** action when a vehicle payload includes `video.enabled=true` and either at least one entry in `video.streams`, or a canonical `video.playback_url` (e.g. from [MAVLink camera discovery](#camera-discovery)).
 
-Each stream entry is expected to look like:
+Each `streams` entry is expected to look like:
 
 ```json
 { "label": "Bow Camera", "url": "http://<whep-host>/<stream-id>/whep" }
 ```
 
-The current frontend player negotiates WebRTC using WHEP by POSTing SDP offers directly to the selected stream `url`.
+The current frontend player negotiates WebRTC using WHEP by POSTing SDP offers directly to the selected stream `url`. When `video.streams` is absent but `video.playback_url` is present, the player treats `playback_url` as the single displayable WHEP stream.
 
-The backend video stream API remains available for storing per-vehicle stream metadata (`stream_id`, `source_rtsp_url`, `playback_url`). Those API-managed fields are useful for control/config workflows, but the current UI video modal consumes `video.streams` from live vehicle data.
+The backend video stream API remains available for storing per-vehicle stream metadata (`stream_id`, `source_rtsp_url`, `playback_url`). Those API-managed fields are useful for control/config workflows, and are also how MAVLink camera discovery publishes its canonical stream.
 
 ### Video Stream API
 
@@ -221,12 +221,23 @@ Leave the **Vehicle ID** field empty to auto-derive an ID from the connection UR
 
 The bridge detects the vehicle frame type from the first MAVLink heartbeat and updates the map marker style accordingly. Telemetry is streamed at 10 Hz. Multiple SITL instances can be connected simultaneously.
 
+### Camera Discovery
+
+The built-in bridge can automatically discover a camera reachable at `<camera-host>:8889` and publish it as the vehicle's video stream, without requiring the operator to configure `video.streams` by hand.
+
+- The optional **Camera Host** field in both the Network and RFD-900 connection forms accepts a hostname or IP address, sent as `camera_host` in `POST /api/sitl`.
+- If `camera_host` is omitted, the server derives it from host-based MAVLink URLs (`tcp:`, `tcpout:`, `udpout:`, `udpbcast:`) using the URL's host. Serial URLs (`serial:...`) and inbound/wildcard listeners (`tcpin:`, `udpin:`, or a host of `0.0.0.0`/`localhost`) cannot be used to derive a camera host — set the field explicitly for these.
+- Once the bridge reaches `connected`, the server probes `camera_host:8889` over TCP once immediately, then every 60 seconds for as long as the bridge is running. This is a raw TCP reachability check, not a WHEP/SDP handshake.
+- On a successful probe, the server upserts and broadcasts the canonical video record `{"vehicle_id", "playback_url": "http://<camera-host>:8889/cam/whep", "enabled": true}` via `video_stream_update`, matching the response of `GET /api/video/streams`. The browser negotiates the actual WHEP/WebRTC session only when the operator opens the video stream.
+- A failed probe does not remove or overwrite a previously published stream — transient camera outages will not erase an already-working `playback_url`.
+- **Docker networking**: the `yp-server` container must be able to reach the vehicle's camera host at TCP port `8889` (the MediaMTX WHEP default). If the camera is on the same LAN as the Docker host but not exposed to the container network, add appropriate routing or `extra_hosts`/host networking so the probe can succeed.
+
 ### REST API
 
 ```http
-GET  /api/sitl                      → list all active bridges
-POST /api/sitl  { url, vehicle_id } → open a new bridge
-DEL  /api/sitl/{vehicle_id}         → close and remove a bridge
+GET  /api/sitl                                          → list all active bridges
+POST /api/sitl  { url, vehicle_id, camera_host }         → open a new bridge
+DEL  /api/sitl/{vehicle_id}                              → close and remove a bridge
 ```
 
 ### Supported Commands Over SITL Bridge
