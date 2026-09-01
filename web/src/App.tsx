@@ -25,14 +25,18 @@ import {
   Wifi,
   WifiOff,
   X,
-  Map as MapIcon
+  Map as MapIcon,
+  LogOut,
+  Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, Suspense, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl } from "./api";
-import type { SITLBridge, SerialPortInfo } from "./api";
+import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
 import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
+import Login from "./Login";
+import UserManagement from "./UserManagement";
 import { Canvas } from "@react-three/fiber";
 import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/drei";
 
@@ -121,7 +125,18 @@ const VEHICLE_COLOR_PALETTE = [
 ];
 
 export function App() {
+  const [isLoggedIn, setIsLoggedIn] = useState(isAuthenticated());
+
+  if (!isLoggedIn) {
+    return <Login onLogin={() => setIsLoggedIn(true)} />;
+  }
+
+  return <GroundStation onLogout={() => { logoutUser(); setIsLoggedIn(false); }} />;
+}
+
+function GroundStation({ onLogout }: { onLogout: () => void }) {
   const isPhoneViewer = useIsPhoneViewer();
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [vehicles, setVehicles] = useState<Record<string, Vehicle>>({});
   const [connected, setConnected] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
@@ -152,11 +167,24 @@ export function App() {
   const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
   const [mobSwathM, setMobSwathM] = useState(20);
   const [mobAltM, setMobAltM] = useState(30);
-  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction">("display");
+  const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
+  const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
+  const [deconflictionRadii, setDeconflictionRadii] = useState<Record<string, number>>({
+    uav: 10.0,
+    usv: 15.0,
+    ugv: 15.0,
+    uuv: 15.0,
+    yp: 20.0,
+  });
+  const [deconflictionOrbitRadius, setDeconflictionOrbitRadius] = useState(50.0);
+  const [deconflictionMaxPause, setDeconflictionMaxPause] = useState(300.0);
   const [showSITL, setShowSITL] = useState(false);
+  const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
+  const [missionPlans, setMissionPlans] = useState<Record<string, [number, number][]>>({});
   const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -172,6 +200,21 @@ export function App() {
   const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   
   const [activeTab, setActiveTab] = useState<"map" | "mission" | "planner">("map");
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUser().then((user) => {
+      if (cancelled) return;
+      if (!user) {
+        onLogout();
+        return;
+      }
+      setCurrentUser(user);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [onLogout]);
 
   const updateSarMissionState = (vehicleId: string, commandType: string) => {
     setSarMissionActiveByVehicle((current) => {
@@ -194,14 +237,20 @@ export function App() {
 
   useEffect(() => {
     if (DEMO_MODE) return;
+    let disposed = false;
     let retry: number | undefined;
 
     const connect = () => {
       const ws = new WebSocket(websocketUrl("/ws/ui"));
       wsRef.current = ws;
       ws.onopen = () => setConnected(true);
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setConnected(false);
+        if (disposed) return;
+        if (event.code === 4001) {
+          onLogout();
+          return;
+        }
         retry = window.setTimeout(connect, 1500);
       };
       ws.onmessage = (event) => {
@@ -210,6 +259,9 @@ export function App() {
           const snapshotVehicles = payload.vehicles as Vehicle[];
           setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
           setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
+          setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
+          setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
+          setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
         }
         if (payload.op === "vehicle_update") {
           const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
@@ -283,6 +335,20 @@ export function App() {
             },
           }));
         }
+        if (payload.op === "waypoint_overlay") {
+          const waypoint = payload.waypoint as WaypointMarker;
+          setWaypointMarkers((current) => ({ ...current, [waypoint.vehicle_id]: waypoint }));
+        }
+        if (payload.op === "mission_plan_overlay") {
+          setMissionPlans((current) => ({ ...current, [payload.vehicle_id as string]: payload.waypoints as [number, number][] }));
+        }
+        if (payload.op === "mission_plan_cleared") {
+          setMissionPlans((current) => {
+            const next = { ...current };
+            delete next[payload.vehicle_id as string];
+            return next;
+          });
+        }
         if (payload.op === "sar_pattern_cleared") {
           setSarPatterns((current) => {
             const next = { ...current };
@@ -336,10 +402,11 @@ export function App() {
 
     connect();
     return () => {
+      disposed = true;
       window.clearTimeout(retry);
       wsRef.current?.close();
     };
-  }, []);
+  }, [onLogout]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -405,6 +472,40 @@ export function App() {
     }, 350);
     return () => window.clearTimeout(timeout);
   }, [messageRetentionMinutes, rtbUpdateHz, settingsLoaded]);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    fetchDeconflictionSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setDeconflictionEnabled(settings.enabled);
+        setDeconflictionGlobalRadius(settings.global_radius_m);
+        if (settings.radius_per_type && Object.keys(settings.radius_per_type).length > 0) {
+          setDeconflictionRadii((current) => ({ ...current, ...settings.radius_per_type }));
+        }
+        setDeconflictionOrbitRadius(settings.orbit_radius_m);
+        setDeconflictionMaxPause(settings.max_pause_duration_s);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    const timeout = window.setTimeout(() => {
+      updateDeconflictionSettings({
+        enabled: deconflictionEnabled,
+        global_radius_m: deconflictionGlobalRadius,
+        radius_per_type: deconflictionRadii,
+        orbit_radius_m: deconflictionOrbitRadius,
+        max_pause_duration_s: deconflictionMaxPause,
+      }).catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [deconflictionEnabled, deconflictionGlobalRadius, deconflictionRadii, deconflictionOrbitRadius, deconflictionMaxPause]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -574,8 +675,11 @@ export function App() {
               patternType={pattern.patternType}
               waypoints={pattern.waypoints}
               color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
-              onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
+              onClear={() => command(vehicleId, { type: "clear_sar_pattern" })}
             />
+          ))}
+          {Object.entries(missionPlans).map(([vehicleId, waypoints]) => (
+            waypoints.length > 1 && <Polyline key={`mission-${vehicleId}`} positions={waypoints} pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }} />
           ))}
           {Object.values(waypointMarkers)
             .filter((waypoint) => !VIEW_MODE || isSimVehicle(waypoint.vehicle_id))
@@ -631,6 +735,7 @@ export function App() {
           onCenterChange={setMapCenter}
           mapLayer={mapLayer}
           vehicles={vehicleList}
+          missionPlans={missionPlans}
           canCommandVehicle={(vehicleId) => !VIEW_MODE || isSimVehicle(vehicleId)}
           onCommand={command}
         />
@@ -754,6 +859,18 @@ export function App() {
           <button ref={messagesButtonRef} className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
             <MessageSquare size={19} />
           </button>
+          {currentUser?.permissions.includes("manage_users") && (
+            <button
+              className={showUserManagement ? "icon-button active" : "icon-button"}
+              title="User Management"
+              onClick={() => setShowUserManagement((value) => !value)}
+            >
+              <Users size={19} />
+            </button>
+          )}
+          <button className="icon-button" title="Logout" onClick={onLogout}>
+            <LogOut size={19} />
+          </button>
         </div>
       </div>
 
@@ -783,6 +900,10 @@ export function App() {
         </div>
       )}
 
+      {showUserManagement && currentUser?.permissions.includes("manage_users") && (
+        <UserManagement onClose={() => setShowUserManagement(false)} />
+      )}
+
       {showSettings && (
         <div className="settings-panel" ref={settingsPanelRef}>
           <div className="panel-title">
@@ -797,6 +918,12 @@ export function App() {
               Display
             </button>
             <button
+              className={settingsTab === "deconfliction" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("deconfliction")}
+            >
+              Deconfliction
+            </button>
+            <button
               className={settingsTab === "mob" ? "settings-tab active" : "settings-tab"}
               onClick={() => setSettingsTab("mob")}
             >
@@ -808,8 +935,7 @@ export function App() {
             >
               Vessel
             </button>
-          </div>
-          {settingsTab === "display" && (
+          </div>          {settingsTab === "display" && (
             <>
               <label>
                 Trail window
@@ -832,6 +958,86 @@ export function App() {
                 value={messageRetentionMinutes}
                 disabled={DEMO_MODE}
                 onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
+              />
+            </>
+          )}
+          {settingsTab === "deconfliction" && (
+            <>
+              <label className="setting-toggle">
+                <span>Enable vehicle deconfliction</span>
+                <input 
+                  type="checkbox" 
+                  checked={deconflictionEnabled} 
+                  onChange={(event) => setDeconflictionEnabled(event.target.checked)} 
+                />
+              </label>
+              <p className="settings-hint">
+                Automatically detect and resolve collisions between vehicles using mission priority hierarchy.
+                MOB missions have highest priority, followed by Search Grid, Mission Planner, and Waypoints.
+              </p>
+              
+              <label>
+                Global safety radius
+                <span>{deconflictionGlobalRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={1} 
+                max={50} 
+                step={0.5} 
+                type="range" 
+                value={deconflictionGlobalRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionGlobalRadius(Number(event.target.value))}
+              />
+              
+              <label>Radius per vehicle type</label>
+              {Object.entries(deconflictionRadii).map(([vehicleType, radius]) => (
+                <div key={vehicleType} className="deconfliction-radius-row">
+                  <label>
+                    <span>{vehicleType}</span>
+                    <input 
+                      min={1} 
+                      max={50} 
+                      step={0.5} 
+                      type="range" 
+                      value={radius}
+                      disabled={!deconflictionEnabled}
+                      onChange={(event) => setDeconflictionRadii((current) => ({ 
+                        ...current, 
+                        [vehicleType]: Number(event.target.value)
+                      }))}
+                    />
+                    <span>{radius.toFixed(1)}m</span>
+                  </label>
+                </div>
+              ))}
+              
+              <label>
+                Orbit radius for avoidance
+                <span>{deconflictionOrbitRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={10} 
+                max={200} 
+                step={5} 
+                type="range" 
+                value={deconflictionOrbitRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionOrbitRadius(Number(event.target.value))}
+              />
+              
+              <label>
+                Max pause duration before warning
+                <span>{deconflictionMaxPause.toFixed(0)} s</span>
+              </label>
+              <input 
+                min={10} 
+                max={600} 
+                step={10} 
+                type="range" 
+                value={deconflictionMaxPause}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionMaxPause(Number(event.target.value))}
               />
             </>
           )}
@@ -934,7 +1140,7 @@ export function App() {
                   vehicle_id: selected.vehicle_id,
                   latitude: ypLat,
                   longitude: ypLon,
-                  trackingYp: true,
+                  trackingYP: true,
                 }
               }));
             }
@@ -1266,6 +1472,7 @@ function MissionPlannerMode({
   onCenterChange,
   mapLayer,
   vehicles,
+  missionPlans,
   canCommandVehicle,
   onCommand,
 }: {
@@ -1275,6 +1482,7 @@ function MissionPlannerMode({
   onCenterChange: (center: [number, number]) => void;
   mapLayer: { url: string; attribution: string; maxNativeZoom: number };
   vehicles: Vehicle[];
+  missionPlans: Record<string, [number, number][]>;
   canCommandVehicle: (vehicleId: string) => boolean;
   onCommand: (vehicleId: string, cmd: Command) => void;
 }) {
@@ -1700,6 +1908,10 @@ function MissionPlannerMode({
             pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }}
           />
         )}
+
+        {Object.entries(missionPlans).map(([vehicleId, missionWaypoints]) => (
+          missionWaypoints.length > 1 && <Polyline key={`published-mission-${vehicleId}`} positions={missionWaypoints} pathOptions={{ color: "#16a34a", weight: 3, opacity: 0.9 }} />
+        ))}
 
         {waypoints.map((waypoint, index) => (
           <MissionWaypointMarker

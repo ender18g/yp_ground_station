@@ -28,6 +28,7 @@ services:
       INFLUX_ORG: yp
       INFLUX_BUCKET: telemetry
       INFLUX_TOKEN: yp-dev-token
+      AUTH_DB_PATH: /data/auth/auth.db
       TILE_DIR: /data/tiles
       TILE_CACHE_DIR: /data/tile-cache
       OSM_TILE_URL: https://tile.openstreetmap.org/{z}/{x}/{y}.png
@@ -42,6 +43,7 @@ services:
       INFLUX_MAX_WRITE_HZ: "5"
       TILE_MAX_CACHE_AGE_SECONDS: "31536000"
     volumes:
+      - ./data/auth:/data/auth
       - ./data/tiles:/data/tiles:ro
       - ./data/tile-cache:/data/tile-cache
     depends_on:

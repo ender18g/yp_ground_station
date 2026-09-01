@@ -311,6 +311,174 @@ input {
   border-radius: 8px;
 }
 
+.user-management-panel {
+  position: absolute;
+  z-index: 910;
+  top: 72px;
+  right: 16px;
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 88px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+  border: 1px solid rgba(21, 32, 43, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.18);
+}
+
+.panel-close {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+}
+
+.user-management-error,
+.user-management-empty {
+  margin: 0 0 12px;
+  color: #b42318;
+  font-size: 13px;
+}
+
+.user-management-empty {
+  color: #64748b;
+}
+
+.user-create-form,
+.user-management-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(120px, 1.2fr) minmax(145px, 1.2fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-create-form {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.user-management-panel input,
+.user-management-panel select {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.user-command-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #0f766e;
+  color: white;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.user-command-button:disabled,
+.user-management-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.user-management-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 0 6px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.user-management-list {
+  display: grid;
+  gap: 6px;
+}
+
+.user-management-row {
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.user-password-reset {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+}
+
+.user-password-reset .icon-button,
+.user-management-row > .icon-button,
+.user-management-list-header .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.user-permission-details {
+  grid-column: 1 / -1;
+  padding-top: 4px;
+}
+
+.user-permission-details summary {
+  color: #0f766e;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.user-permission-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 9px 0;
+}
+
+.user-permission-list label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.user-permission-list input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #0f766e;
+}
+
+.icon-button.danger {
+  color: #b42318;
+}
+
+@media (max-width: 640px) {
+  .user-create-form,
+  .user-management-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .user-create-form .user-command-button {
+    grid-column: span 2;
+  }
+
+  .user-permission-list {
+    grid-template-columns: 1fr;
+  }
+}
+
 .panel-title {
   display: flex;
   align-items: center;
@@ -349,7 +517,8 @@ input {
 }
 
 .settings-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   margin-bottom: 12px;
   padding-bottom: 10px;
@@ -357,7 +526,7 @@ input {
 }
 
 .settings-tab {
-  flex: 1;
+  min-width: 0;
   padding: 5px 8px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -367,6 +536,30 @@ input {
   font-size: 12px;
   font-weight: 700;
   transition: background 0.15s, color 0.15s;
+}
+
+.deconfliction-radius-row {
+  margin: 0 0 8px 12px;
+}
+
+.settings-panel .deconfliction-radius-row label {
+  align-items: center;
+  gap: 8px;
+}
+
+.deconfliction-radius-row label span:first-child,
+.deconfliction-radius-row label span:last-child {
+  flex: 0 0 40px;
+}
+
+.deconfliction-radius-row label span:last-child {
+  text-align: right;
+}
+
+.settings-panel .deconfliction-radius-row input {
+  width: auto;
+  min-width: 0;
+  flex: 1;
 }
 
 .settings-tab.active {

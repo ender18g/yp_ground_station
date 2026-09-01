@@ -1,7 +1,7 @@
+"""FastAPI ground station server: vehicle telemetry ingest, MAVLink SITL bridges, SAR missions, tile caching, and WebSocket fan-out."""
 from __future__ import annotations
 
 import asyncio
-from doctest import master
 import email.utils
 import hashlib
 import json
@@ -26,12 +26,23 @@ try:
 except ImportError:  # pragma: no cover
     _sar_missions = None  # type: ignore[assignment]
 
-from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+
+# Import authentication module
+from app.auth import (
+    init_database, create_user, delete_user, list_users, 
+    create_access_token, get_current_user, update_user_permissions, 
+    update_user_password, verify_password, record_login, set_user_permissions
+)
+from app.settings import get_deconfliction_settings, update_deconfliction_settings
+
+# Import deconfliction module
+from app.deconfliction import DeconflictionEngine, MISSION_PRIORITY, DEFAULT_DECONFLICT_RADIUS_M
 
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
@@ -72,6 +83,7 @@ SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "35.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ARRIVAL_RADIUS_M = float(os.getenv("RTB_ARRIVAL_RADIUS_M", "15.0"))
+MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
@@ -91,6 +103,13 @@ ui_connections: set[WebSocket] = set()
 ros_connections: dict[WebSocket, set[str]] = defaultdict(set)
 state_lock = asyncio.Lock()
 tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# Command-derived overlays are shared by all UI clients and included in their
+# initial WebSocket snapshot so late joiners see the active operational plan.
+shared_waypoints: dict[str, dict[str, Any]] = {}
+shared_sar_patterns: dict[str, dict[str, Any]] = {}
+shared_mission_plans: dict[str, list[list[float]]] = {}
+shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 
 # SITL MAVLink bridge state
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
@@ -154,6 +173,10 @@ settings = {
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
+# Deconfliction engine for vehicle collision avoidance
+deconfliction_engine = DeconflictionEngine(enabled=False)
+_deconfliction_lock = asyncio.Lock()
+
 # Single persistent InfluxDB writer thread drains a bounded queue.
 # Replaces the old approach of spawning one daemon thread per write,
 # which created up to ~100 OS threads/second under normal load.
@@ -161,6 +184,7 @@ _influx_write_queue: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=500)
 
 
 def _influx_writer_loop() -> None:
+    """Drain queued InfluxDB points and write them one at a time, forever."""
     while True:
         point = _influx_write_queue.get()
         if point is None:
@@ -173,16 +197,19 @@ _influx_writer_thread.start()
 
 
 def sanitize_stream_id(value: str) -> str:
+    """Normalize a raw string into a URL-safe stream identifier."""
     text = _VALID_STREAM_ID_CHARS.sub("-", value.strip())
     text = text.strip("-").lower()
     return text or "stream"
 
 
 def default_playback_url(stream_id: str) -> str:
+    """Return the default HLS playback path for a stream id."""
     return f"/hls/{stream_id}/index.m3u8"
 
 
 def upsert_video_stream(vehicle_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create or update the video stream config for a vehicle and return it."""
     current = video_streams.get(vehicle_id, {})
     source_rtsp_url = str(payload.get("source_rtsp_url") or current.get("source_rtsp_url") or "").strip()
     stream_id = sanitize_stream_id(str(payload.get("stream_id") or current.get("stream_id") or vehicle_id))
@@ -201,6 +228,7 @@ def upsert_video_stream(vehicle_id: str, payload: dict[str, Any]) -> dict[str, A
 
 
 def public_video_stream(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the client-facing subset of a video stream entry (no source URL)."""
     return {
         "vehicle_id": entry.get("vehicle_id"),
         "stream_id": entry.get("stream_id"),
@@ -309,6 +337,7 @@ async def publish_camera_stream_if_reachable(vehicle_id: str, camera_host: str) 
 
 
 def load_video_streams_from_env() -> None:
+    """Populate ``video_streams`` from the VIDEO_STREAMS_JSON environment variable."""
     try:
         raw = json.loads(VIDEO_STREAMS_JSON)
     except json.JSONDecodeError as exc:
@@ -332,6 +361,7 @@ def load_video_streams_from_env() -> None:
 
 @app.get("/")
 async def root() -> dict[str, Any]:
+    """Return API metadata and links to key endpoints."""
     return {
         "name": "YP Ground Station API",
         "status": "ok",
@@ -346,7 +376,19 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
+    """Initialize the tile cache dir, HTTP/InfluxDB clients, auth database, and background tasks."""
     global cleanup_task, delete_api, influx_client, tile_http_client, write_api
+    # Initialize authentication database
+    init_database()
+    
+    # Load deconfliction settings from database
+    db_settings = get_deconfliction_settings()
+    deconfliction_engine.set_enabled(db_settings.get("enabled", False))
+    deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
+    for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
+        deconfliction_engine.set_radius(vehicle_type, radius)
+    print(f"[DECONFLICTION] Initialized: enabled={deconfliction_engine.enabled}, global_radius={deconfliction_engine.global_radius_m}m")
+    
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
@@ -357,10 +399,14 @@ async def startup() -> None:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
     load_video_streams_from_env()
+    
+    # Start deconfliction check task
+    asyncio.create_task(_deconfliction_check_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    """Cancel background tasks and close external clients on server shutdown."""
     for task in list(sitl_bridges.values()):
         task.cancel()
     if cleanup_task:
@@ -373,7 +419,205 @@ async def shutdown() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Liveness probe endpoint."""
     return {"status": "ok"}
+
+
+def require_permission(authorization: Optional[str], permission: str) -> Optional[JSONResponse]:
+    """Return an authorization error response, or None when permission is granted."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return JSONResponse({"error": "missing or invalid authorization header"}, status_code=401)
+
+    user = get_current_user(authorization[7:])
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    if not user.has_permission(permission):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Authentication endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/login")
+async def login(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """Authenticate a user and return a JWT token."""
+    username: str = str(payload.get("username") or "").strip()
+    password: str = str(payload.get("password") or "").strip()
+    
+    if not username or not password:
+        return JSONResponse({"error": "username and password are required"}, status_code=400)
+    
+    from app.auth import get_db_session, User
+    session = get_db_session()
+    try:
+        user = session.query(User).filter_by(username=username).first()
+        if not user or not verify_password(password, user.password_hash):
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        
+        if not user.active:
+            return JSONResponse({"error": "account is disabled"}, status_code=401)
+        
+        # Record login time
+        record_login(username)
+        
+        # Create and return JWT token
+        token = create_access_token(username)
+        return JSONResponse({
+            "ok": True,
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "username": user.username,
+                "permissions": sorted([p.permission for p in user.permissions])
+            }
+        })
+    finally:
+        session.close()
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Return the current authenticated user's information."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    # Extract token from "Bearer <token>"
+    token = None
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    
+    user = get_current_user(token)
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    
+    return JSONResponse({
+        "username": user.username,
+        "active": user.active,
+        "permissions": sorted([p.permission for p in user.permissions]),
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "last_login": user.last_login.isoformat() if user.last_login else None,
+    })
+
+
+@app.post("/api/auth/users")
+async def create_new_user(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Create a new user account (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    username: str = str(payload.get("username") or "").strip()
+    password: str = str(payload.get("password") or "").strip()
+    permission_level: str = str(payload.get("permission_level") or "view_only").strip()
+    
+    if not username or not password:
+        return JSONResponse({"error": "username and password are required"}, status_code=400)
+    
+    success, message = create_user(username, password, permission_level)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.get("/api/auth/users")
+async def list_all_users(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """List all users (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    users_list = list_users()
+    return JSONResponse({"users": users_list})
+
+
+@app.delete("/api/auth/users/{username}")
+async def delete_user_endpoint(username: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Delete a user account (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    success, message = delete_user(username)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.put("/api/auth/users/{username}/permissions")
+async def update_permissions_endpoint(
+    username: str, 
+    payload: dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update a user's permission level (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    permissions = payload.get("permissions")
+    if isinstance(permissions, list):
+        if not all(isinstance(permission, str) for permission in permissions):
+            return JSONResponse({"error": "permissions must be a list of strings"}, status_code=400)
+        success, message = set_user_permissions(username, set(permissions))
+    else:
+        permission_level: str = str(payload.get("permission_level") or "").strip()
+        if not permission_level:
+            return JSONResponse({"error": "permission_level or permissions is required"}, status_code=400)
+        success, message = update_user_permissions(username, permission_level)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.put("/api/auth/users/{username}/password")
+async def update_password_endpoint(
+    username: str, 
+    payload: dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update a user's password (admin only or self)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    
+    # Allow user to change their own password, or admin to change any password
+    if user.username != username and not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    new_password: str = str(payload.get("password") or "").strip()
+    if not new_password:
+        return JSONResponse({"error": "password is required"}, status_code=400)
+    
+    success, message = update_user_password(username, new_password)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
 
 
 # ---------------------------------------------------------------------------
@@ -381,15 +625,19 @@ async def health() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sitl")
-async def list_sitl_bridges() -> dict[str, Any]:
-    """Return all active (and recently errored) SITL bridge connections."""
-    return {"bridges": list(sitl_bridge_info.values())}
+async def list_sitl_bridges(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Return all active (and recently errored) SITL bridge connections. Requires manage_sitl permission."""
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
+    
+    return JSONResponse({"bridges": list(sitl_bridge_info.values())})
 
 
 @app.post("/api/sitl")
-async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def connect_sitl(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
-    Open a new MAVLink bridge connection.
+    Open a new MAVLink bridge connection. Requires manage_sitl permission.
 
     Body fields:
       url         – pymavlink connection string, e.g. ``tcp:localhost:5760``,
@@ -402,6 +650,10 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
                     resolved, camera discovery is simply skipped for that
                     bridge.
     """
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
+    
     if _mavutil is None:
         return JSONResponse({"error": "pymavlink is not installed on this server"}, status_code=501)
 
@@ -439,8 +691,12 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
 
 
 @app.delete("/api/sitl/{vehicle_id}")
-async def disconnect_sitl(vehicle_id: str) -> JSONResponse:
-    """Cancel and remove a SITL bridge connection."""
+async def disconnect_sitl(vehicle_id: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Cancel and remove a SITL bridge connection. Requires manage_sitl permission."""
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
+    
     task = sitl_bridges.get(vehicle_id)
     if not task:
         return JSONResponse({"error": "Bridge not found"}, status_code=404)
@@ -882,18 +1138,6 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                 0, 0,
             )
 
-    elif cmd_type == "rtb":
-        try:
-            master.set_mode("RTL")
-        except Exception:
-            # Fallback: send RTL via command long
-            master.mav.command_long_send(
-                master.target_system,
-                master.target_component,
-                _mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
-                0, 0, 0, 0, 0, 0, 0, 0,
-            )
-
     elif cmd_type == "mission_plan":
         if _sar_missions is None:
             print("[SITL] mission_plan ignored: sar_missions helpers unavailable")
@@ -982,12 +1226,14 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
 
 @app.get("/api/vehicles")
 async def get_vehicles() -> dict[str, Any]:
+    """Return the public snapshot of every known vehicle."""
     async with state_lock:
         return {"vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]}
 
 
 @app.get("/api/video/streams")
 async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, Any]:
+    """List configured video streams, optionally including source RTSP URLs."""
     streams: list[dict[str, Any]] = []
     for entry in video_streams.values():
         streams.append(dict(entry) if include_sources else public_video_stream(entry))
@@ -995,7 +1241,11 @@ async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, 
 
 
 @app.put("/api/video/streams/{vehicle_id}")
-async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Create or update a vehicle's video stream configuration."""
+    authorization_error = require_permission(authorization, "manage_video_streams")
+    if authorization_error:
+        return authorization_error
     vehicle_id = vehicle_id.strip()
     if not vehicle_id:
         return JSONResponse({"error": "vehicle_id is required"}, status_code=400)
@@ -1014,7 +1264,11 @@ async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(defau
 
 
 @app.delete("/api/video/streams/{vehicle_id}")
-async def delete_video_stream(vehicle_id: str) -> JSONResponse:
+async def delete_video_stream(vehicle_id: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Remove a vehicle's video stream configuration."""
+    authorization_error = require_permission(authorization, "manage_video_streams")
+    if authorization_error:
+        return authorization_error
     if vehicle_id not in video_streams:
         return JSONResponse({"error": "stream not found"}, status_code=404)
     video_streams.pop(vehicle_id, None)
@@ -1024,11 +1278,17 @@ async def delete_video_stream(vehicle_id: str) -> JSONResponse:
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
+    """Return the current server-wide runtime settings."""
     return {**settings, "yp_role_vehicle_id": _yp_role_vehicle_id}
 
 
 @app.put("/api/settings")
-async def update_settings(payload: dict[str, Any]) -> JSONResponse:
+async def update_settings(payload: dict[str, Any], authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Validate and apply updates to message retention and RTB update rate. Requires manage_settings permission."""
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
+    
     if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
 
@@ -1055,6 +1315,55 @@ async def update_settings(payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse({**settings, "yp_role_vehicle_id": _yp_role_vehicle_id})
 
 
+@app.get("/api/deconfliction/settings")
+async def get_deconfliction_settings_api() -> dict[str, Any]:
+    """Get current deconfliction settings."""
+    return get_deconfliction_settings()
+
+
+@app.put("/api/deconfliction/settings")
+async def update_deconfliction_settings_api(
+    payload: dict[str, Any],
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update deconfliction settings. Requires manage_settings permission."""
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
+    
+    success, message = update_deconfliction_settings(payload)
+    if success:
+        # Reload deconfliction engine settings
+        async with _deconfliction_lock:
+            db_settings = get_deconfliction_settings()
+            deconfliction_engine.set_enabled(db_settings.get("enabled", False))
+            deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
+            for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
+                deconfliction_engine.set_radius(vehicle_type, radius)
+        
+        return JSONResponse(db_settings)
+    else:
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.get("/api/deconfliction/conflicts")
+async def get_deconfliction_conflicts() -> dict[str, Any]:
+    """Get current vehicle conflicts detected by deconfliction engine."""
+    async with _deconfliction_lock:
+        conflicts = deconfliction_engine.detect_conflicts()
+    
+    return {
+        "enabled": deconfliction_engine.enabled,
+        "conflicts": [
+            {
+                "low_priority_vehicle": c[0],
+                "high_priority_vehicle": c[1],
+            }
+            for c in conflicts
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # YP role assignment endpoints
 # ---------------------------------------------------------------------------
@@ -1066,7 +1375,7 @@ async def get_yp_role() -> dict[str, Any]:
 
 
 @app.post("/api/yp/role")
-async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def set_yp_role(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
     Designate a connected vehicle as the YP (mother vessel).
 
@@ -1078,6 +1387,10 @@ async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONRespons
     its natural type on its next incoming message.
     """
     global _yp_role_vehicle_id
+
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
 
     raw = payload.get("vehicle_id")
     new_role_id: Optional[str] = str(raw).strip() if raw and str(raw).strip() else None
@@ -1103,6 +1416,7 @@ async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
 @app.get("/api/vehicles/{vehicle_id}")
 async def get_vehicle(vehicle_id: str) -> JSONResponse:
+    """Return the public snapshot of a single vehicle."""
     async with state_lock:
         vehicle = vehicles.get(vehicle_id)
     if not vehicle:
@@ -1138,7 +1452,7 @@ def _select_yp_vehicle_locked() -> Optional[dict[str, Any]]:
 
 
 @app.post("/api/sar/mob")
-async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def trigger_mob(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
     Trigger a Man Overboard search mission.
 
@@ -1148,6 +1462,10 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
     Optional body: { "vehicle_id": "uav-001" } to target a specific vehicle.
     """
+    authorization_error = require_permission(authorization, "trigger_mob")
+    if authorization_error:
+        return authorization_error
+
     track_window_s = SAR_MOB_TRACK_SECONDS
     if payload and payload.get("track_seconds") is not None:
         try:
@@ -1272,6 +1590,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
 @app.get("/api/tile-cache")
 async def tile_cache_status() -> dict[str, Any]:
+    """Report tile cache disk usage and settings per map provider."""
     providers = {
         "osm": {
             "name": "OpenStreetMap",
@@ -1303,6 +1622,7 @@ async def tile_cache_status() -> dict[str, Any]:
 
 @app.get("/tiles/{z}/{x}/{y}.png", response_model=None)
 async def tiles(z: int, x: int, y: int):
+    """Serve a pre-provisioned offline tile from TILE_DIR."""
     tile_path = TILE_DIR / str(z) / str(x) / f"{y}.png"
     if not tile_path.is_file():
         return JSONResponse({"error": "offline tile not found"}, status_code=404)
@@ -1313,6 +1633,7 @@ async def tiles(z: int, x: int, y: int):
 
 @app.get("/tiles/osm/{z}/{x}/{y}.png", response_model=None)
 async def cached_osm_tile(z: int, x: int, y: int):
+    """Serve an OpenStreetMap tile, fetching and caching it if needed."""
     return await cached_provider_tile(
         provider="osm",
         source_name="openstreetmap",
@@ -1327,6 +1648,7 @@ async def cached_osm_tile(z: int, x: int, y: int):
 
 @app.get("/tiles/earth/{z}/{x}/{y}.png", response_model=None)
 async def cached_earth_tile(z: int, x: int, y: int):
+    """Serve a satellite imagery tile, fetching and caching it if needed."""
     return await cached_provider_tile(
         provider="earth",
         source_name="earth-view",
@@ -1341,11 +1663,13 @@ async def cached_earth_tile(z: int, x: int, y: int):
 
 @app.get("/tiles/cache/{z}/{x}/{y}.png", response_model=None)
 async def cache_only_tile(z: int, x: int, y: int):
+    """Serve an OSM tile only if already cached; never fetch remotely."""
     return cache_only_provider_tile("osm", "openstreetmap", z, x, y)
 
 
 @app.get("/tiles/earth-cache/{z}/{x}/{y}.png", response_model=None)
 async def earth_cache_only_tile(z: int, x: int, y: int):
+    """Serve a satellite tile only if already cached; never fetch remotely."""
     return cache_only_provider_tile("earth", "earth-view", z, x, y)
 
 
@@ -1359,6 +1683,7 @@ async def cached_provider_tile(
     x: int,
     y: int,
 ):
+    """Return a cached tile if fresh, else fetch, cache, and return it (with stale/fallback handling)."""
     validation_error = validate_tile_coordinates(z, x, y)
     if validation_error:
         return JSONResponse({"error": validation_error}, status_code=400)
@@ -1384,6 +1709,7 @@ async def cached_provider_tile(
 
 
 def cache_only_provider_tile(provider: str, source_name: str, z: int, x: int, y: int):
+    """Return a cached tile for the given provider, or a fallback placeholder."""
     validation_error = validate_tile_coordinates(z, x, y)
     if validation_error:
         return fallback_tile_response("invalid")
@@ -1396,6 +1722,7 @@ def cache_only_provider_tile(provider: str, source_name: str, z: int, x: int, y:
 
 
 def validate_tile_coordinates(z: int, x: int, y: int) -> Optional[str]:
+    """Return an error message if z/x/y are outside the valid slippy-map range, else None."""
     if z < 0 or z > MAX_TILE_ZOOM:
         return f"zoom must be between 0 and {MAX_TILE_ZOOM}"
     limit = 2**z
@@ -1405,14 +1732,17 @@ def validate_tile_coordinates(z: int, x: int, y: int) -> Optional[str]:
 
 
 def provider_tile_path(provider: str, z: int, x: int, y: int) -> Path:
+    """Return the on-disk cache path for a provider's tile image."""
     return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.png"
 
 
 def provider_metadata_path(provider: str, z: int, x: int, y: int) -> Path:
+    """Return the on-disk cache path for a provider's tile metadata JSON."""
     return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.json"
 
 
 def read_tile_metadata(path: Path) -> dict[str, Any]:
+    """Read and parse a tile's metadata JSON, returning {} if missing or invalid."""
     if not path.is_file():
         return {}
     try:
@@ -1422,11 +1752,13 @@ def read_tile_metadata(path: Path) -> dict[str, Any]:
 
 
 def write_tile_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    """Persist tile metadata JSON alongside the cached tile image."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
 
 def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
+    """Return whether a cached tile should be revalidated against its source."""
     now = time.time()
     fetched_at = metadata.get("fetched_at")
     if fetched_at is None:
@@ -1440,6 +1772,7 @@ def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
 
 
 def is_usable_cached_tile(path: Path) -> bool:
+    """Return whether a cached tile file exists and isn't a known blocked placeholder."""
     if not path.is_file():
         return False
     try:
@@ -1460,6 +1793,7 @@ async def fetch_and_cache_tile(
     metadata_path: Path,
     metadata: dict[str, Any],
 ):
+    """Fetch a tile from its source, cache it to disk, and return the HTTP response, or None on failure."""
     if not tile_http_client:
         return None
 
@@ -1518,6 +1852,7 @@ async def fetch_and_cache_tile(
 
 
 def tile_expires_at(headers: httpx.Headers) -> float:
+    """Compute a tile's cache expiry time from response headers, or a default TTL."""
     cache_control = headers.get("cache-control", "")
     for part in cache_control.split(","):
         part = part.strip().lower()
@@ -1538,6 +1873,7 @@ def tile_expires_at(headers: httpx.Headers) -> float:
 
 
 def tile_file_response(path: Path, metadata: dict[str, Any], cache_status: str, source_name: str) -> FileResponse:
+    """Build a FileResponse for a cached tile with cache-status headers."""
     max_age = max(60, int(float(metadata.get("expires_at", time.time() + 60)) - time.time()))
     return FileResponse(
         path,
@@ -1551,6 +1887,7 @@ def tile_file_response(path: Path, metadata: dict[str, Any], cache_status: str, 
 
 
 def fallback_tile_response(cache_status: str) -> Response:
+    """Return a placeholder SVG tile for use when no cached or fetched tile is available."""
     return Response(
         content=FALLBACK_TILE_SVG,
         media_type="image/svg+xml",
@@ -1564,6 +1901,7 @@ def fallback_tile_response(cache_status: str) -> Response:
 
 @app.websocket("/ws/vehicle/{vehicle_id}")
 async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
+    """Bridge a single vehicle's telemetry (inbound) and command queue (outbound) over a WebSocket."""
     await websocket.accept()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     vehicle_queues[vehicle_id] = queue
@@ -1593,15 +1931,38 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
 
 
 @app.websocket("/ws/ui")
-async def ui_ws(websocket: WebSocket) -> None:
+async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
+    """Serve the ground-station UI: validate JWT token, send initial snapshot, then relay commands with permission checks."""
     await websocket.accept()
+    
+    # Validate JWT token
+    user = get_current_user(token) if token else None
+    if not user:
+        await websocket.send_json({"error": "Authentication required. Please login."})
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    
     ui_connections.add(websocket)
     try:
         async with state_lock:
-            await websocket.send_json({"op": "snapshot", "vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]})
+            await websocket.send_json({
+                "op": "snapshot",
+                "vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()],
+                "waypoints": list(shared_waypoints.values()),
+                "sar_patterns": shared_sar_patterns,
+                "mission_plans": shared_mission_plans,
+            })
         while True:
             payload = await websocket.receive_json()
             if payload.get("op") == "command":
+                # Check permissions for the command type
+                cmd_type = payload.get("command", {}).get("type")
+                if not _check_command_permission(user, cmd_type):
+                    await websocket.send_json({
+                        "error": "Insufficient permissions for this command",
+                        "command_type": cmd_type
+                    })
+                    continue
                 await route_command(payload.get("vehicle_id"), payload.get("command", {}), source="ui")
     except WebSocketDisconnect:
         pass
@@ -1609,8 +1970,34 @@ async def ui_ws(websocket: WebSocket) -> None:
         ui_connections.discard(websocket)
 
 
+def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
+    """Check if a user has permission to execute a specific command type."""
+    if not user or not user.active:
+        return False
+    
+    # Map command types to required permissions
+    command_permissions = {
+        "waypoint": "send_waypoint",
+        "rtb": "send_rtb",
+        "set_mode": "set_vehicle_mode",
+        "cancel_sar": "cancel_sar",
+        "search_grid": "search_grid",
+        "mob": "trigger_mob",
+        "clear_sar_pattern": "cancel_sar",
+        "mission_plan": "upload_mission",
+        "trajectory": "send_waypoint",
+    }
+    
+    required_permission = command_permissions.get(cmd_type)
+    if not required_permission:
+        return False
+    
+    return user.has_permission(required_permission)
+
+
 @app.websocket("/ws/rosbridge")
 async def rosbridge_ws(websocket: WebSocket) -> None:
+    """Minimal rosbridge-protocol WebSocket for subscribe/publish/command ops."""
     await websocket.accept()
     ros_connections[websocket] = set()
     try:
@@ -1636,6 +2023,7 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
 
 
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
+    """Update vehicle state from an incoming telemetry message and fan it out to clients."""
     now = float(payload.get("stamp") or time.time())
     vehicle_id = str(payload.get("vehicle_id") or topic_vehicle_id(payload.get("topic", "")) or "unknown")
     # Natural type from the message payload; stored so clearing the YP role can revert it.
@@ -1646,6 +2034,11 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
 
+    if msg_type == "yp_ground_station/MissionComplete":
+        shared_mission_completion_targets.pop(vehicle_id, None)
+        if shared_mission_plans.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
+
     update: dict[str, Any] = {
         "vehicle_id": vehicle_id,
         "vehicle_type": vehicle_type,
@@ -1654,6 +2047,7 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         "stamp": now,
         "msg": msg,
     }
+    mission_completed = False
 
     async with state_lock:
         vehicle = vehicles.setdefault(
@@ -1684,6 +2078,22 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         if nav:
             vehicle["position"] = nav
             vehicle["history"].append({"stamp": now, **nav})
+            completion_target = shared_mission_completion_targets.get(vehicle_id)
+            if completion_target and _haversine_m(
+                nav["latitude"], nav["longitude"], completion_target["latitude"], completion_target["longitude"],
+            ) <= completion_target["arrival_radius_m"]:
+                shared_mission_completion_targets.pop(vehicle_id, None)
+                if shared_mission_plans.pop(vehicle_id, None) is not None:
+                    mission_completed = True
+            
+            # Update deconfliction engine with position
+            if deconfliction_engine.enabled:
+                async with _deconfliction_lock:
+                    deconfliction_engine.update_vehicle(
+                        vehicle_id,
+                        vehicle.get("vehicle_type", "uav"),
+                        nav,
+                    )
 
         pose = extract_pose(topic, msg_type, msg)
         if pose:
@@ -1706,6 +2116,8 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         # subsequent positions locally from the NavSatFix messages.
         slim_snapshot = {k: v for k, v in vehicle_snapshot.items() if k != "history"}
 
+    if mission_completed:
+        await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
     write_influx(update)
     await broadcast_ui({"op": "vehicle_update", "vehicle": slim_snapshot, "message": update})
     await broadcast_ros(topic, msg, msg_type)
@@ -1748,16 +2160,49 @@ def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]
 
 
 async def route_command(vehicle_id: Optional[str], command: dict[str, Any], source: str) -> None:
+    """Route an operator command to a vehicle, handling RTB-follow and SAR pattern broadcast specially."""
     if not vehicle_id:
         return
 
     cmd_type = command.get("type")
+    is_temporary_avoidance = source == "deconfliction"
+
+    # A new operational task supersedes a previously published mission route.
+    # Re-uploading a mission replaces it below with the new route instead.
+    if not is_temporary_avoidance and cmd_type != "mission_plan":
+        shared_mission_completion_targets.pop(vehicle_id, None)
+        if shared_mission_plans.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
+
+    if not is_temporary_avoidance and cmd_type == "waypoint":
+        target = command.get("target", {})
+        lat, lon = target.get("latitude"), target.get("longitude")
+        if lat is not None and lon is not None:
+            waypoint = {
+                "vehicle_id": vehicle_id,
+                "latitude": float(lat),
+                "longitude": float(lon),
+            }
+            shared_waypoints[vehicle_id] = waypoint
+            await broadcast_ui({"op": "waypoint_overlay", "waypoint": waypoint})
+
+    if not is_temporary_avoidance and cmd_type in ("rtb", "cancel_sar", "waypoint"):
+        if shared_sar_patterns.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "sar_pattern_cleared", "vehicle_id": vehicle_id})
+
+    if cmd_type == "clear_sar_pattern":
+        if shared_sar_patterns.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "sar_pattern_cleared", "vehicle_id": vehicle_id})
+        await _emit_command_ack(vehicle_id, command, source)
+        return
 
     # Any operator command except RTB should terminate active RTB-follow.
     if source != "rtb_follow" and cmd_type != "rtb":
         await _stop_rtb_follow(vehicle_id)
 
     if cmd_type == "rtb":
+        if vehicle_id in vehicles:
+            await _update_deconfliction_state(vehicle_id, vehicles[vehicle_id], command)
         await _start_rtb_follow(vehicle_id, source)
         await _emit_command_ack(vehicle_id, command, source)
         return
@@ -1766,11 +2211,15 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
     if cmd_type in ("search_grid", "mob"):
         pattern_pts = _compute_sar_pattern_points({"command": command})
         if pattern_pts:
+            pattern = {
+                "pattern_type": cmd_type,
+                "waypoints": pattern_pts,
+            }
+            shared_sar_patterns[vehicle_id] = pattern
             await broadcast_ui({
                 "op": "sar_pattern",
                 "vehicle_id": vehicle_id,
-                "pattern_type": cmd_type,
-                "waypoints": pattern_pts,
+                **pattern,
             })
 
         # For websocket sim vehicles only, embed full 3-D waypoints so
@@ -1803,6 +2252,41 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
             except Exception as exc:
                 print(f"[SAR][sim] Waypoint embed error: {exc}")
 
+    if cmd_type == "mission_plan":
+        mission_points = [
+            [float(waypoint["latitude"]), float(waypoint["longitude"])]
+            for waypoint in command.get("waypoints", [])
+            if isinstance(waypoint, dict)
+            and waypoint.get("latitude") is not None
+            and waypoint.get("longitude") is not None
+        ]
+        if mission_points:
+            shared_mission_plans[vehicle_id] = mission_points
+            final_waypoint = next(
+                waypoint
+                for waypoint in reversed(command.get("waypoints", []))
+                if isinstance(waypoint, dict)
+                and waypoint.get("latitude") is not None
+                and waypoint.get("longitude") is not None
+            )
+            shared_mission_completion_targets[vehicle_id] = {
+                "latitude": mission_points[-1][0],
+                "longitude": mission_points[-1][1],
+                "arrival_radius_m": max(
+                    1.0,
+                    float(final_waypoint.get("acceptance_radius_m", MISSION_ARRIVAL_RADIUS_M)),
+                ),
+            }
+            await broadcast_ui({
+                "op": "mission_plan_overlay",
+                "vehicle_id": vehicle_id,
+                "waypoints": mission_points,
+            })
+
+    # Update deconfliction engine with the command
+    if vehicle_id in vehicles and not is_temporary_avoidance:
+        await _update_deconfliction_state(vehicle_id, vehicles[vehicle_id], command)
+
     await _dispatch_vehicle_command(vehicle_id, command, source, emit_ack=True, write_log=True)
 
 
@@ -1814,6 +2298,7 @@ async def _dispatch_vehicle_command(
     emit_ack: bool,
     write_log: bool,
 ) -> dict[str, Any]:
+    """Queue a command for delivery to a vehicle, optionally logging and acking it."""
     payload = {
         "op": "command",
         "vehicle_id": vehicle_id,
@@ -1850,6 +2335,7 @@ async def _dispatch_vehicle_command(
 
 
 async def _emit_command_ack(vehicle_id: str, command: dict[str, Any], source: str) -> None:
+    """Log a command and broadcast a command_ack event without queuing delivery."""
     payload = {
         "op": "command_ack",
         "vehicle_id": vehicle_id,
@@ -1873,6 +2359,7 @@ async def _emit_command_ack(vehicle_id: str, command: dict[str, Any], source: st
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return the great-circle distance in meters between two lat/lon points."""
     la1, la2 = math.radians(lat1), math.radians(lat2)
     dlo = math.radians(lon2 - lon1)
     dlat = la2 - la1
@@ -1882,6 +2369,7 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
+    """Return the lat/lon reached by traveling distance_m meters along bearing_deg from a point."""
     lat_r = math.radians(lat)
     lon_r = math.radians(lon)
     bearing_r = math.radians(bearing_deg)
@@ -1898,6 +2386,7 @@ def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: f
 
 
 async def _stop_rtb_follow(vehicle_id: str) -> None:
+    """Cancel and await a vehicle's running RTB-follow task, if any."""
     task = _rtb_follow_tasks.pop(vehicle_id, None)
     if not task:
         return
@@ -1911,6 +2400,7 @@ async def _stop_rtb_follow(vehicle_id: str) -> None:
 
 
 async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
+    """Replace any existing RTB-follow task for a vehicle and start a new one."""
     await _stop_rtb_follow(vehicle_id)
     task = asyncio.create_task(_rtb_follow_loop(vehicle_id), name=f"rtb-follow-{vehicle_id}")
     _rtb_follow_tasks[vehicle_id] = task
@@ -1918,6 +2408,7 @@ async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
 
 
 async def _rtb_follow_loop(vehicle_id: str) -> None:
+    """Periodically steer a vehicle toward a point trailing the YP boat's stern until arrival."""
     stable_arrival_hits = 0
     try:
         while True:
@@ -1994,7 +2485,83 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
             _rtb_follow_tasks.pop(vehicle_id, None)
 
 
+async def _deconfliction_check_loop() -> None:
+    """Periodically check for vehicle conflicts and issue deconfliction commands."""
+    try:
+        while True:
+            await asyncio.sleep(0.5)  # Check every 0.5 seconds
+            await _check_vehicle_conflicts()
+    except asyncio.CancelledError:
+        return
+
+
+async def _check_vehicle_conflicts() -> None:
+    """Check for vehicle conflicts and issue deconfliction commands."""
+    if not deconfliction_engine.enabled:
+        return
+
+    async with _deconfliction_lock:
+        conflicts = deconfliction_engine.detect_conflicts()
+
+        conflicted_vehicle_ids = {low_priority_id for low_priority_id, _ in conflicts}
+        resume_commands = [
+            (vehicle_id, deconfliction_engine.end_avoidance(vehicle_id))
+            for vehicle_id in deconfliction_engine.active_avoidance_vehicle_ids() - conflicted_vehicle_ids
+        ]
+        avoidance_commands = []
+        for low_priority_id, high_priority_id in conflicts:
+            state_low = deconfliction_engine.vehicle_states.get(low_priority_id)
+            if not state_low or state_low.is_paused or not deconfliction_engine.begin_avoidance(low_priority_id):
+                continue
+            waypoint = deconfliction_engine.calculate_deconfliction_waypoint(low_priority_id, high_priority_id)
+            if waypoint:
+                avoidance_commands.append((low_priority_id, high_priority_id, waypoint))
+            else:
+                deconfliction_engine.end_avoidance(low_priority_id)
+
+    for vehicle_id, saved_command in resume_commands:
+        if saved_command:
+            await route_command(vehicle_id, saved_command, source="deconfliction_resume")
+            print(f"[DECONFLICTION] Resumed mission for {vehicle_id}")
+
+    for low_priority_id, high_priority_id, waypoint in avoidance_commands:
+        orbit_command = {
+            "type": "waypoint",
+            "target": {
+                "latitude": waypoint[0],
+                "longitude": waypoint[1],
+                "altitude": waypoint[2],
+            },
+            "_deconfliction": True,
+            "_conflict_with": high_priority_id,
+        }
+        await route_command(low_priority_id, orbit_command, source="deconfliction")
+        print(f"[DECONFLICTION] Issued avoidance waypoint to {low_priority_id} for {high_priority_id}")
+
+
+async def _update_deconfliction_state(vehicle_id: str, vehicle: dict[str, Any], command: dict[str, Any]) -> None:
+    """Update deconfliction engine with vehicle state after a command."""
+    cmd_type = command.get("type")
+    if cmd_type not in MISSION_PRIORITY:
+        return
+    
+    position = vehicle.get("position")
+    if not position or position.get("latitude") is None:
+        return
+    
+    async with _deconfliction_lock:
+        deconfliction_engine.update_vehicle(
+            vehicle_id,
+            vehicle.get("vehicle_type", "uav"),
+            position,
+            cmd_type,
+        )
+        # Save command for resume
+        deconfliction_engine.set_saved_command(vehicle_id, command)
+
+
 async def broadcast_ui(payload: dict[str, Any]) -> None:
+    """Send a JSON payload to every connected UI WebSocket, dropping stale ones."""
     stale: list[WebSocket] = []
     for websocket in list(ui_connections):
         try:
@@ -2006,6 +2573,7 @@ async def broadcast_ui(payload: dict[str, Any]) -> None:
 
 
 async def broadcast_ros(topic: str, msg: dict[str, Any], msg_type: str) -> None:
+    """Publish a message to rosbridge clients subscribed to its topic (or \"*\")."""
     stale: list[WebSocket] = []
     for websocket, topics in list(ros_connections.items()):
         if topic not in topics and "*" not in topics:
@@ -2027,6 +2595,7 @@ def _do_influx_write(point: Any) -> None:
 
 
 def write_influx(payload: dict[str, Any]) -> None:
+    """Build an InfluxDB point from a message payload and enqueue it for writing."""
     if not write_api:
         return
     if not should_write_influx(payload):
@@ -2052,6 +2621,7 @@ def write_influx(payload: dict[str, Any]) -> None:
 
 
 def should_write_influx(payload: dict[str, Any]) -> bool:
+    """Return whether this (vehicle, message type) pair is due for another Influx write."""
     max_hz = float(settings.get("influx_max_write_hz") or 0)
     if max_hz <= 0:
         return True
@@ -2067,12 +2637,14 @@ def should_write_influx(payload: dict[str, Any]) -> bool:
 
 
 async def influx_retention_loop() -> None:
+    """Periodically purge InfluxDB messages older than the retention window."""
     while True:
         await asyncio.sleep(float(settings["message_cleanup_interval_seconds"]))
         await delete_expired_influx_messages()
 
 
 async def delete_expired_influx_messages() -> None:
+    """Delete yp_messages points older than the configured retention period."""
     if not delete_api:
         return
     retention_seconds = float(settings["message_retention_seconds"])
@@ -2094,6 +2666,7 @@ async def delete_expired_influx_messages() -> None:
 
 
 def add_fields(point: Point, value: Any, prefix: str = "") -> None:
+    """Recursively flatten a nested message value into InfluxDB point fields."""
     if isinstance(value, dict):
         for key, child in value.items():
             safe_key = f"{prefix}_{key}" if prefix else str(key)
@@ -2112,6 +2685,7 @@ def add_fields(point: Point, value: Any, prefix: str = "") -> None:
 
 
 def ros_publish_to_vehicle_message(payload: dict[str, Any]) -> dict[str, Any]:
+    """Convert a rosbridge publish payload into the internal vehicle-message shape."""
     topic = str(payload.get("topic", ""))
     vehicle_id = topic_vehicle_id(topic) or str(payload.get("vehicle_id") or "ros-vehicle")
     return {
@@ -2125,6 +2699,7 @@ def ros_publish_to_vehicle_message(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
+    """Return the client-facing snapshot of a vehicle, stripping private keys."""
     # Exclude private/internal keys (prefixed with "_") from the public representation.
     snapshot = {k: v for k, v in vehicle.items() if not k.startswith("_")}
     if isinstance(snapshot.get("history"), deque):
@@ -2140,6 +2715,7 @@ def public_vehicle(vehicle: dict[str, Any]) -> dict[str, Any]:
 
 
 def topic_vehicle_id(topic: str) -> Optional[str]:
+    """Extract the vehicle id from a \"/vehicles/{id}/...\" topic string."""
     parts = [part for part in topic.split("/") if part]
     if len(parts) >= 2 and parts[0] == "vehicles":
         return parts[1]
@@ -2147,6 +2723,7 @@ def topic_vehicle_id(topic: str) -> Optional[str]:
 
 
 def infer_vehicle_type(vehicle_id: str) -> str:
+    """Guess a vehicle's type from a keyword substring in its id, defaulting to \"uav\"."""
     lower = vehicle_id.lower()
     for candidate in ("uav", "usv", "ugv", "uuv", "yp"):
         if candidate in lower:
@@ -2155,11 +2732,13 @@ def infer_vehicle_type(vehicle_id: str) -> str:
 
 
 def normalize_vehicle_type(value: Any) -> str:
+    """Coerce a value to a known vehicle type string, defaulting to \"uav\"."""
     text = str(value or "uav").lower()
     return text if text in {"uav", "usv", "ugv", "uuv", "yp"} else "uav"
 
 
 def extract_navsatfix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, float]]:
+    """Extract lat/lon/alt from a NavSatFix-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "NavSatFix" not in msg_type and not topic.endswith("navsatfix"):
@@ -2174,6 +2753,7 @@ def extract_navsatfix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str,
 
 
 def extract_pose(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]]:
+    """Extract position/orientation/yaw from a Pose-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "Pose" not in msg_type and not topic.endswith("pose"):
@@ -2184,6 +2764,7 @@ def extract_pose(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]
 
 
 def extract_battery(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]]:
+    """Extract percentage/voltage/current from a BatteryState-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
     if "BatteryState" not in msg_type and not topic.endswith("battery"):
@@ -2196,6 +2777,7 @@ def extract_battery(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, A
 
 
 def extract_heading(msg: Any) -> Optional[float]:
+    """Extract a normalized 0-360 degree heading from a message, or None if absent."""
     if not isinstance(msg, dict):
         return None
     if "heading" in msg:
@@ -2204,6 +2786,7 @@ def extract_heading(msg: Any) -> Optional[float]:
 
 
 def quaternion_to_yaw_deg(q: dict[str, Any]) -> Optional[float]:
+    """Convert a quaternion dict to a normalized 0-360 degree yaw angle."""
     try:
         x = float(q.get("x", 0.0))
         y = float(q.get("y", 0.0))

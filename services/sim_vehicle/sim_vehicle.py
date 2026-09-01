@@ -39,6 +39,7 @@ class VehicleSim:
         self.local_y = 0.0
         self.last_step = time.time()
         self.mission_waypoints: list[dict[str, float]] = []
+        self.mission_complete_pending = False
 
     def random_target(self) -> dict[str, float]:
         return {
@@ -93,6 +94,7 @@ class VehicleSim:
                     }
                 )
             if parsed:
+                self.mission_complete_pending = False
                 self.mission_waypoints = parsed
                 self.mode = "mission_plan"
                 self.target = self.mission_waypoints.pop(0)
@@ -110,6 +112,8 @@ class VehicleSim:
                 if self.mission_waypoints:
                     self.target = self.mission_waypoints.pop(0)
                 else:
+                    if self.mode == "mission_plan":
+                        self.mission_complete_pending = True
                     self.mode = "loiter"
                     self.target = self.random_target()
             else:
@@ -141,7 +145,7 @@ class VehicleSim:
             "translation": {"x": self.local_x, "y": self.local_y, "z": self.alt},
             "rotation": quat,
         }
-        return [
+        messages = [
             wrap("heartbeat", "yp_ground_station/msg/Heartbeat", stamp_float, {"mode": self.mode, "armed": True}),
             wrap(
                 "navsatfix",
@@ -213,6 +217,10 @@ class VehicleSim:
                 },
             ),
         ]
+        if self.mission_complete_pending:
+            self.mission_complete_pending = False
+            messages.append(wrap("mission", "yp_ground_station/MissionComplete", stamp_float, {"status": "complete"}))
+        return messages
 
 
 def wrap(topic_suffix: str, msg_type: str, stamp: float, msg: dict[str, Any]) -> dict[str, Any]:
