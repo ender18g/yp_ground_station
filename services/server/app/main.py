@@ -293,6 +293,19 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def require_permission(authorization: Optional[str], permission: str) -> Optional[JSONResponse]:
+    """Return an authorization error response, or None when permission is granted."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return JSONResponse({"error": "missing or invalid authorization header"}, status_code=401)
+
+    user = get_current_user(authorization[7:])
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    if not user.has_permission(permission):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Authentication endpoints
 # ---------------------------------------------------------------------------
@@ -484,11 +497,9 @@ async def update_password_endpoint(
 @app.get("/api/sitl")
 async def list_sitl_bridges(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """Return all active (and recently errored) SITL bridge connections. Requires manage_sitl permission."""
-    if authorization:
-        token = authorization[7:] if authorization.startswith("Bearer ") else None
-        user = get_current_user(token)
-        if user and not user.has_permission("manage_sitl"):
-            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
     
     return JSONResponse({"bridges": list(sitl_bridge_info.values())})
 
@@ -503,11 +514,9 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={}), authorization
                    ``udpin:0.0.0.0:14551``, ``udpout:host:14550``.
       vehicle_id – optional; derived from the URL if omitted.
     """
-    if authorization:
-        token = authorization[7:] if authorization.startswith("Bearer ") else None
-        user = get_current_user(token)
-        if user and not user.has_permission("manage_sitl"):
-            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
     
     if _mavutil is None:
         return JSONResponse({"error": "pymavlink is not installed on this server"}, status_code=501)
@@ -540,11 +549,9 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={}), authorization
 @app.delete("/api/sitl/{vehicle_id}")
 async def disconnect_sitl(vehicle_id: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """Cancel and remove a SITL bridge connection. Requires manage_sitl permission."""
-    if authorization:
-        token = authorization[7:] if authorization.startswith("Bearer ") else None
-        user = get_current_user(token)
-        if user and not user.has_permission("manage_sitl"):
-            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    authorization_error = require_permission(authorization, "manage_sitl")
+    if authorization_error:
+        return authorization_error
     
     task = sitl_bridges.get(vehicle_id)
     if not task:
@@ -1062,8 +1069,11 @@ async def list_video_streams(include_sources: bool = Query(False)) -> dict[str, 
 
 
 @app.put("/api/video/streams/{vehicle_id}")
-async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """Create or update a vehicle's video stream configuration."""
+    authorization_error = require_permission(authorization, "manage_video_streams")
+    if authorization_error:
+        return authorization_error
     vehicle_id = vehicle_id.strip()
     if not vehicle_id:
         return JSONResponse({"error": "vehicle_id is required"}, status_code=400)
@@ -1082,8 +1092,11 @@ async def put_video_stream(vehicle_id: str, payload: dict[str, Any] = Body(defau
 
 
 @app.delete("/api/video/streams/{vehicle_id}")
-async def delete_video_stream(vehicle_id: str) -> JSONResponse:
+async def delete_video_stream(vehicle_id: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """Remove a vehicle's video stream configuration."""
+    authorization_error = require_permission(authorization, "manage_video_streams")
+    if authorization_error:
+        return authorization_error
     if vehicle_id not in video_streams:
         return JSONResponse({"error": "stream not found"}, status_code=404)
     video_streams.pop(vehicle_id, None)
@@ -1100,11 +1113,9 @@ async def get_settings() -> dict[str, Any]:
 @app.put("/api/settings")
 async def update_settings(payload: dict[str, Any], authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """Validate and apply updates to message retention and RTB update rate. Requires manage_settings permission."""
-    if authorization:
-        token = authorization[7:] if authorization.startswith("Bearer ") else None
-        user = get_current_user(token)
-        if user and not user.has_permission("manage_settings"):
-            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
     
     if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
@@ -1143,7 +1154,7 @@ async def get_yp_role() -> dict[str, Any]:
 
 
 @app.post("/api/yp/role")
-async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def set_yp_role(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
     Designate a connected vehicle as the YP (mother vessel).
 
@@ -1155,6 +1166,10 @@ async def set_yp_role(payload: dict[str, Any] = Body(default={})) -> JSONRespons
     its natural type on its next incoming message.
     """
     global _yp_role_vehicle_id
+
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
 
     raw = payload.get("vehicle_id")
     new_role_id: Optional[str] = str(raw).strip() if raw and str(raw).strip() else None
@@ -1216,7 +1231,7 @@ def _select_yp_vehicle_locked() -> Optional[dict[str, Any]]:
 
 
 @app.post("/api/sar/mob")
-async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def trigger_mob(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
     Trigger a Man Overboard search mission.
 
@@ -1226,6 +1241,10 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={})) -> JSONRespons
 
     Optional body: { "vehicle_id": "uav-001" } to target a specific vehicle.
     """
+    authorization_error = require_permission(authorization, "trigger_mob")
+    if authorization_error:
+        return authorization_error
+
     track_window_s = SAR_MOB_TRACK_SECONDS
     if payload and payload.get("track_seconds") is not None:
         try:

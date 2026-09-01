@@ -81,6 +81,8 @@ VALID_PERMISSIONS = frozenset(permission for level in PERMISSION_LEVELS.values()
 
 # Database setup
 Base = declarative_base()
+engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+SessionLocal = sessionmaker(bind=engine)
 
 
 class User(Base):
@@ -133,12 +135,10 @@ class UserPermission(Base):
 def init_database() -> None:
     """Initialize the SQLite database with schema. Creates default admin if needed."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
     Base.metadata.create_all(engine)
     
     # Create default admin user if no users exist
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    session = SessionLocal()
     try:
         if session.query(User).count() == 0:
             admin_user = User(
@@ -162,8 +162,7 @@ def init_database() -> None:
 
 def get_db_session() -> Session:
     """Get a new database session."""
-    engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
-    return sessionmaker(bind=engine)()
+    return SessionLocal()
 
 
 def hash_password(password: str) -> str:

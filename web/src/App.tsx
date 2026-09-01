@@ -190,8 +190,19 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [activeTab, setActiveTab] = useState<"map" | "mission" | "planner">("map");
 
   useEffect(() => {
-    void getCurrentUser().then(setCurrentUser);
-  }, []);
+    let cancelled = false;
+    void getCurrentUser().then((user) => {
+      if (cancelled) return;
+      if (!user) {
+        onLogout();
+        return;
+      }
+      setCurrentUser(user);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [onLogout]);
 
   const updateSarMissionState = (vehicleId: string, commandType: string) => {
     setSarMissionActiveByVehicle((current) => {
@@ -214,14 +225,20 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     if (DEMO_MODE) return;
+    let disposed = false;
     let retry: number | undefined;
 
     const connect = () => {
       const ws = new WebSocket(websocketUrl("/ws/ui"));
       wsRef.current = ws;
       ws.onopen = () => setConnected(true);
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setConnected(false);
+        if (disposed) return;
+        if (event.code === 4001) {
+          onLogout();
+          return;
+        }
         retry = window.setTimeout(connect, 1500);
       };
       ws.onmessage = (event) => {
@@ -356,10 +373,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
 
     connect();
     return () => {
+      disposed = true;
       window.clearTimeout(retry);
       wsRef.current?.close();
     };
-  }, []);
+  }, [onLogout]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
