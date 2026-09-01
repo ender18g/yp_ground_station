@@ -26,12 +26,19 @@ try:
 except ImportError:  # pragma: no cover
     _sar_missions = None  # type: ignore[assignment]
 
-from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+
+# Import authentication module
+from app.auth import (
+    init_database, create_user, delete_user, list_users, 
+    create_access_token, get_current_user, update_user_permissions, 
+    update_user_password, verify_password, record_login, set_user_permissions
+)
 
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
@@ -251,8 +258,10 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize the tile cache dir, HTTP/InfluxDB clients, and background tasks."""
+    """Initialize the tile cache dir, HTTP/InfluxDB clients, auth database, and background tasks."""
     global cleanup_task, delete_api, influx_client, tile_http_client, write_api
+    # Initialize authentication database
+    init_database()
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
@@ -285,25 +294,221 @@ async def health() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Authentication endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/login")
+async def login(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """Authenticate a user and return a JWT token."""
+    username: str = str(payload.get("username") or "").strip()
+    password: str = str(payload.get("password") or "").strip()
+    
+    if not username or not password:
+        return JSONResponse({"error": "username and password are required"}, status_code=400)
+    
+    from app.auth import get_db_session, User
+    session = get_db_session()
+    try:
+        user = session.query(User).filter_by(username=username).first()
+        if not user or not verify_password(password, user.password_hash):
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        
+        if not user.active:
+            return JSONResponse({"error": "account is disabled"}, status_code=401)
+        
+        # Record login time
+        record_login(username)
+        
+        # Create and return JWT token
+        token = create_access_token(username)
+        return JSONResponse({
+            "ok": True,
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "username": user.username,
+                "permissions": sorted([p.permission for p in user.permissions])
+            }
+        })
+    finally:
+        session.close()
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Return the current authenticated user's information."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    # Extract token from "Bearer <token>"
+    token = None
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    
+    user = get_current_user(token)
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    
+    return JSONResponse({
+        "username": user.username,
+        "active": user.active,
+        "permissions": sorted([p.permission for p in user.permissions]),
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "last_login": user.last_login.isoformat() if user.last_login else None,
+    })
+
+
+@app.post("/api/auth/users")
+async def create_new_user(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Create a new user account (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    username: str = str(payload.get("username") or "").strip()
+    password: str = str(payload.get("password") or "").strip()
+    permission_level: str = str(payload.get("permission_level") or "view_only").strip()
+    
+    if not username or not password:
+        return JSONResponse({"error": "username and password are required"}, status_code=400)
+    
+    success, message = create_user(username, password, permission_level)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.get("/api/auth/users")
+async def list_all_users(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """List all users (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    users_list = list_users()
+    return JSONResponse({"users": users_list})
+
+
+@app.delete("/api/auth/users/{username}")
+async def delete_user_endpoint(username: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Delete a user account (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    success, message = delete_user(username)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.put("/api/auth/users/{username}/permissions")
+async def update_permissions_endpoint(
+    username: str, 
+    payload: dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update a user's permission level (admin only)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user or not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    permissions = payload.get("permissions")
+    if isinstance(permissions, list):
+        if not all(isinstance(permission, str) for permission in permissions):
+            return JSONResponse({"error": "permissions must be a list of strings"}, status_code=400)
+        success, message = set_user_permissions(username, set(permissions))
+    else:
+        permission_level: str = str(payload.get("permission_level") or "").strip()
+        if not permission_level:
+            return JSONResponse({"error": "permission_level or permissions is required"}, status_code=400)
+        success, message = update_user_permissions(username, permission_level)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+@app.put("/api/auth/users/{username}/password")
+async def update_password_endpoint(
+    username: str, 
+    payload: dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update a user's password (admin only or self)."""
+    if not authorization:
+        return JSONResponse({"error": "missing authorization header"}, status_code=401)
+    
+    token = authorization[7:] if authorization.startswith("Bearer ") else None
+    user = get_current_user(token)
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    
+    # Allow user to change their own password, or admin to change any password
+    if user.username != username and not user.has_permission("manage_users"):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    new_password: str = str(payload.get("password") or "").strip()
+    if not new_password:
+        return JSONResponse({"error": "password is required"}, status_code=400)
+    
+    success, message = update_user_password(username, new_password)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    
+    return JSONResponse({"ok": True, "message": message})
+
+
+# ---------------------------------------------------------------------------
 # SITL / MAVLink bridge endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sitl")
-async def list_sitl_bridges() -> dict[str, Any]:
-    """Return all active (and recently errored) SITL bridge connections."""
-    return {"bridges": list(sitl_bridge_info.values())}
+async def list_sitl_bridges(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Return all active (and recently errored) SITL bridge connections. Requires manage_sitl permission."""
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else None
+        user = get_current_user(token)
+        if user and not user.has_permission("manage_sitl"):
+            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
+    return JSONResponse({"bridges": list(sitl_bridge_info.values())})
 
 
 @app.post("/api/sitl")
-async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+async def connect_sitl(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
     """
-    Open a new MAVLink bridge connection.
+    Open a new MAVLink bridge connection. Requires manage_sitl permission.
 
     Body fields:
       url        – pymavlink connection string, e.g. ``tcp:localhost:5760``,
                    ``udpin:0.0.0.0:14551``, ``udpout:host:14550``.
       vehicle_id – optional; derived from the URL if omitted.
     """
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else None
+        user = get_current_user(token)
+        if user and not user.has_permission("manage_sitl"):
+            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
     if _mavutil is None:
         return JSONResponse({"error": "pymavlink is not installed on this server"}, status_code=501)
 
@@ -333,8 +538,14 @@ async def connect_sitl(payload: dict[str, Any] = Body(default={})) -> JSONRespon
 
 
 @app.delete("/api/sitl/{vehicle_id}")
-async def disconnect_sitl(vehicle_id: str) -> JSONResponse:
-    """Cancel and remove a SITL bridge connection."""
+async def disconnect_sitl(vehicle_id: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Cancel and remove a SITL bridge connection. Requires manage_sitl permission."""
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else None
+        user = get_current_user(token)
+        if user and not user.has_permission("manage_sitl"):
+            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
     task = sitl_bridges.get(vehicle_id)
     if not task:
         return JSONResponse({"error": "Bridge not found"}, status_code=404)
@@ -887,8 +1098,14 @@ async def get_settings() -> dict[str, Any]:
 
 
 @app.put("/api/settings")
-async def update_settings(payload: dict[str, Any]) -> JSONResponse:
-    """Validate and apply updates to message retention and RTB update rate."""
+async def update_settings(payload: dict[str, Any], authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    """Validate and apply updates to message retention and RTB update rate. Requires manage_settings permission."""
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else None
+        user = get_current_user(token)
+        if user and not user.has_permission("manage_settings"):
+            return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    
     if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
 
@@ -1474,9 +1691,17 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
 
 
 @app.websocket("/ws/ui")
-async def ui_ws(websocket: WebSocket) -> None:
-    """Serve the ground-station UI: send an initial snapshot, then relay commands."""
+async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
+    """Serve the ground-station UI: validate JWT token, send initial snapshot, then relay commands with permission checks."""
     await websocket.accept()
+    
+    # Validate JWT token
+    user = get_current_user(token) if token else None
+    if not user:
+        await websocket.send_json({"error": "Authentication required. Please login."})
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    
     ui_connections.add(websocket)
     try:
         async with state_lock:
@@ -1484,11 +1709,43 @@ async def ui_ws(websocket: WebSocket) -> None:
         while True:
             payload = await websocket.receive_json()
             if payload.get("op") == "command":
+                # Check permissions for the command type
+                cmd_type = payload.get("command", {}).get("type")
+                if not _check_command_permission(user, cmd_type):
+                    await websocket.send_json({
+                        "error": "Insufficient permissions for this command",
+                        "command_type": cmd_type
+                    })
+                    continue
                 await route_command(payload.get("vehicle_id"), payload.get("command", {}), source="ui")
     except WebSocketDisconnect:
         pass
     finally:
         ui_connections.discard(websocket)
+
+
+def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
+    """Check if a user has permission to execute a specific command type."""
+    if not user or not user.active:
+        return False
+    
+    # Map command types to required permissions
+    command_permissions = {
+        "waypoint": "send_waypoint",
+        "rtb": "send_rtb",
+        "set_mode": "set_vehicle_mode",
+        "cancel_sar": "cancel_sar",
+        "search_grid": "search_grid",
+        "mob": "trigger_mob",
+        "mission_plan": "upload_mission",
+        "trajectory": "send_waypoint",
+    }
+    
+    required_permission = command_permissions.get(cmd_type)
+    if not required_permission:
+        return False
+    
+    return user.has_permission(required_permission)
 
 
 @app.websocket("/ws/rosbridge")

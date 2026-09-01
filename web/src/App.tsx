@@ -25,14 +25,18 @@ import {
   Wifi,
   WifiOff,
   X,
-  Map as MapIcon
+  Map as MapIcon,
+  LogOut,
+  Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, Suspense, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, fetchSettings, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl } from "./api";
-import type { SITLBridge, SerialPortInfo } from "./api";
+import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser } from "./api";
+import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
 import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
+import Login from "./Login";
+import UserManagement from "./UserManagement";
 import { Canvas } from "@react-three/fiber";
 import { useGLTF, OrbitControls, Environment, Sphere, Line } from "@react-three/drei";
 
@@ -121,7 +125,18 @@ const VEHICLE_COLOR_PALETTE = [
 ];
 
 export function App() {
+  const [isLoggedIn, setIsLoggedIn] = useState(isAuthenticated());
+
+  if (!isLoggedIn) {
+    return <Login onLogin={() => setIsLoggedIn(true)} />;
+  }
+
+  return <GroundStation onLogout={() => { logoutUser(); setIsLoggedIn(false); }} />;
+}
+
+function GroundStation({ onLogout }: { onLogout: () => void }) {
   const isPhoneViewer = useIsPhoneViewer();
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [vehicles, setVehicles] = useState<Record<string, Vehicle>>({});
   const [connected, setConnected] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
@@ -154,6 +169,7 @@ export function App() {
   const [mobAltM, setMobAltM] = useState(30);
   const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel">("display");
   const [showSITL, setShowSITL] = useState(false);
+  const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
@@ -172,6 +188,10 @@ export function App() {
   const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   
   const [activeTab, setActiveTab] = useState<"map" | "mission" | "planner">("map");
+
+  useEffect(() => {
+    void getCurrentUser().then(setCurrentUser);
+  }, []);
 
   const updateSarMissionState = (vehicleId: string, commandType: string) => {
     setSarMissionActiveByVehicle((current) => {
@@ -754,6 +774,18 @@ export function App() {
           <button ref={messagesButtonRef} className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
             <MessageSquare size={19} />
           </button>
+          {currentUser?.permissions.includes("manage_users") && (
+            <button
+              className={showUserManagement ? "icon-button active" : "icon-button"}
+              title="User Management"
+              onClick={() => setShowUserManagement((value) => !value)}
+            >
+              <Users size={19} />
+            </button>
+          )}
+          <button className="icon-button" title="Logout" onClick={onLogout}>
+            <LogOut size={19} />
+          </button>
         </div>
       </div>
 
@@ -781,6 +813,10 @@ export function App() {
             }
           />
         </div>
+      )}
+
+      {showUserManagement && currentUser?.permissions.includes("manage_users") && (
+        <UserManagement onClose={() => setShowUserManagement(false)} />
       )}
 
       {showSettings && (

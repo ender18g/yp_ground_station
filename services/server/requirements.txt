@@ -5,3 +5,5 @@ pydantic==2.8.2
 httpx==0.28.1
 pymavlink==2.4.41
 pyserial==3.5
+PyJWT==2.8.0
+sqlalchemy==2.0.31
