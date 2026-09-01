@@ -76,6 +76,7 @@ SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "35.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ARRIVAL_RADIUS_M = float(os.getenv("RTB_ARRIVAL_RADIUS_M", "15.0"))
+MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
@@ -95,6 +96,13 @@ ui_connections: set[WebSocket] = set()
 ros_connections: dict[WebSocket, set[str]] = defaultdict(set)
 state_lock = asyncio.Lock()
 tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# Command-derived overlays are shared by all UI clients and included in their
+# initial WebSocket snapshot so late joiners see the active operational plan.
+shared_waypoints: dict[str, dict[str, Any]] = {}
+shared_sar_patterns: dict[str, dict[str, Any]] = {}
+shared_mission_plans: dict[str, list[list[float]]] = {}
+shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 
 # SITL MAVLink bridge state
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
@@ -1724,7 +1732,13 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
     ui_connections.add(websocket)
     try:
         async with state_lock:
-            await websocket.send_json({"op": "snapshot", "vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()]})
+            await websocket.send_json({
+                "op": "snapshot",
+                "vehicles": [public_vehicle(vehicle) for vehicle in vehicles.values()],
+                "waypoints": list(shared_waypoints.values()),
+                "sar_patterns": shared_sar_patterns,
+                "mission_plans": shared_mission_plans,
+            })
         while True:
             payload = await websocket.receive_json()
             if payload.get("op") == "command":
@@ -1756,6 +1770,7 @@ def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
         "cancel_sar": "cancel_sar",
         "search_grid": "search_grid",
         "mob": "trigger_mob",
+        "clear_sar_pattern": "cancel_sar",
         "mission_plan": "upload_mission",
         "trajectory": "send_waypoint",
     }
@@ -1806,6 +1821,11 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
 
+    if msg_type == "yp_ground_station/MissionComplete":
+        shared_mission_completion_targets.pop(vehicle_id, None)
+        if shared_mission_plans.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
+
     update: dict[str, Any] = {
         "vehicle_id": vehicle_id,
         "vehicle_type": vehicle_type,
@@ -1814,6 +1834,7 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         "stamp": now,
         "msg": msg,
     }
+    mission_completed = False
 
     async with state_lock:
         vehicle = vehicles.setdefault(
@@ -1844,6 +1865,13 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         if nav:
             vehicle["position"] = nav
             vehicle["history"].append({"stamp": now, **nav})
+            completion_target = shared_mission_completion_targets.get(vehicle_id)
+            if completion_target and _haversine_m(
+                nav["latitude"], nav["longitude"], completion_target["latitude"], completion_target["longitude"],
+            ) <= completion_target["arrival_radius_m"]:
+                shared_mission_completion_targets.pop(vehicle_id, None)
+                if shared_mission_plans.pop(vehicle_id, None) is not None:
+                    mission_completed = True
 
         pose = extract_pose(topic, msg_type, msg)
         if pose:
@@ -1866,6 +1894,8 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         # subsequent positions locally from the NavSatFix messages.
         slim_snapshot = {k: v for k, v in vehicle_snapshot.items() if k != "history"}
 
+    if mission_completed:
+        await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
     write_influx(update)
     await broadcast_ui({"op": "vehicle_update", "vehicle": slim_snapshot, "message": update})
     await broadcast_ros(topic, msg, msg_type)
@@ -1914,6 +1944,35 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
 
     cmd_type = command.get("type")
 
+    # A new operational task supersedes a previously published mission route.
+    # Re-uploading a mission replaces it below with the new route instead.
+    if cmd_type != "mission_plan":
+        shared_mission_completion_targets.pop(vehicle_id, None)
+        if shared_mission_plans.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
+
+    if cmd_type == "waypoint":
+        target = command.get("target", {})
+        lat, lon = target.get("latitude"), target.get("longitude")
+        if lat is not None and lon is not None:
+            waypoint = {
+                "vehicle_id": vehicle_id,
+                "latitude": float(lat),
+                "longitude": float(lon),
+            }
+            shared_waypoints[vehicle_id] = waypoint
+            await broadcast_ui({"op": "waypoint_overlay", "waypoint": waypoint})
+
+    if cmd_type in ("rtb", "cancel_sar", "waypoint"):
+        if shared_sar_patterns.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "sar_pattern_cleared", "vehicle_id": vehicle_id})
+
+    if cmd_type == "clear_sar_pattern":
+        if shared_sar_patterns.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "sar_pattern_cleared", "vehicle_id": vehicle_id})
+        await _emit_command_ack(vehicle_id, command, source)
+        return
+
     # Any operator command except RTB should terminate active RTB-follow.
     if source != "rtb_follow" and cmd_type != "rtb":
         await _stop_rtb_follow(vehicle_id)
@@ -1927,11 +1986,15 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
     if cmd_type in ("search_grid", "mob"):
         pattern_pts = _compute_sar_pattern_points({"command": command})
         if pattern_pts:
+            pattern = {
+                "pattern_type": cmd_type,
+                "waypoints": pattern_pts,
+            }
+            shared_sar_patterns[vehicle_id] = pattern
             await broadcast_ui({
                 "op": "sar_pattern",
                 "vehicle_id": vehicle_id,
-                "pattern_type": cmd_type,
-                "waypoints": pattern_pts,
+                **pattern,
             })
 
         # For websocket sim vehicles only, embed full 3-D waypoints so
@@ -1963,6 +2026,37 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
                         command["sim_waypoints"] = [[wp[0], wp[1], wp[2]] for wp in wps]
             except Exception as exc:
                 print(f"[SAR][sim] Waypoint embed error: {exc}")
+
+    if cmd_type == "mission_plan":
+        mission_points = [
+            [float(waypoint["latitude"]), float(waypoint["longitude"])]
+            for waypoint in command.get("waypoints", [])
+            if isinstance(waypoint, dict)
+            and waypoint.get("latitude") is not None
+            and waypoint.get("longitude") is not None
+        ]
+        if mission_points:
+            shared_mission_plans[vehicle_id] = mission_points
+            final_waypoint = next(
+                waypoint
+                for waypoint in reversed(command.get("waypoints", []))
+                if isinstance(waypoint, dict)
+                and waypoint.get("latitude") is not None
+                and waypoint.get("longitude") is not None
+            )
+            shared_mission_completion_targets[vehicle_id] = {
+                "latitude": mission_points[-1][0],
+                "longitude": mission_points[-1][1],
+                "arrival_radius_m": max(
+                    1.0,
+                    float(final_waypoint.get("acceptance_radius_m", MISSION_ARRIVAL_RADIUS_M)),
+                ),
+            }
+            await broadcast_ui({
+                "op": "mission_plan_overlay",
+                "vehicle_id": vehicle_id,
+                "waypoints": mission_points,
+            })
 
     await _dispatch_vehicle_command(vehicle_id, command, source, emit_ack=True, write_log=True)
 

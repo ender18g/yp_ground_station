@@ -173,6 +173,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
+  const [missionPlans, setMissionPlans] = useState<Record<string, [number, number][]>>({});
   const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -247,6 +248,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
           const snapshotVehicles = payload.vehicles as Vehicle[];
           setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
           setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
+          setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
+          setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
+          setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
         }
         if (payload.op === "vehicle_update") {
           const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
@@ -319,6 +323,20 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               waypoints: payload.waypoints as [number, number][],
             },
           }));
+        }
+        if (payload.op === "waypoint_overlay") {
+          const waypoint = payload.waypoint as WaypointMarker;
+          setWaypointMarkers((current) => ({ ...current, [waypoint.vehicle_id]: waypoint }));
+        }
+        if (payload.op === "mission_plan_overlay") {
+          setMissionPlans((current) => ({ ...current, [payload.vehicle_id as string]: payload.waypoints as [number, number][] }));
+        }
+        if (payload.op === "mission_plan_cleared") {
+          setMissionPlans((current) => {
+            const next = { ...current };
+            delete next[payload.vehicle_id as string];
+            return next;
+          });
         }
         if (payload.op === "sar_pattern_cleared") {
           setSarPatterns((current) => {
@@ -612,8 +630,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               patternType={pattern.patternType}
               waypoints={pattern.waypoints}
               color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
-              onClear={() => setSarPatterns((prev) => { const next = { ...prev }; delete next[vehicleId]; return next; })}
+              onClear={() => command(vehicleId, { type: "clear_sar_pattern" })}
             />
+          ))}
+          {Object.entries(missionPlans).map(([vehicleId, waypoints]) => (
+            waypoints.length > 1 && <Polyline key={`mission-${vehicleId}`} positions={waypoints} pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }} />
           ))}
           {Object.values(waypointMarkers)
             .filter((waypoint) => !VIEW_MODE || isSimVehicle(waypoint.vehicle_id))
@@ -669,6 +690,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
           onCenterChange={setMapCenter}
           mapLayer={mapLayer}
           vehicles={vehicleList}
+          missionPlans={missionPlans}
           canCommandVehicle={(vehicleId) => !VIEW_MODE || isSimVehicle(vehicleId)}
           onCommand={command}
         />
@@ -1314,6 +1336,7 @@ function MissionPlannerMode({
   onCenterChange,
   mapLayer,
   vehicles,
+  missionPlans,
   canCommandVehicle,
   onCommand,
 }: {
@@ -1323,6 +1346,7 @@ function MissionPlannerMode({
   onCenterChange: (center: [number, number]) => void;
   mapLayer: { url: string; attribution: string; maxNativeZoom: number };
   vehicles: Vehicle[];
+  missionPlans: Record<string, [number, number][]>;
   canCommandVehicle: (vehicleId: string) => boolean;
   onCommand: (vehicleId: string, cmd: Command) => void;
 }) {
@@ -1748,6 +1772,10 @@ function MissionPlannerMode({
             pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }}
           />
         )}
+
+        {Object.entries(missionPlans).map(([vehicleId, missionWaypoints]) => (
+          missionWaypoints.length > 1 && <Polyline key={`published-mission-${vehicleId}`} positions={missionWaypoints} pathOptions={{ color: "#16a34a", weight: 3, opacity: 0.9 }} />
+        ))}
 
         {waypoints.map((waypoint, index) => (
           <MissionWaypointMarker

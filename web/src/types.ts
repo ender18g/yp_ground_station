@@ -45,7 +45,7 @@ export interface Vehicle {
 }
 
 export interface Command {
-  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar" | "mission_plan" | "set_mode";
+  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar" | "clear_sar_pattern" | "mission_plan" | "set_mode";
   target?: {
     latitude: number;
     longitude: number;
