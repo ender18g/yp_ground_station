@@ -992,9 +992,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               
               <label>Radius per vehicle type</label>
               {Object.entries(deconflictionRadii).map(([vehicleType, radius]) => (
-                <div key={vehicleType} style={{ marginLeft: "12px", marginBottom: "8px" }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ minWidth: "40px" }}>{vehicleType}</span>
+                <div key={vehicleType} className="deconfliction-radius-row">
+                  <label>
+                    <span>{vehicleType}</span>
                     <input 
                       min={1} 
                       max={50} 
@@ -1006,9 +1006,8 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                         ...current, 
                         [vehicleType]: Number(event.target.value)
                       }))}
-                      style={{ flex: 1 }}
                     />
-                    <span style={{ minWidth: "40px", textAlign: "right" }}>{radius.toFixed(1)}m</span>
+                    <span>{radius.toFixed(1)}m</span>
                   </label>
                 </div>
               ))}

@@ -15,6 +15,7 @@ MISSION_PRIORITY = {
     "waypoint": 1,      # Simple waypoint command
     "rtb": 1,           # Return to base (same as waypoint)
 }
+YP_PRIORITY = max(MISSION_PRIORITY.values()) + 1
 
 # Default deconfliction radius per vehicle type (meters)
 DEFAULT_DECONFLICT_RADIUS_M = {
@@ -152,6 +153,9 @@ class DeconflictionEngine:
                 state2 = self.vehicle_states[vid2]
                 if not state2.position:
                     continue
+
+                if self._is_yp_rtb_pair(state1, state2):
+                    continue
                 
                 distance_m = self._calculate_distance_3d(state1.position, state2.position)
                 radius1 = self.get_radius(state1.vehicle_type)
@@ -160,8 +164,8 @@ class DeconflictionEngine:
                 
                 if distance_m < min_distance:
                     # Return with lower-priority vehicle first
-                    priority1 = MISSION_PRIORITY.get(state1.mission_type, 0)
-                    priority2 = MISSION_PRIORITY.get(state2.mission_type, 0)
+                    priority1 = self._priority_for(state1)
+                    priority2 = self._priority_for(state2)
                     if priority1 <= priority2:
                         conflicts.append((vid1, vid2))
                     else:
@@ -238,6 +242,22 @@ class DeconflictionEngine:
     def clear_vehicle_state(self, vehicle_id: str) -> None:
         """Remove a vehicle from tracking (e.g., when it disconnects)."""
         self.vehicle_states.pop(vehicle_id, None)
+
+    @staticmethod
+    def _priority_for(state: VehicleState) -> int:
+        """Return operational priority, keeping the YP clear of moving traffic."""
+        if state.vehicle_type == "yp":
+            return YP_PRIORITY
+        return MISSION_PRIORITY.get(state.mission_type, 0)
+
+    @staticmethod
+    def _is_yp_rtb_pair(state1: VehicleState, state2: VehicleState) -> bool:
+        """Return whether an active RTB vehicle is paired with the YP."""
+        return (
+            state1.vehicle_type == "yp" and state2.mission_type == "rtb"
+        ) or (
+            state2.vehicle_type == "yp" and state1.mission_type == "rtb"
+        )
     
     # ========== Private utility methods ==========
     

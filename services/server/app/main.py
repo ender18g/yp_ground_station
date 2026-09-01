@@ -2057,6 +2057,8 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         await _stop_rtb_follow(vehicle_id)
 
     if cmd_type == "rtb":
+        if vehicle_id in vehicles:
+            await _update_deconfliction_state(vehicle_id, vehicles[vehicle_id], command)
         await _start_rtb_follow(vehicle_id, source)
         await _emit_command_ack(vehicle_id, command, source)
         return

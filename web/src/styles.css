@@ -517,7 +517,8 @@ input {
 }
 
 .settings-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   margin-bottom: 12px;
   padding-bottom: 10px;
@@ -525,7 +526,7 @@ input {
 }
 
 .settings-tab {
-  flex: 1;
+  min-width: 0;
   padding: 5px 8px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -535,6 +536,30 @@ input {
   font-size: 12px;
   font-weight: 700;
   transition: background 0.15s, color 0.15s;
+}
+
+.deconfliction-radius-row {
+  margin: 0 0 8px 12px;
+}
+
+.settings-panel .deconfliction-radius-row label {
+  align-items: center;
+  gap: 8px;
+}
+
+.deconfliction-radius-row label span:first-child,
+.deconfliction-radius-row label span:last-child {
+  flex: 0 0 40px;
+}
+
+.deconfliction-radius-row label span:last-child {
+  text-align: right;
+}
+
+.settings-panel .deconfliction-radius-row input {
+  width: auto;
+  min-width: 0;
+  flex: 1;
 }
 
 .settings-tab.active {
