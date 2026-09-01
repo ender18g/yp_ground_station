@@ -39,6 +39,10 @@ from app.auth import (
     create_access_token, get_current_user, update_user_permissions, 
     update_user_password, verify_password, record_login, set_user_permissions
 )
+from app.settings import get_deconfliction_settings, update_deconfliction_settings
+
+# Import deconfliction module
+from app.deconfliction import DeconflictionEngine, MISSION_PRIORITY, DEFAULT_DECONFLICT_RADIUS_M
 
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
@@ -166,6 +170,10 @@ settings = {
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
+# Deconfliction engine for vehicle collision avoidance
+deconfliction_engine = DeconflictionEngine(enabled=False)
+_deconfliction_lock = asyncio.Lock()
+
 # Single persistent InfluxDB writer thread drains a bounded queue.
 # Replaces the old approach of spawning one daemon thread per write,
 # which created up to ~100 OS threads/second under normal load.
@@ -270,6 +278,15 @@ async def startup() -> None:
     global cleanup_task, delete_api, influx_client, tile_http_client, write_api
     # Initialize authentication database
     init_database()
+    
+    # Load deconfliction settings from database
+    db_settings = get_deconfliction_settings()
+    deconfliction_engine.set_enabled(db_settings.get("enabled", False))
+    deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
+    for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
+        deconfliction_engine.set_radius(vehicle_type, radius)
+    print(f"[DECONFLICTION] Initialized: enabled={deconfliction_engine.enabled}, global_radius={deconfliction_engine.global_radius_m}m")
+    
     TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
@@ -280,6 +297,9 @@ async def startup() -> None:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
     load_video_streams_from_env()
+    
+    # Start deconfliction check task
+    asyncio.create_task(_deconfliction_check_loop())
 
 
 @app.on_event("shutdown")
@@ -1151,6 +1171,55 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
     return JSONResponse({**settings, "yp_role_vehicle_id": _yp_role_vehicle_id})
 
 
+@app.get("/api/deconfliction/settings")
+async def get_deconfliction_settings_api() -> dict[str, Any]:
+    """Get current deconfliction settings."""
+    return get_deconfliction_settings()
+
+
+@app.put("/api/deconfliction/settings")
+async def update_deconfliction_settings_api(
+    payload: dict[str, Any],
+    authorization: Optional[str] = Header(default=None)
+) -> JSONResponse:
+    """Update deconfliction settings. Requires manage_settings permission."""
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
+    
+    success, message = update_deconfliction_settings(payload)
+    if success:
+        # Reload deconfliction engine settings
+        async with _deconfliction_lock:
+            db_settings = get_deconfliction_settings()
+            deconfliction_engine.set_enabled(db_settings.get("enabled", False))
+            deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
+            for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
+                deconfliction_engine.set_radius(vehicle_type, radius)
+        
+        return JSONResponse(db_settings)
+    else:
+        return JSONResponse({"error": message}, status_code=400)
+
+
+@app.get("/api/deconfliction/conflicts")
+async def get_deconfliction_conflicts() -> dict[str, Any]:
+    """Get current vehicle conflicts detected by deconfliction engine."""
+    async with _deconfliction_lock:
+        conflicts = deconfliction_engine.detect_conflicts()
+    
+    return {
+        "enabled": deconfliction_engine.enabled,
+        "conflicts": [
+            {
+                "low_priority_vehicle": c[0],
+                "high_priority_vehicle": c[1],
+            }
+            for c in conflicts
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # YP role assignment endpoints
 # ---------------------------------------------------------------------------
@@ -1872,6 +1941,15 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
                 shared_mission_completion_targets.pop(vehicle_id, None)
                 if shared_mission_plans.pop(vehicle_id, None) is not None:
                     mission_completed = True
+            
+            # Update deconfliction engine with position
+            if deconfliction_engine.enabled:
+                async with _deconfliction_lock:
+                    deconfliction_engine.update_vehicle(
+                        vehicle_id,
+                        vehicle.get("vehicle_type", "uav"),
+                        nav,
+                    )
 
         pose = extract_pose(topic, msg_type, msg)
         if pose:
@@ -1943,15 +2021,16 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         return
 
     cmd_type = command.get("type")
+    is_temporary_avoidance = source == "deconfliction"
 
     # A new operational task supersedes a previously published mission route.
     # Re-uploading a mission replaces it below with the new route instead.
-    if cmd_type != "mission_plan":
+    if not is_temporary_avoidance and cmd_type != "mission_plan":
         shared_mission_completion_targets.pop(vehicle_id, None)
         if shared_mission_plans.pop(vehicle_id, None) is not None:
             await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
 
-    if cmd_type == "waypoint":
+    if not is_temporary_avoidance and cmd_type == "waypoint":
         target = command.get("target", {})
         lat, lon = target.get("latitude"), target.get("longitude")
         if lat is not None and lon is not None:
@@ -1963,7 +2042,7 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
             shared_waypoints[vehicle_id] = waypoint
             await broadcast_ui({"op": "waypoint_overlay", "waypoint": waypoint})
 
-    if cmd_type in ("rtb", "cancel_sar", "waypoint"):
+    if not is_temporary_avoidance and cmd_type in ("rtb", "cancel_sar", "waypoint"):
         if shared_sar_patterns.pop(vehicle_id, None) is not None:
             await broadcast_ui({"op": "sar_pattern_cleared", "vehicle_id": vehicle_id})
 
@@ -2057,6 +2136,10 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
                 "vehicle_id": vehicle_id,
                 "waypoints": mission_points,
             })
+
+    # Update deconfliction engine with the command
+    if vehicle_id in vehicles and not is_temporary_avoidance:
+        await _update_deconfliction_state(vehicle_id, vehicles[vehicle_id], command)
 
     await _dispatch_vehicle_command(vehicle_id, command, source, emit_ack=True, write_log=True)
 
@@ -2254,6 +2337,81 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
         current_task = _rtb_follow_tasks.get(vehicle_id)
         if current_task is asyncio.current_task():
             _rtb_follow_tasks.pop(vehicle_id, None)
+
+
+async def _deconfliction_check_loop() -> None:
+    """Periodically check for vehicle conflicts and issue deconfliction commands."""
+    try:
+        while True:
+            await asyncio.sleep(0.5)  # Check every 0.5 seconds
+            await _check_vehicle_conflicts()
+    except asyncio.CancelledError:
+        return
+
+
+async def _check_vehicle_conflicts() -> None:
+    """Check for vehicle conflicts and issue deconfliction commands."""
+    if not deconfliction_engine.enabled:
+        return
+
+    async with _deconfliction_lock:
+        conflicts = deconfliction_engine.detect_conflicts()
+
+        conflicted_vehicle_ids = {low_priority_id for low_priority_id, _ in conflicts}
+        resume_commands = [
+            (vehicle_id, deconfliction_engine.end_avoidance(vehicle_id))
+            for vehicle_id in deconfliction_engine.active_avoidance_vehicle_ids() - conflicted_vehicle_ids
+        ]
+        avoidance_commands = []
+        for low_priority_id, high_priority_id in conflicts:
+            state_low = deconfliction_engine.vehicle_states.get(low_priority_id)
+            if not state_low or state_low.is_paused or not deconfliction_engine.begin_avoidance(low_priority_id):
+                continue
+            waypoint = deconfliction_engine.calculate_deconfliction_waypoint(low_priority_id, high_priority_id)
+            if waypoint:
+                avoidance_commands.append((low_priority_id, high_priority_id, waypoint))
+            else:
+                deconfliction_engine.end_avoidance(low_priority_id)
+
+    for vehicle_id, saved_command in resume_commands:
+        if saved_command:
+            await route_command(vehicle_id, saved_command, source="deconfliction_resume")
+            print(f"[DECONFLICTION] Resumed mission for {vehicle_id}")
+
+    for low_priority_id, high_priority_id, waypoint in avoidance_commands:
+        orbit_command = {
+            "type": "waypoint",
+            "target": {
+                "latitude": waypoint[0],
+                "longitude": waypoint[1],
+                "altitude": waypoint[2],
+            },
+            "_deconfliction": True,
+            "_conflict_with": high_priority_id,
+        }
+        await route_command(low_priority_id, orbit_command, source="deconfliction")
+        print(f"[DECONFLICTION] Issued avoidance waypoint to {low_priority_id} for {high_priority_id}")
+
+
+async def _update_deconfliction_state(vehicle_id: str, vehicle: dict[str, Any], command: dict[str, Any]) -> None:
+    """Update deconfliction engine with vehicle state after a command."""
+    cmd_type = command.get("type")
+    if cmd_type not in MISSION_PRIORITY:
+        return
+    
+    position = vehicle.get("position")
+    if not position or position.get("latitude") is None:
+        return
+    
+    async with _deconfliction_lock:
+        deconfliction_engine.update_vehicle(
+            vehicle_id,
+            vehicle.get("vehicle_type", "uav"),
+            position,
+            cmd_type,
+        )
+        # Save command for resume
+        deconfliction_engine.set_saved_command(vehicle_id, command)
 
 
 async def broadcast_ui(payload: dict[str, Any]) -> None:

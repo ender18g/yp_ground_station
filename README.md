@@ -7,9 +7,9 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 
 ## What Is Included
 
-- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, InfluxDB logging, and SQLite/JWT account authorization.
-- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, view-only mode, login, and admin user management.
-- `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution via embedded waypoints from the server.
+- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, automatic vehicle deconfliction, InfluxDB logging, and SQLite/JWT account authorization.
+- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, view-only mode, login, admin user management, and deconfliction settings.
+- `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution and temporary deconfliction waypoint detours from the server.
 - `sim-umaa`: Lightweight UMAA loopback vehicle for testing the ground-station workflow before real DDS topics are available. Publishes heartbeat, `NavSatFix`, `BatteryState`, and bridge-status messages, accepts waypoint/RTB/SAR commands, and simulates motion toward the received target.
 - `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
 - `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
@@ -169,6 +169,35 @@ docker compose up --build --scale sim-uav=10 --scale sim-usv=4 --scale sim-uuv=3
 ```
 
 Each simulator derives a unique ID from its container hostname unless `VEHICLE_ID` is explicitly set.
+
+## Vehicle Deconfliction
+
+The server can automatically separate vehicles whose reported three-dimensional positions conflict. Detection runs every 0.5 seconds and combines great-circle horizontal distance with altitude difference. A conflict occurs when the vehicles are closer than the sum of their individual safety radii. With the default 10 m UAV radius, two UAVs deconflict below 20 m separation.
+
+When a conflict occurs, the vehicle with lower mission priority is temporarily sent to an avoidance waypoint away from the higher-priority vehicle. Its original command is preserved and automatically re-dispatched after the conflict clears. This applies to the built-in `sim-` vehicles as well as bridge-connected vehicles that accept standard waypoint commands.
+
+Mission priority is:
+
+1. `mob`
+2. `search_grid`
+3. `mission_plan`
+4. `waypoint` and `rtb`
+
+Equal-priority conflicts use a deterministic ordering and divert one vehicle; operators should avoid scheduling overlapping equal-priority missions where possible.
+
+### Configuration
+
+An administrator can open **Settings** and select the **Deconfliction** tab, positioned between **Display** and **Man Overboard**, to enable the feature and set the global and per-vehicle safety radii. The default radii are 10 m for UAV/UAVF, 15 m for USV/UGV/UUV, and 20 m for the YP. Settings persist in the SQLite database alongside account data and are loaded when `yp-server` starts.
+
+The following API endpoints are also available:
+
+```http
+GET /api/deconfliction/settings
+PUT /api/deconfliction/settings
+GET /api/deconfliction/conflicts
+```
+
+Updating settings requires the `manage_settings` permission. The conflicts endpoint returns the currently detected lower-priority and higher-priority vehicle pairs.
 
 ## Web UI
 

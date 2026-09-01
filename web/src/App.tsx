@@ -32,7 +32,7 @@ import {
 import { useEffect, useMemo, useRef, useState, Suspense, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser } from "./api";
+import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
 import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
 import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
@@ -167,7 +167,18 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
   const [mobSwathM, setMobSwathM] = useState(20);
   const [mobAltM, setMobAltM] = useState(30);
-  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction">("display");
+  const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
+  const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
+  const [deconflictionRadii, setDeconflictionRadii] = useState<Record<string, number>>({
+    uav: 10.0,
+    usv: 15.0,
+    ugv: 15.0,
+    uuv: 15.0,
+    yp: 20.0,
+  });
+  const [deconflictionOrbitRadius, setDeconflictionOrbitRadius] = useState(50.0);
+  const [deconflictionMaxPause, setDeconflictionMaxPause] = useState(300.0);
   const [showSITL, setShowSITL] = useState(false);
   const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
@@ -461,6 +472,40 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     }, 350);
     return () => window.clearTimeout(timeout);
   }, [messageRetentionMinutes, rtbUpdateHz, settingsLoaded]);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    fetchDeconflictionSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setDeconflictionEnabled(settings.enabled);
+        setDeconflictionGlobalRadius(settings.global_radius_m);
+        if (settings.radius_per_type && Object.keys(settings.radius_per_type).length > 0) {
+          setDeconflictionRadii((current) => ({ ...current, ...settings.radius_per_type }));
+        }
+        setDeconflictionOrbitRadius(settings.orbit_radius_m);
+        setDeconflictionMaxPause(settings.max_pause_duration_s);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    const timeout = window.setTimeout(() => {
+      updateDeconflictionSettings({
+        enabled: deconflictionEnabled,
+        global_radius_m: deconflictionGlobalRadius,
+        radius_per_type: deconflictionRadii,
+        orbit_radius_m: deconflictionOrbitRadius,
+        max_pause_duration_s: deconflictionMaxPause,
+      }).catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [deconflictionEnabled, deconflictionGlobalRadius, deconflictionRadii, deconflictionOrbitRadius, deconflictionMaxPause]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -873,6 +918,12 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               Display
             </button>
             <button
+              className={settingsTab === "deconfliction" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("deconfliction")}
+            >
+              Deconfliction
+            </button>
+            <button
               className={settingsTab === "mob" ? "settings-tab active" : "settings-tab"}
               onClick={() => setSettingsTab("mob")}
             >
@@ -884,8 +935,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
             >
               Vessel
             </button>
-          </div>
-          {settingsTab === "display" && (
+          </div>          {settingsTab === "display" && (
             <>
               <label>
                 Trail window
@@ -908,6 +958,87 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 value={messageRetentionMinutes}
                 disabled={DEMO_MODE}
                 onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
+              />
+            </>
+          )}
+          {settingsTab === "deconfliction" && (
+            <>
+              <label className="setting-toggle">
+                <span>Enable vehicle deconfliction</span>
+                <input 
+                  type="checkbox" 
+                  checked={deconflictionEnabled} 
+                  onChange={(event) => setDeconflictionEnabled(event.target.checked)} 
+                />
+              </label>
+              <p className="settings-hint">
+                Automatically detect and resolve collisions between vehicles using mission priority hierarchy.
+                MOB missions have highest priority, followed by Search Grid, Mission Planner, and Waypoints.
+              </p>
+              
+              <label>
+                Global safety radius
+                <span>{deconflictionGlobalRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={1} 
+                max={50} 
+                step={0.5} 
+                type="range" 
+                value={deconflictionGlobalRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionGlobalRadius(Number(event.target.value))}
+              />
+              
+              <label>Radius per vehicle type</label>
+              {Object.entries(deconflictionRadii).map(([vehicleType, radius]) => (
+                <div key={vehicleType} style={{ marginLeft: "12px", marginBottom: "8px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span style={{ minWidth: "40px" }}>{vehicleType}</span>
+                    <input 
+                      min={1} 
+                      max={50} 
+                      step={0.5} 
+                      type="range" 
+                      value={radius}
+                      disabled={!deconflictionEnabled}
+                      onChange={(event) => setDeconflictionRadii((current) => ({ 
+                        ...current, 
+                        [vehicleType]: Number(event.target.value)
+                      }))}
+                      style={{ flex: 1 }}
+                    />
+                    <span style={{ minWidth: "40px", textAlign: "right" }}>{radius.toFixed(1)}m</span>
+                  </label>
+                </div>
+              ))}
+              
+              <label>
+                Orbit radius for avoidance
+                <span>{deconflictionOrbitRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={10} 
+                max={200} 
+                step={5} 
+                type="range" 
+                value={deconflictionOrbitRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionOrbitRadius(Number(event.target.value))}
+              />
+              
+              <label>
+                Max pause duration before warning
+                <span>{deconflictionMaxPause.toFixed(0)} s</span>
+              </label>
+              <input 
+                min={10} 
+                max={600} 
+                step={10} 
+                type="range" 
+                value={deconflictionMaxPause}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionMaxPause(Number(event.target.value))}
               />
             </>
           )}

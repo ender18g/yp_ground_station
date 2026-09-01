@@ -180,6 +180,49 @@ export async function updateSettings(settings: Pick<ServerSettings, "message_ret
   return response.json();
 }
 
+// ===== Deconfliction API =====
+
+export interface DeconflictionSettings {
+  id?: number;
+  enabled: boolean;
+  global_radius_m: number;
+  radius_per_type: Record<string, number>;
+  orbit_radius_m: number;
+  max_pause_duration_s: number;
+}
+
+export async function fetchDeconflictionSettings(): Promise<DeconflictionSettings> {
+  const response = await fetch("/api/deconfliction/settings", {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(`deconfliction settings fetch failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function updateDeconflictionSettings(settings: Partial<DeconflictionSettings>): Promise<DeconflictionSettings> {
+  const response = await fetch("/api/deconfliction/settings", {
+    method: "PUT",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(settings),
+  });
+  if (!response.ok) {
+    throw new Error(`deconfliction settings update failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchDeconflictionConflicts(): Promise<{ enabled: boolean; conflicts: Array<{ low_priority_vehicle: string; high_priority_vehicle: string }> }> {
+  const response = await fetch("/api/deconfliction/conflicts", {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(`deconfliction conflicts fetch failed: ${response.status}`);
+  }
+  return response.json();
+}
+
 /** Designate a vehicle as the YP (mother vessel), or pass null to clear. */
 export async function setYpRole(vehicleId: string | null): Promise<{ ok: boolean; vehicle_id: string | null }> {
   const response = await fetch("/api/yp/role", {
