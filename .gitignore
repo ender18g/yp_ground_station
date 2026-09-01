@@ -65,6 +65,10 @@ db.sqlite3-journal
 instance/
 .webassets-cache
 
+# Local authentication database
+data/auth/*.db
+data/auth/*.db-*
+
 # Scrapy stuff:
 .scrapy
 

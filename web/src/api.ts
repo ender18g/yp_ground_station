@@ -9,13 +9,159 @@ export interface ServerSettings {
   yp_role_vehicle_id?: string | null;
 }
 
-export function websocketUrl(path: string): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${path}`;
+// ===== Authentication helpers =====
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem("auth_token");
 }
 
+export function getUsername(): string | null {
+  return localStorage.getItem("username");
+}
+
+export function isAuthenticated(): boolean {
+  return !!getAuthToken();
+}
+
+export function logout(): void {
+  localStorage.removeItem("auth_token");
+  localStorage.removeItem("username");
+}
+
+export function getAuthHeaders(): HeadersInit {
+  const token = getAuthToken();
+  return token
+    ? {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      }
+    : { "Content-Type": "application/json" };
+}
+
+export function websocketUrl(path: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const token = getAuthToken();
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${protocol}//${window.location.host}${path}${tokenParam}`;
+}
+
+// ===== Authentication API =====
+
+export interface LoginResult {
+  ok: boolean;
+  access_token?: string;
+  token_type?: string;
+  user?: {
+    username: string;
+    permissions: string[];
+  };
+  error?: string;
+}
+
+export async function login(username: string, password: string): Promise<LoginResult> {
+  const response = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return response.json();
+}
+
+export interface CurrentUser {
+  username: string;
+  active: boolean;
+  permissions: string[];
+  created_at: string | null;
+  last_login: string | null;
+}
+
+export async function getCurrentUser(): Promise<CurrentUser | null> {
+  try {
+    const response = await fetch("/api/auth/me", {
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+export type PermissionLevel = "view_only" | "waypoint_command" | "mission_planning" | "man_overboard" | "admin";
+
+export interface ManagedUser {
+  username: string;
+  active: boolean;
+  permissions: string[];
+  created_at: string | null;
+  last_login: string | null;
+}
+
+async function authApiResponse(response: Response): Promise<void> {
+  if (response.ok) {
+    return;
+  }
+  const payload = await response.json().catch(() => ({}));
+  throw new Error(payload.error ?? `Request failed: ${response.status}`);
+}
+
+export async function listUsers(): Promise<ManagedUser[]> {
+  const response = await fetch("/api/auth/users", { headers: getAuthHeaders() });
+  await authApiResponse(response);
+  const payload = await response.json();
+  return payload.users ?? [];
+}
+
+export async function createUser(username: string, password: string, permissionLevel: PermissionLevel): Promise<void> {
+  const response = await fetch("/api/auth/users", {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ username, password, permission_level: permissionLevel }),
+  });
+  await authApiResponse(response);
+}
+
+export async function updateUserPermission(username: string, permissionLevel: PermissionLevel): Promise<void> {
+  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
+    method: "PUT",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ permission_level: permissionLevel }),
+  });
+  await authApiResponse(response);
+}
+
+export async function updateUserPermissions(username: string, permissions: string[]): Promise<void> {
+  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
+    method: "PUT",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ permissions }),
+  });
+  await authApiResponse(response);
+}
+
+export async function updateUserPassword(username: string, password: string): Promise<void> {
+  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/password`, {
+    method: "PUT",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ password }),
+  });
+  await authApiResponse(response);
+}
+
+export async function deleteUser(username: string): Promise<void> {
+  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
+  await authApiResponse(response);
+}
+
+// ===== Settings and configuration =====
+
 export async function fetchSettings(): Promise<ServerSettings> {
-  const response = await fetch("/api/settings");
+  const response = await fetch("/api/settings", {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) {
     throw new Error(`settings fetch failed: ${response.status}`);
   }
@@ -25,7 +171,7 @@ export async function fetchSettings(): Promise<ServerSettings> {
 export async function updateSettings(settings: Pick<ServerSettings, "message_retention_seconds"> | Pick<ServerSettings, "rtb_update_hz"> | Pick<ServerSettings, "message_retention_seconds" | "rtb_update_hz">): Promise<ServerSettings> {
   const response = await fetch("/api/settings", {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(settings),
   });
   if (!response.ok) {
@@ -38,7 +184,7 @@ export async function updateSettings(settings: Pick<ServerSettings, "message_ret
 export async function setYpRole(vehicleId: string | null): Promise<{ ok: boolean; vehicle_id: string | null }> {
   const response = await fetch("/api/yp/role", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ vehicle_id: vehicleId }),
   });
   if (!response.ok) {
@@ -75,7 +221,7 @@ export async function triggerMOB(vehicleId?: string, trackSeconds?: number, swat
   if (altM !== undefined) body.altitude_m = altM;
   const response = await fetch("/api/sar/mob", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -107,7 +253,9 @@ export interface ConnectSITLResult {
 }
 
 export async function listSITLBridges(): Promise<SITLBridge[]> {
-  const response = await fetch("/api/sitl");
+  const response = await fetch("/api/sitl", {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) return [];
   const data = await response.json();
   return data.bridges ?? [];
@@ -118,7 +266,7 @@ export async function connectSITL(url: string, vehicleId?: string): Promise<Conn
   if (vehicleId) body.vehicle_id = vehicleId;
   const response = await fetch("/api/sitl", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
@@ -127,7 +275,10 @@ export async function connectSITL(url: string, vehicleId?: string): Promise<Conn
 }
 
 export async function disconnectSITL(vehicleId: string): Promise<void> {
-  await fetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, { method: "DELETE" });
+  await fetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +292,9 @@ export interface SerialPortInfo {
 }
 
 export async function listSerialPorts(): Promise<SerialPortInfo[]> {
-  const response = await fetch("/api/serial-ports");
+  const response = await fetch("/api/serial-ports", {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) return [];
   const data = await response.json();
   return data.ports ?? [];

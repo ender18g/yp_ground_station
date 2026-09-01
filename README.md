@@ -1,4 +1,4 @@
-l# TRIDENT YP
+# TRIDENT YP
 ### Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol
 
 ![TRIDENT YP screenshot](screenshots/screen1.png)
@@ -7,8 +7,8 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 
 ## What Is Included
 
-- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, and InfluxDB logging.
-- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, and view-only mode.
+- `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, InfluxDB logging, and SQLite/JWT account authorization.
+- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, view-only mode, login, and admin user management.
 - `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution via embedded waypoints from the server.
 - `sim-umaa`: Lightweight UMAA loopback vehicle for testing the ground-station workflow before real DDS topics are available. Publishes heartbeat, `NavSatFix`, `BatteryState`, and bridge-status messages, accepts waypoint/RTB/SAR commands, and simulates motion toward the received target.
 - `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
@@ -36,6 +36,52 @@ Then open:
 - InfluxDB: `http://localhost:8086`
 
 The default compose file starts two simulated UAVs, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
+
+## Accounts And Permissions
+
+The web UI requires a username and password. On the first server startup, it creates a default administrator account:
+
+```text
+Username: admin
+Password: admin
+```
+
+Change this password immediately after first login. The default credentials are for initial local setup only and must not be used on a reachable or operational network.
+
+Administrators can open **User Management** from the users icon in the top bar. The icon is visible only to accounts with the `manage_users` permission. The panel can create and delete accounts, reset passwords, apply a role preset, and save a custom combination of individual permissions.
+
+### Role Presets
+
+| Role | Capabilities |
+| --- | --- |
+| `view_only` | Read telemetry and vehicle status |
+| `waypoint_command` | View permissions plus waypoints, RTB, mode changes, and SAR cancellation |
+| `mission_planning` | Waypoint permissions plus mission creation, upload, and search grids |
+| `man_overboard` | Mission planning permissions plus MOB dispatch |
+| `admin` | All operational permissions plus settings, connections, video stream, and user management |
+
+Custom permission sets can combine any of the following permissions: `read_telemetry`, `read_vehicle_status`, `send_waypoint`, `send_rtb`, `set_vehicle_mode`, `cancel_sar`, `create_mission`, `upload_mission`, `search_grid`, `trigger_mob`, `manage_sitl`, `manage_settings`, `manage_video_streams`, and `manage_users`.
+
+The server enforces permissions on protected REST endpoints and commands received through the UI WebSocket; hiding an action in the UI is not the authorization mechanism.
+
+### Account Persistence
+
+The default Compose configuration stores accounts in SQLite at [data/auth/auth.db](data/auth/auth.db) on the host, mounted as `/data/auth/auth.db` in `yp-server`. Accounts therefore persist across `docker compose up --build`, container recreation, and `docker compose down` followed by another `docker compose up`.
+
+The database contains account metadata and password hashes. Keep it local and back it up when needed; it is excluded from Git. Deleting `data/auth/auth.db` deliberately resets the account store and causes the server to create the initial `admin` / `admin` account again.
+
+The default mount is configured in `docker-compose.yml`:
+
+```yaml
+services:
+  yp-server:
+    environment:
+      AUTH_DB_PATH: /data/auth/auth.db
+    volumes:
+      - ./data/auth:/data/auth
+```
+
+Set a unique `JWT_SECRET` for any non-development deployment.
 
 ## UMAA Bridge
 
@@ -625,6 +671,9 @@ Useful environment variables:
 | `yp-server` | `INFLUX_ORG` | `yp` | InfluxDB org |
 | `yp-server` | `INFLUX_BUCKET` | `telemetry` | InfluxDB bucket |
 | `yp-server` | `INFLUX_TOKEN` | `yp-dev-token` | InfluxDB token |
+| `yp-server` | `AUTH_DB_PATH` | `/data/auth/auth.db` in Compose | SQLite account database path; host-mounted at `data/auth/` by default |
+| `yp-server` | `JWT_SECRET` | `yp-dev-secret-change-me` | JWT signing secret; set a unique long random value for any non-development deployment |
+| `yp-server` | `JWT_EXPIRATION_MINUTES` | `1440` | JWT session lifetime in minutes |
 | `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent on-demand map tile cache |
 | `yp-server` | `OSM_TILE_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Street tile source URL template |
 | `yp-server` | `EARTH_TILE_URL` | `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` | Satellite tile source URL template |
@@ -689,6 +738,6 @@ npm run dev
 - Keep vehicle IDs stable and unique.
 - Prefer one WebSocket per vehicle.
 - Use the native WebSocket first for the smallest moving part count.
-- Add authentication before putting this on anything other than a trusted local shipboard network.
+- Set a strong `JWT_SECRET` and use unique administrator credentials before putting this on anything other than a trusted local shipboard network.
 - Validate waypoint commands on the vehicle side before forwarding to the Cube/Pixhawk.
 - Keep a manual RC/safety pilot path independent of the web UI.
