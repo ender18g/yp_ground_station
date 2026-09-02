@@ -38,10 +38,3 @@ c. Run bridge script: python arducopter_bridge_wServer.py
 
 
 6. Before flight, check that BCS has aircraft registered and that video feed  can be seen
-
-
-
-
-
-
-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
