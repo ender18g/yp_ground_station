@@ -80,7 +80,7 @@ SAR_ALTITUDE_M = float(os.getenv("SAR_ALTITUDE_M", "30.0"))
 SAR_MOB_TRACK_SECONDS = float(os.getenv("SAR_MOB_TRACK_SECONDS", "120.0"))
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
-RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "35.0"))
+RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ARRIVAL_RADIUS_M = float(os.getenv("RTB_ARRIVAL_RADIUS_M", "15.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
@@ -2474,7 +2474,7 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                     stable_arrival_hits = 0
                 if stable_arrival_hits >= 3:
                     print(f"[RTB] {vehicle_id} reached return-to-boat radius ({dist_m:.1f}m)")
-                    return
+                    #return # comment out return statement so vehicle keeps tracking point
 
             await asyncio.sleep(period_s)
     except asyncio.CancelledError:
