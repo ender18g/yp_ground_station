@@ -205,7 +205,7 @@ class LoopbackUmaaAdapter(UmaaAdapter):
 
     async def send_command(self, command: dict[str, Any], source: str | None = None) -> None:
         cmd_type = str(command.get("type") or "")
-        if cmd_type == "waypoint":
+        if cmd_type in {"waypoint", "rtb_follow"}:
             target = command.get("target") or {}
             self._mission_queue = []
             self._target = {

@@ -185,6 +185,10 @@ Mission priority is:
 
 Equal-priority conflicts use a deterministic ordering and divert one vehicle; operators should avoid scheduling overlapping equal-priority missions where possible.
 
+### RTB Stern Follow
+
+RTB is a persistent stern-follow mode. The server continuously computes a moving target directly aft of the YP's current heading and sends updated waypoint setpoints at the configured RTB update rate. Vehicles approaching from the bow or beam are first routed outside the combined safety envelope, around an aft quarter, and then into the stern station; they do not take a direct path across the YP. RTB remains active until the vehicle is retasked or the RTB-follow task is canceled.
+
 ### Configuration
 
 An administrator can open **Settings** and select the **Deconfliction** tab, positioned between **Display** and **Man Overboard**, to enable the feature and set the global and per-vehicle safety radii. The default radii are 10 m for UAV/UAVF, 15 m for USV/UGV/UUV, and 20 m for the YP. Settings persist in the SQLite database alongside account data and are loaded when `yp-server` starts.
@@ -198,6 +202,8 @@ GET /api/deconfliction/conflicts
 ```
 
 Updating settings requires the `manage_settings` permission. The conflicts endpoint returns the currently detected lower-priority and higher-priority vehicle pairs.
+
+The Settings modal persists its Display, Vessel, and Man Overboard controls in the SQLite database. This includes trail duration, YP range rings, message retention, RTB update rate, stern distance, YP role, MOB track length, corridor width, swath width, search altitude, takeoff altitude, and climb speed. These values are loaded when the server starts and can also be read or updated through `GET` and `PUT /api/settings`.
 
 ## Web UI
 
@@ -319,7 +325,7 @@ DEL  /api/sitl/{vehicle_id}         → close and remove a bridge
 
 For `search_grid` and `mob`, the bridge now executes missions in streaming mode (one waypoint at a time) instead of full mission upload. During streaming, the mission worker keeps forwarding position telemetry so vehicle updates and map motion remain live.
 
-For `rtb`, the server does not send a one-shot RTL command. It computes a dynamic stern target behind the selected YP vessel and pushes periodic waypoint updates until the vehicle settles inside the configured arrival radius.
+For `rtb`, the server does not send a one-shot RTL command. It continuously computes a dynamic stern target behind the selected YP vessel and pushes updates until RTB is canceled or the vehicle is retasked. Built-in `sim-*` vehicles and MAVLink bridges use a dedicated follow mode after the aft approach, matching the YP's estimated speed and heading with bounded position correction instead of chasing the moving stern point. The UMAA loopback accepts the command through its waypoint fallback; the real UMAA DDS adapter remains a command-schema placeholder until its vehicle-specific DDS types are integrated.
 
 For `set_mode`, the vehicle modal's Settings button expands to show a grid of available modes for the vehicle type. Supported modes are:
 
@@ -510,7 +516,7 @@ RTB sends:
 { "type": "rtb" }
 ```
 
-On the server, this command starts return-to-boat follow mode for that vehicle. The server continuously emits waypoint commands (`source="rtb_follow"`) toward a stern offset from the current YP vessel at `rtb_update_hz` until arrival.
+On the server, this command starts return-to-boat follow mode for that vehicle. The server continuously emits RTB updates (`source="rtb_follow"`) toward a stern offset from the current YP vessel at `rtb_update_hz` until RTB is canceled or the vehicle is retasked.
 
 Bridge implementations treat `source="rtb_follow"` as a lightweight stream and skip repeated mode/arm transitions so telemetry remains responsive while tracking the moving stern target.
 
@@ -717,7 +723,6 @@ Useful environment variables:
 | `yp-server` | `SAR_CLIMB_SPEED_MS` | `8.0` | SAR climb speed in m/s |
 | `yp-server` | `RTB_STERN_DISTANCE_M` | `35.0` | Distance behind YP heading used as RTB-follow target |
 | `yp-server` | `RTB_UPDATE_HZ` | `2.0` | Default RTB-follow waypoint update rate |
-| `yp-server` | `RTB_ARRIVAL_RADIUS_M` | `15.0` | Radius for considering RTB-follow complete |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
 | `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |

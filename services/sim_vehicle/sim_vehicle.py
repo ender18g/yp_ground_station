@@ -40,6 +40,8 @@ class VehicleSim:
         self.last_step = time.time()
         self.mission_waypoints: list[dict[str, float]] = []
         self.mission_complete_pending = False
+        self.rtb_follow_heading: float | None = None
+        self.rtb_follow_speed_mps: float | None = None
 
     def random_target(self) -> dict[str, float]:
         return {
@@ -55,9 +57,22 @@ class VehicleSim:
             self.mode = "rtb"
             self.mission_waypoints = []
             self.target = {"latitude": HOME_LAT, "longitude": HOME_LON, "altitude": HOME_ALT}
+        elif command_type == "rtb_follow":
+            self.mode = "rtb_follow"
+            self.mission_waypoints = []
+            target = command_body.get("target", {})
+            self.target = {
+                "latitude": float(target.get("latitude", self.lat)),
+                "longitude": float(target.get("longitude", self.lon)),
+                "altitude": float(target.get("altitude", self.alt)),
+            }
+            self.rtb_follow_heading = float(command_body.get("heading", self.heading)) % 360.0
+            self.rtb_follow_speed_mps = max(0.0, float(command_body.get("speed_mps", SPEED_MPS)))
         elif command_type == "waypoint":
             self.mode = "waypoint"
             self.mission_waypoints = []
+            self.rtb_follow_heading = None
+            self.rtb_follow_speed_mps = None
             target = command_body.get("target", {})
             self.target = {
                 "latitude": float(target.get("latitude", self.lat)),
@@ -66,7 +81,11 @@ class VehicleSim:
             }
         elif command_type == "trajectory":
             self.mode = "trajectory"
+            self.rtb_follow_heading = None
+            self.rtb_follow_speed_mps = None
         elif command_type in ("search_grid", "mob"):
+            self.rtb_follow_heading = None
+            self.rtb_follow_speed_mps = None
             # Server embeds pre-computed waypoints as [[lat, lon, alt], ...]
             sim_wps = command_body.get("sim_waypoints", [])
             if sim_wps:
@@ -77,6 +96,8 @@ class VehicleSim:
                 self.mode = "sar_mission"
                 self.target = self.mission_waypoints.pop(0)
         elif command_type == "mission_plan":
+            self.rtb_follow_heading = None
+            self.rtb_follow_speed_mps = None
             mission_wps = command_body.get("waypoints", [])
             parsed = []
             for wp in mission_wps:
@@ -108,6 +129,8 @@ class VehicleSim:
         if distance < max(4.0, SPEED_MPS * dt * 2.0):
             if self.mode == "rtb":
                 self.mode = "hold"
+            elif self.mode == "rtb_follow":
+                pass
             elif self.mode in ("sar_mission", "mission_plan"):
                 if self.mission_waypoints:
                     self.target = self.mission_waypoints.pop(0)
@@ -121,9 +144,30 @@ class VehicleSim:
                 self.mode = "loiter"
             return
 
-        bearing = bearing_deg(self.lat, self.lon, self.target["latitude"], self.target["longitude"])
-        self.heading = smooth_angle(self.heading, bearing, min(1.0, dt * 1.8))
-        travel = min(distance, SPEED_MPS * dt)
+        if self.mode == "rtb_follow" and self.rtb_follow_heading is not None:
+            # Station keeping combines the YP velocity with a small position
+            # correction. It never caps travel at the moving target, avoiding
+            # the overshoot-and-correct oscillation caused by point chasing.
+            target_heading = self.rtb_follow_heading
+            target_speed = self.rtb_follow_speed_mps or 0.0
+            target_bearing = bearing_deg(self.lat, self.lon, self.target["latitude"], self.target["longitude"])
+            correction_speed = min(2.0, distance * 0.12)
+            correction_bearing = target_bearing
+            correction_north = math.cos(math.radians(correction_bearing)) * correction_speed
+            correction_east = math.sin(math.radians(correction_bearing)) * correction_speed
+            base_north = target_speed * math.cos(math.radians(target_heading))
+            base_east = target_speed * math.sin(math.radians(target_heading))
+            desired_north = base_north + correction_north
+            desired_east = base_east + correction_east
+            desired_speed = math.hypot(desired_north, desired_east)
+            if desired_speed > 0.01:
+                desired_heading = math.degrees(math.atan2(desired_east, desired_north)) % 360.0
+                self.heading = smooth_angle(self.heading, desired_heading, min(1.0, dt * 2.5))
+            travel = min(desired_speed, SPEED_MPS * 1.5) * dt
+        else:
+            bearing = bearing_deg(self.lat, self.lon, self.target["latitude"], self.target["longitude"])
+            self.heading = smooth_angle(self.heading, bearing, min(1.0, dt * 1.8))
+            travel = min(distance, SPEED_MPS * dt)
         self.lat, self.lon = destination_point(self.lat, self.lon, self.heading, travel)
 
         desired_alt = self.target.get("altitude", HOME_ALT)

@@ -155,6 +155,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
   const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
+  const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -167,6 +168,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
   const [mobSwathM, setMobSwathM] = useState(20);
   const [mobAltM, setMobAltM] = useState(30);
+  const [mobCorridorHalfWidthM, setMobCorridorHalfWidthM] = useState(50);
+  const [mobTakeoffAltitudeM, setMobTakeoffAltitudeM] = useState(30);
+  const [mobClimbSpeedMs, setMobClimbSpeedMs] = useState(8);
   const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction">("display");
   const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
   const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
@@ -449,11 +453,38 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     fetchSettings()
       .then((serverSettings) => {
         if (cancelled) return;
+        if (typeof serverSettings.trail_seconds === "number") {
+          setTrailSeconds(serverSettings.trail_seconds);
+        }
+        if (typeof serverSettings.show_yp_range_rings === "boolean") {
+          setShowYpRangeRings(serverSettings.show_yp_range_rings);
+        }
         setMessageRetentionMinutes(Math.round(serverSettings.message_retention_seconds / 60));
         if (typeof serverSettings.rtb_update_hz === "number") {
           setRtbUpdateHz(serverSettings.rtb_update_hz);
         }
+        if (typeof serverSettings.rtb_stern_distance_m === "number") {
+          setRtbSternDistanceM(serverSettings.rtb_stern_distance_m);
+        }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
+        if (typeof serverSettings.mob_track_seconds === "number") {
+          setMobTrackSeconds(serverSettings.mob_track_seconds);
+        }
+        if (typeof serverSettings.mob_swath_m === "number") {
+          setMobSwathM(serverSettings.mob_swath_m);
+        }
+        if (typeof serverSettings.mob_altitude_m === "number") {
+          setMobAltM(serverSettings.mob_altitude_m);
+        }
+        if (typeof serverSettings.mob_corridor_half_width_m === "number") {
+          setMobCorridorHalfWidthM(serverSettings.mob_corridor_half_width_m);
+        }
+        if (typeof serverSettings.mob_takeoff_altitude_m === "number") {
+          setMobTakeoffAltitudeM(serverSettings.mob_takeoff_altitude_m);
+        }
+        if (typeof serverSettings.mob_climb_speed_ms === "number") {
+          setMobClimbSpeedMs(serverSettings.mob_climb_speed_ms);
+        }
         setSettingsLoaded(true);
       })
       .catch(() => setSettingsLoaded(true));
@@ -466,12 +497,22 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     if (DEMO_MODE || !settingsLoaded) return;
     const timeout = window.setTimeout(() => {
       updateSettings({
+        trail_seconds: trailSeconds,
+        show_yp_range_rings: showYpRangeRings,
         message_retention_seconds: messageRetentionMinutes * 60,
         rtb_update_hz: rtbUpdateHz,
+        rtb_stern_distance_m: rtbSternDistanceM,
+        mob_track_seconds: mobTrackSeconds,
+        mob_swath_m: mobSwathM,
+        mob_altitude_m: mobAltM,
+        mob_corridor_half_width_m: mobCorridorHalfWidthM,
+        mob_takeoff_altitude_m: mobTakeoffAltitudeM,
+        mob_climb_speed_ms: mobClimbSpeedMs,
+        yp_role_vehicle_id: ypRoleVehicleId,
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [messageRetentionMinutes, rtbUpdateHz, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -590,7 +631,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     setMobSending(true);
     setMobError(null);
     try {
-      const result = await triggerMOB(mobVehicleId || undefined, mobTrackSeconds, mobSwathM, mobAltM);
+      const result = await triggerMOB(mobVehicleId || undefined, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs);
       const vehicleId = result.vehicle_id ?? "unknown";
 
       const mobMessage: StreamMessage = {
@@ -1079,6 +1120,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 disabled={DEMO_MODE}
                 onChange={(event) => setRtbUpdateHz(Number(event.target.value))}
               />
+              <label>
+                RTB stern distance
+                <span>{rtbSternDistanceM} m</span>
+              </label>
+              <input min={5} max={200} step={5} type="range" value={rtbSternDistanceM} disabled={DEMO_MODE} onChange={(event) => setRtbSternDistanceM(Number(event.target.value))} />
             </>
           )}
           {settingsTab === "mob" && (
@@ -1098,6 +1144,21 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 <span>{mobAltM} m</span>
               </label>
               <input min={5} max={120} step={5} type="range" value={mobAltM} onChange={(e) => setMobAltM(Number(e.target.value))} />
+              <label>
+                Search corridor half-width
+                <span>{mobCorridorHalfWidthM} m</span>
+              </label>
+              <input min={10} max={200} step={5} type="range" value={mobCorridorHalfWidthM} onChange={(e) => setMobCorridorHalfWidthM(Number(e.target.value))} />
+              <label>
+                Takeoff altitude
+                <span>{mobTakeoffAltitudeM} m</span>
+              </label>
+              <input min={5} max={120} step={5} type="range" value={mobTakeoffAltitudeM} onChange={(e) => setMobTakeoffAltitudeM(Number(e.target.value))} />
+              <label>
+                Climb speed
+                <span>{mobClimbSpeedMs.toFixed(1)} m/s</span>
+              </label>
+              <input min={0.5} max={20} step={0.5} type="range" value={mobClimbSpeedMs} onChange={(e) => setMobClimbSpeedMs(Number(e.target.value))} />
             </>
           )}
         </div>

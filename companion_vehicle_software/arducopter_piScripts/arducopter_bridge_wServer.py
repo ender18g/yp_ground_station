@@ -417,6 +417,15 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     if force_guided: master.set_mode('GUIDED')
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
 
+
+def follow_yp_velocity(master, command_data: dict) -> None:
+    """Stream a YP-relative velocity and heading while holding the aft target."""
+    target = command_data.get("target", {})
+    lat, lon = target.get("latitude"), target.get("longitude")
+    if lat is None or lon is None:
+        return
+    master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
+
 # --- SAR MISSIONS THREAD TARGETS ---
 
 def _run_search_grid(master, lat: float, lon: float, grid_size_m: float, swath_m: float, altitude_m: float) -> None:
@@ -501,7 +510,9 @@ async def telemetry_loop(current_config: dict) -> None:
                             command_data = server_msg.get("command", {})
                             cmd_type = command_data.get("type")
 
-                            if cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
+                            if cmd_type == "rtb_follow":
+                                follow_yp_velocity(master, command_data)
+                            elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
                                 goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
