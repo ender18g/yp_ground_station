@@ -2343,12 +2343,14 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
 
 async def _deconfliction_check_loop() -> None:
     """Periodically check for vehicle conflicts and issue deconfliction commands."""
-    try:
-        while True:
+    while True:
+        try:
             await asyncio.sleep(0.5)  # Check every 0.5 seconds
             await _check_vehicle_conflicts()
-    except asyncio.CancelledError:
-        return
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            print(f"[DECONFLICTION] Check failed: {error}")
 
 
 async def _check_vehicle_conflicts() -> None:
