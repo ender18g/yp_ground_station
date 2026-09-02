@@ -157,8 +157,14 @@ HTML_TEMPLATE = """
         <label>Vehicle ID</label>
         <input type="text" name="vehicle_id" value="{vehicle_id}" required>
 
-        <label>MAVLink URL (Serial Port)</label>
-        <input type="text" name="mavlink_url" value="{mavlink_url}" required>
+        <label>MAVLink URL (Connection)</label>
+        <select id="mavlink_url_select" name="mavlink_url_select" onchange="toggleCustomUrl()">
+            <option value="/dev/serial0" {s_serial0}>/dev/serial0 (Pi GPIO)</option>
+            <option value="/dev/ttyACM0" {s_acm0}>/dev/ttyACM0 (USB Flight Controller)</option>
+            <option value="/dev/ttyUSB0" {s_usb0}>/dev/ttyUSB0 (USB Telemetry Radio)</option>
+            <option value="custom" {s_custom}>Custom IP / Other...</option>
+        </select>
+        <input type="text" id="mavlink_url_custom" name="mavlink_url_custom" value="{mavlink_url_custom}" style="display: {custom_display}; margin-top: 8px;" placeholder="e.g. tcp:192.168.1.50:5760">
 
         <label>Baud Rate</label>
         <select name="mavlink_baud">
@@ -175,6 +181,19 @@ HTML_TEMPLATE = """
     </form>
 
     <script>
+        function toggleCustomUrl() {{
+            const select = document.getElementById('mavlink_url_select');
+            const customInput = document.getElementById('mavlink_url_custom');
+            if (select.value === 'custom') {{
+                customInput.style.display = 'block';
+                customInput.required = true;
+            }} else {{
+                customInput.style.display = 'none';
+                customInput.required = false;
+            }}
+        }}
+        window.addEventListener('DOMContentLoaded', toggleCustomUrl);
+
         async function fetchStatus() {{
             try {{
                 const res = await fetch('/api/status');
@@ -202,10 +221,19 @@ HTML_TEMPLATE = """
 """
 
 async def handle_index(request):
+    url = config["mavlink_url"]
+    known_ports = ["/dev/serial0", "/dev/ttyACM0", "/dev/ttyUSB0"]
+    is_custom = url not in known_ports
+
     html = HTML_TEMPLATE.format(
         server_ws_url=config["server_ws_url"],
         vehicle_id=config["vehicle_id"],
-        mavlink_url=config["mavlink_url"],
+        s_serial0="selected" if url == "/dev/serial0" else "",
+        s_acm0="selected" if url == "/dev/ttyACM0" else "",
+        s_usb0="selected" if url == "/dev/ttyUSB0" else "",
+        s_custom="selected" if is_custom else "",
+        mavlink_url_custom=url if is_custom else "",
+        custom_display="block" if is_custom else "none",
         send_hz=config["send_hz"],
         b921600="selected" if config["mavlink_baud"] == 921600 else "",
         b115200="selected" if config["mavlink_baud"] == 115200 else "",
@@ -223,9 +251,15 @@ async def handle_status_api(request):
 async def handle_save(request):
     data = await request.post()
     global config
+    
+    url_select = data.get("mavlink_url_select")
+    if url_select == "custom":
+        config["mavlink_url"] = data.get("mavlink_url_custom", "").strip()
+    elif url_select:
+        config["mavlink_url"] = url_select.strip()
+        
     config["server_ws_url"] = data.get("server_ws_url", config["server_ws_url"]).strip()
     config["vehicle_id"] = data.get("vehicle_id", config["vehicle_id"]).strip()
-    config["mavlink_url"] = data.get("mavlink_url", config["mavlink_url"]).strip()
     config["mavlink_baud"] = int(data.get("mavlink_baud", config["mavlink_baud"]))
     config["send_hz"] = float(data.get("send_hz", config["send_hz"]))
 
@@ -408,7 +442,9 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
             master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111000000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, float(ship_state.get("vn_ms") or 0.0), float(ship_state.get("ve_ms") or 0.0), 0.0, 0, 0, 0, 0, 0)
             alt_condition_met = True if VEHICLE_TYPE in ["usv", "ugv"] else abs(float(vehicle_state["alt"]) - target_alt) <= max(2.0, arrival_radius_m * 0.5)
             if _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon) <= arrival_radius_m and alt_condition_met:
-                break
+                # Only break if there are more waypoints in the sequence
+                if index < len(local_waypoints):
+                    break
             time.sleep(update_period_s)
         if stop_event.is_set(): return
 
@@ -416,6 +452,15 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
     if force_guided: master.set_mode('GUIDED')
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def follow_yp_velocity(master, command_data: dict) -> None:
+    """Stream a YP-relative velocity and heading while holding the aft target."""
+    target = command_data.get("target", {})
+    lat, lon = target.get("latitude"), target.get("longitude")
+    if lat is None or lon is None:
+        return
+    master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
 
 # --- SAR MISSIONS THREAD TARGETS ---
 
@@ -471,7 +516,14 @@ async def telemetry_loop(current_config: dict) -> None:
 
     try:
         master = mavutil.mavlink_connection(mavlink_url, baud=mavlink_baud)
-        msg = master.wait_heartbeat()
+        
+        # Non-blocking heartbeat loop
+        msg = None
+        while not msg:
+            msg = master.recv_match(type='HEARTBEAT', blocking=False)
+            if not msg:
+                await asyncio.sleep(0.5)
+                
         system_status["cube_connected"] = True
         system_status["cube_status"] = "Connected"
         system_status["last_hb_time"] = time.time()
@@ -501,7 +553,9 @@ async def telemetry_loop(current_config: dict) -> None:
                             command_data = server_msg.get("command", {})
                             cmd_type = command_data.get("type")
 
-                            if cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
+                            if cmd_type == "rtb_follow":
+                                follow_yp_velocity(master, command_data)
+                            elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
                                 goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
@@ -523,6 +577,10 @@ async def telemetry_loop(current_config: dict) -> None:
                     msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
                
                 now = time.time()
+                if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
+                    print("\n[WARNING] Heartbeat timeout or socket dead. Forcing reconnect...")
+                    reconnect_event.set()
+                    break
                 telemetry_sample = None
                 if msg is not None:
                     msg_type = msg.get_type()

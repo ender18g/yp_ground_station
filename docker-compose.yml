@@ -129,8 +129,8 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
       VEHICLE_ID: sim-uav2
-      HOME_LAT: "38.985631"
-      HOME_LON: "-76.506091"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "45.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"

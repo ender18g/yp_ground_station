@@ -6,7 +6,16 @@ export interface ServerSettings {
   influx_max_write_hz: number;
   tile_max_cache_age_seconds: number;
   rtb_update_hz?: number;
+  rtb_stern_distance_m?: number;
   yp_role_vehicle_id?: string | null;
+  trail_seconds?: number;
+  show_yp_range_rings?: boolean;
+  mob_track_seconds?: number;
+  mob_swath_m?: number;
+  mob_altitude_m?: number;
+  mob_corridor_half_width_m?: number;
+  mob_takeoff_altitude_m?: number;
+  mob_climb_speed_ms?: number;
 }
 
 // ===== Authentication helpers =====
@@ -168,7 +177,7 @@ export async function fetchSettings(): Promise<ServerSettings> {
   return response.json();
 }
 
-export async function updateSettings(settings: Pick<ServerSettings, "message_retention_seconds"> | Pick<ServerSettings, "rtb_update_hz"> | Pick<ServerSettings, "message_retention_seconds" | "rtb_update_hz">): Promise<ServerSettings> {
+export async function updateSettings(settings: Partial<ServerSettings>): Promise<ServerSettings> {
   const response = await fetch("/api/settings", {
     method: "PUT",
     headers: getAuthHeaders(),
@@ -256,12 +265,15 @@ export interface MobResult {
 }
 
 /** Trigger a Man Overboard search via the server's SAR endpoint. */
-export async function triggerMOB(vehicleId?: string, trackSeconds?: number, swathM?: number, altM?: number): Promise<MobResult> {
+export async function triggerMOB(vehicleId?: string, trackSeconds?: number, swathM?: number, altM?: number, corridorHalfWidthM?: number, takeoffAltitudeM?: number, climbSpeedMs?: number): Promise<MobResult> {
   const body: Record<string, unknown> = {};
   if (vehicleId) body.vehicle_id = vehicleId;
   if (trackSeconds !== undefined) body.track_seconds = trackSeconds;
   if (swathM !== undefined) body.swath_m = swathM;
   if (altM !== undefined) body.altitude_m = altM;
+  if (corridorHalfWidthM !== undefined) body.corridor_half_width_m = corridorHalfWidthM;
+  if (takeoffAltitudeM !== undefined) body.takeoff_altitude_m = takeoffAltitudeM;
+  if (climbSpeedMs !== undefined) body.climb_speed_ms = climbSpeedMs;
   const response = await fetch("/api/sar/mob", {
     method: "POST",
     headers: getAuthHeaders(),

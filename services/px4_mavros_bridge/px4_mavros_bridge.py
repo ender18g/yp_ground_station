@@ -111,6 +111,8 @@ class Bridge:
                 continue
             if command.get("type") == "waypoint":
                 await self.handle_waypoint(command)
+            elif command.get("type") == "rtb_follow":
+                await self.handle_rtb_follow(command)
             elif command.get("type") == "rtb":
                 await self.call_service("/mavros/set_mode", "mavros_msgs/SetMode", {"base_mode": 0, "custom_mode": "AUTO.RTL"})
             elif command.get("type") == "mission_plan":
@@ -120,11 +122,30 @@ class Bridge:
 
     async def handle_waypoint(self, command: dict[str, Any]) -> None:
         target = command.get("target") or {}
+        self.active_velocity = None
         self.active_waypoint = {
             "latitude": float(target["latitude"]),
             "longitude": float(target["longitude"]),
             "altitude": float(target.get("altitude", 45.0)),
         }
+        await self.publish_setpoint_once()
+        if AUTO_ARM_OFFBOARD:
+            asyncio.create_task(self.enter_offboard_after_setpoints())
+
+    async def handle_rtb_follow(self, command: dict[str, Any]) -> None:
+        """Publish a moving stern target with YP velocity and heading."""
+        target = command.get("target") or {}
+        self.active_waypoint = {
+            "latitude": float(target["latitude"]),
+            "longitude": float(target["longitude"]),
+            "altitude": float(target.get("altitude", 45.0)),
+        }
+        self.active_velocity = {
+            "x": float(command.get("velocity_north_ms") or 0.0),
+            "y": float(command.get("velocity_east_ms") or 0.0),
+            "z": 0.0,
+        }
+        self.last_heading = float(command.get("heading") or 0.0)
         await self.publish_setpoint_once()
         if AUTO_ARM_OFFBOARD:
             asyncio.create_task(self.enter_offboard_after_setpoints())
@@ -237,7 +258,7 @@ class Bridge:
                 "op": "publish",
                 "topic": SETPOINT_TOPIC,
                 "type": SETPOINT_TYPE,
-                "msg": global_position_target(self.active_waypoint, self.last_heading),
+                "msg": global_position_target(self.active_waypoint, self.last_heading, getattr(self, "active_velocity", None)),
             }
         )
 
@@ -339,8 +360,8 @@ def topic_for_vehicle(topic: str) -> str:
     return f"/vehicles/{VEHICLE_ID}/{clean or 'unknown'}"
 
 
-def global_position_target(target: dict[str, float], yaw_deg: float | None) -> dict[str, Any]:
-    ignore_velocity = 8 | 16 | 32
+def global_position_target(target: dict[str, float], yaw_deg: float | None, velocity: dict[str, float] | None = None) -> dict[str, Any]:
+    ignore_velocity = 0 if velocity is not None else 8 | 16 | 32
     ignore_accel = 64 | 128 | 256
     ignore_yaw_rate = 2048
     type_mask = ignore_velocity | ignore_accel | ignore_yaw_rate
@@ -352,7 +373,7 @@ def global_position_target(target: dict[str, float], yaw_deg: float | None) -> d
         "latitude": target["latitude"],
         "longitude": target["longitude"],
         "altitude": target["altitude"],
-        "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "velocity": velocity or {"x": 0.0, "y": 0.0, "z": 0.0},
         "acceleration_or_force": {"x": 0.0, "y": 0.0, "z": 0.0},
         "yaw": yaw,
         "yaw_rate": 0.0,

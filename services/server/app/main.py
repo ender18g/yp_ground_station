@@ -40,6 +40,7 @@ from app.auth import (
     update_user_password, verify_password, record_login, set_user_permissions
 )
 from app.settings import get_deconfliction_settings, update_deconfliction_settings
+from app.settings import get_application_settings, update_application_settings
 
 # Import deconfliction module
 from app.deconfliction import DeconflictionEngine, MISSION_PRIORITY, DEFAULT_DECONFLICT_RADIUS_M
@@ -82,7 +83,6 @@ SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
-RTB_ARRIVAL_RADIUS_M = float(os.getenv("RTB_ARRIVAL_RADIUS_M", "15.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
@@ -380,6 +380,21 @@ async def startup() -> None:
     global cleanup_task, delete_api, influx_client, tile_http_client, write_api
     # Initialize authentication database
     init_database()
+
+    persisted_settings = get_application_settings()
+    settings.update({
+        "message_retention_seconds": persisted_settings["message_retention_seconds"],
+        "rtb_update_hz": persisted_settings["rtb_update_hz"],
+        "rtb_stern_distance_m": persisted_settings["rtb_stern_distance_m"],
+        "mob_track_seconds": persisted_settings["mob_track_seconds"],
+        "mob_swath_m": persisted_settings["mob_swath_m"],
+        "mob_altitude_m": persisted_settings["mob_altitude_m"],
+        "mob_corridor_half_width_m": persisted_settings["mob_corridor_half_width_m"],
+        "mob_takeoff_altitude_m": persisted_settings["mob_takeoff_altitude_m"],
+        "mob_climb_speed_ms": persisted_settings["mob_climb_speed_ms"],
+    })
+    global _yp_role_vehicle_id
+    _yp_role_vehicle_id = persisted_settings.get("yp_role_vehicle_id")
     
     # Load deconfliction settings from database
     db_settings = get_deconfliction_settings()
@@ -1284,13 +1299,30 @@ async def get_settings() -> dict[str, Any]:
 
 @app.put("/api/settings")
 async def update_settings(payload: dict[str, Any], authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    """Validate and apply updates to message retention and RTB update rate. Requires manage_settings permission."""
+    """Validate, apply, and persist Settings modal values."""
     authorization_error = require_permission(authorization, "manage_settings")
     if authorization_error:
         return authorization_error
     
-    if payload.get("message_retention_seconds") is None and payload.get("rtb_update_hz") is None:
+    supported = {
+        "trail_seconds", "show_yp_range_rings", "message_retention_seconds",
+        "rtb_update_hz", "rtb_stern_distance_m",
+        "mob_track_seconds", "mob_swath_m", "mob_altitude_m",
+        "mob_corridor_half_width_m", "mob_takeoff_altitude_m", "mob_climb_speed_ms",
+        "yp_role_vehicle_id",
+    }
+    application_payload = {key: value for key, value in payload.items() if key in supported}
+    if not application_payload:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
+
+    success, message = update_application_settings(application_payload)
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+
+    global _yp_role_vehicle_id
+    if "yp_role_vehicle_id" in application_payload:
+        _yp_role_vehicle_id = application_payload["yp_role_vehicle_id"]
+    settings.update({key: value for key, value in application_payload.items() if key in settings})
 
     if payload.get("message_retention_seconds") is not None:
         retention = payload.get("message_retention_seconds")
@@ -1312,7 +1344,7 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
             return JSONResponse({"error": "rtb_update_hz must be between 0.2 and 20.0"}, status_code=400)
         settings["rtb_update_hz"] = rtb_update_hz_value
 
-    return JSONResponse({**settings, "yp_role_vehicle_id": _yp_role_vehicle_id})
+    return JSONResponse({**settings, **get_application_settings()})
 
 
 @app.get("/api/deconfliction/settings")
@@ -1394,6 +1426,9 @@ async def set_yp_role(payload: dict[str, Any] = Body(default={}), authorization:
 
     raw = payload.get("vehicle_id")
     new_role_id: Optional[str] = str(raw).strip() if raw and str(raw).strip() else None
+    success, message = update_application_settings({"yp_role_vehicle_id": new_role_id})
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
     old_role_id = _yp_role_vehicle_id
     _yp_role_vehicle_id = new_role_id
 
@@ -1466,7 +1501,7 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={}), authorization:
     if authorization_error:
         return authorization_error
 
-    track_window_s = SAR_MOB_TRACK_SECONDS
+    track_window_s = float(settings.get("mob_track_seconds", SAR_MOB_TRACK_SECONDS))
     if payload and payload.get("track_seconds") is not None:
         try:
             track_window_s = float(payload.get("track_seconds"))
@@ -1577,11 +1612,11 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={}), authorization:
     mob_command: dict[str, Any] = {
         "type": "mob",
         "track_points": track_points,
-        "corridor_half_width_m": _get_float("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M),
-        "swath_m": _get_float("swath_m", SAR_SWATH_M),
-        "altitude_m": _get_float("altitude_m", SAR_ALTITUDE_M),
-        "takeoff_altitude_m": _get_float("takeoff_altitude_m", SAR_TAKEOFF_ALT_M),
-        "climb_speed_ms": _get_float("climb_speed_ms", SAR_CLIMB_SPEED_MS),
+        "corridor_half_width_m": _get_float("corridor_half_width_m", float(settings.get("mob_corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M))),
+        "swath_m": _get_float("swath_m", float(settings.get("mob_swath_m", SAR_SWATH_M))),
+        "altitude_m": _get_float("altitude_m", float(settings.get("mob_altitude_m", SAR_ALTITUDE_M))),
+        "takeoff_altitude_m": _get_float("takeoff_altitude_m", float(settings.get("mob_takeoff_altitude_m", SAR_TAKEOFF_ALT_M))),
+        "climb_speed_ms": _get_float("climb_speed_ms", float(settings.get("mob_climb_speed_ms", SAR_CLIMB_SPEED_MS))),
     }
 
     await route_command(target_vehicle_id, mob_command, source="sar_api")
@@ -2385,6 +2420,16 @@ def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: f
     return math.degrees(lat2), math.degrees(lon2)
 
 
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return the initial bearing from one geographic point to another."""
+    lat1_r = math.radians(lat1)
+    lat2_r = math.radians(lat2)
+    dlon_r = math.radians(lon2 - lon1)
+    y = math.sin(dlon_r) * math.cos(lat2_r)
+    x = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon_r)
+    return math.degrees(math.atan2(y, x)) % 360.0
+
+
 async def _stop_rtb_follow(vehicle_id: str) -> None:
     """Cancel and await a vehicle's running RTB-follow task, if any."""
     task = _rtb_follow_tasks.pop(vehicle_id, None)
@@ -2408,8 +2453,9 @@ async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
 
 
 async def _rtb_follow_loop(vehicle_id: str) -> None:
-    """Periodically steer a vehicle toward a point trailing the YP boat's stern until arrival."""
-    stable_arrival_hits = 0
+    """Continuously steer a vehicle to a moving point directly aft of the YP."""
+    approach_side: Optional[int] = None
+    approach_stage = 0
     try:
         while True:
             rtb_update_hz = float(settings.get("rtb_update_hz") or RTB_UPDATE_HZ)
@@ -2434,47 +2480,145 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                         float(yp_pos["latitude"]),
                         float(yp_pos["longitude"]),
                         yp_heading + 180.0,
-                        RTB_STERN_DISTANCE_M,
+                        float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)),
                     )
+                    vehicle_lat = target_pos.get("latitude")
+                    vehicle_lon = target_pos.get("longitude")
+                    approach_lat, approach_lon = stern_lat, stern_lon
+                    if vehicle_lat is not None and vehicle_lon is not None:
+                        relative_bearing = (
+                            _bearing_deg(
+                                float(yp_pos["latitude"]),
+                                float(yp_pos["longitude"]),
+                                float(vehicle_lat),
+                                float(vehicle_lon),
+                            ) - yp_heading
+                        ) % 360.0
+                        # Vehicles not already near the aft centerline stage at
+                        # the beam and then the aft centerline before approaching.
+                        if not 165.0 <= relative_bearing <= 195.0:
+                            if approach_side is None:
+                                approach_side = -1 if relative_bearing < 180.0 else 1
+                                safety_radius = (
+                                    deconfliction_engine.get_radius(target_vehicle.get("vehicle_type", "uav"))
+                                    + deconfliction_engine.get_radius("yp")
+                                )
+                                route_distance = max(
+                                    float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)) + 10.0,
+                                    (safety_radius * 2.0) + 10.0,
+                                )
+                                current_distance = _haversine_m(
+                                    float(yp_pos["latitude"]),
+                                    float(yp_pos["longitude"]),
+                                    float(vehicle_lat),
+                                    float(vehicle_lon),
+                                )
+                                approach_stage = 1 if current_distance >= route_distance else 0
+                        if approach_side is not None:
+                            safety_radius = (
+                                deconfliction_engine.get_radius(target_vehicle.get("vehicle_type", "uav"))
+                                + deconfliction_engine.get_radius("yp")
+                            )
+                            route_distance = max(
+                                float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)) + 10.0,
+                                (safety_radius * 2.0) + 10.0,
+                            )
+                            if approach_stage == 0:
+                                approach_bearing = _bearing_deg(
+                                    float(yp_pos["latitude"]),
+                                    float(yp_pos["longitude"]),
+                                    float(vehicle_lat),
+                                    float(vehicle_lon),
+                                )
+                                approach_distance = route_distance
+                            elif approach_stage == 1:
+                                approach_bearing = (yp_heading + (90.0 if approach_side < 0 else 270.0)) % 360.0
+                                approach_distance = route_distance
+                            else:
+                                approach_bearing = (yp_heading + 180.0) % 360.0
+                                approach_distance = (
+                                    route_distance
+                                    if approach_stage == 2
+                                    else float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M))
+                                )
+                            approach_lat, approach_lon = _destination_point(
+                                float(yp_pos["latitude"]),
+                                float(yp_pos["longitude"]),
+                                approach_bearing,
+                                approach_distance,
+                            )
+                            approach_tolerance = max(5.0, min(10.0, route_distance * 0.2))
+                            if approach_stage == 0 and _haversine_m(
+                                float(yp_pos["latitude"]), float(yp_pos["longitude"]),
+                                float(vehicle_lat), float(vehicle_lon),
+                            ) >= route_distance:
+                                approach_stage = 1
+                            elif approach_stage == 1 and _haversine_m(
+                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                            ) <= approach_tolerance:
+                                approach_stage = 2
+                            elif approach_stage == 2 and _haversine_m(
+                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                            ) <= approach_tolerance:
+                                approach_stage = 3
+                            elif approach_stage == 3 and _haversine_m(
+                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                            ) <= approach_tolerance:
+                                approach_side = None
                     target_alt = float(target_pos.get("altitude") or 0.0)
+                    yp_speed_mps = 0.0
+                    yp_history = (yp_vehicle or {}).get("history") or []
+                    if len(yp_history) >= 2:
+                        previous_fix = yp_history[-2]
+                        latest_fix = yp_history[-1]
+                        elapsed_s = float(latest_fix.get("stamp") or 0.0) - float(previous_fix.get("stamp") or 0.0)
+                        if elapsed_s > 0:
+                            yp_speed_mps = min(
+                                25.0,
+                                _haversine_m(
+                                    float(previous_fix.get("latitude", 0.0)),
+                                    float(previous_fix.get("longitude", 0.0)),
+                                    float(latest_fix.get("latitude", 0.0)),
+                                    float(latest_fix.get("longitude", 0.0)),
+                                ) / elapsed_s,
+                            )
                     target_snapshot = {
-                        "lat": stern_lat,
-                        "lon": stern_lon,
+                        "lat": approach_lat,
+                        "lon": approach_lon,
                         "alt": target_alt,
                         "veh_lat": float(target_pos.get("latitude")) if target_pos.get("latitude") is not None else None,
                         "veh_lon": float(target_pos.get("longitude")) if target_pos.get("longitude") is not None else None,
+                        "yp_heading": yp_heading,
+                        "yp_speed_mps": yp_speed_mps,
+                        "yp_velocity_north_ms": yp_speed_mps * math.cos(math.radians(yp_heading)),
+                        "yp_velocity_east_ms": yp_speed_mps * math.sin(math.radians(yp_heading)),
                     }
 
             if target_snapshot is None:
                 await asyncio.sleep(period_s)
                 continue
 
+            follow_command = {
+                "type": "rtb_follow" if approach_side is None else "waypoint",
+                "target": {
+                    "latitude": target_snapshot["lat"],
+                    "longitude": target_snapshot["lon"],
+                    "altitude": target_snapshot["alt"],
+                },
+            }
+            if follow_command["type"] == "rtb_follow":
+                follow_command["heading"] = target_snapshot["yp_heading"]
+                follow_command["speed_mps"] = target_snapshot["yp_speed_mps"]
+                follow_command["velocity_north_ms"] = target_snapshot["yp_velocity_north_ms"]
+                follow_command["velocity_east_ms"] = target_snapshot["yp_velocity_east_ms"]
+
             await _dispatch_vehicle_command(
                 vehicle_id,
-                {
-                    "type": "waypoint",
-                    "target": {
-                        "latitude": target_snapshot["lat"],
-                        "longitude": target_snapshot["lon"],
-                        "altitude": target_snapshot["alt"],
-                    },
-                },
+                follow_command,
                 source="rtb_follow",
                 emit_ack=False,
                 write_log=False,
             )
-
-            veh_lat = target_snapshot["veh_lat"]
-            veh_lon = target_snapshot["veh_lon"]
-            if veh_lat is not None and veh_lon is not None:
-                dist_m = _haversine_m(veh_lat, veh_lon, target_snapshot["lat"], target_snapshot["lon"])
-                if dist_m <= RTB_ARRIVAL_RADIUS_M:
-                    stable_arrival_hits += 1
-                else:
-                    stable_arrival_hits = 0
-                if stable_arrival_hits >= 3:
-                    print(f"[RTB] {vehicle_id} reached return-to-boat radius ({dist_m:.1f}m)")
-                    #return # comment out return statement so vehicle keeps tracking point
 
             await asyncio.sleep(period_s)
     except asyncio.CancelledError:
@@ -2487,12 +2631,14 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
 
 async def _deconfliction_check_loop() -> None:
     """Periodically check for vehicle conflicts and issue deconfliction commands."""
-    try:
-        while True:
+    while True:
+        try:
             await asyncio.sleep(0.5)  # Check every 0.5 seconds
             await _check_vehicle_conflicts()
-    except asyncio.CancelledError:
-        return
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            print(f"[DECONFLICTION] Check failed: {error}")
 
 
 async def _check_vehicle_conflicts() -> None:

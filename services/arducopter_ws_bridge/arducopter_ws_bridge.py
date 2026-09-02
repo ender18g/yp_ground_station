@@ -412,6 +412,24 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
         0, 0
     )
 
+
+def follow_yp_velocity(master, command: dict) -> None:
+    """Stream a YP-relative velocity and heading while holding the aft target."""
+    target = command.get("target", {})
+    lat, lon = target.get("latitude"), target.get("longitude")
+    alt = float(target.get("altitude") or 0.0)
+    if lat is None or lon is None:
+        return
+    master.mav.set_position_target_global_int_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        0b100111000000,
+        int(float(lat) * 1e7), int(float(lon) * 1e7), alt,
+        float(command.get("velocity_north_ms") or 0.0),
+        float(command.get("velocity_east_ms") or 0.0), 0.0,
+        0.0, 0.0, 0.0, math.radians(float(command.get("heading") or 0.0)), 0.0,
+    )
+
 async def telemetry_loop() -> None:
     print("\n==============================", flush=True)
     print(" ARDUCOPTER MAVLINK BRIDGE ", flush=True)
@@ -479,7 +497,9 @@ async def telemetry_loop() -> None:
                             command_data = server_msg.get("command", {})
                             cmd_type = command_data.get("type")
 
-                            if cmd_type == "waypoint": # simple one-shot goto command (in inertial frame) with lat/lon/alt in the payload
+                            if cmd_type == "rtb_follow":
+                                follow_yp_velocity(master, command_data)
+                            elif cmd_type == "waypoint": # simple one-shot goto command (in inertial frame) with lat/lon/alt in the payload
                                 target = command_data.get("target", {})
                                 source = server_msg.get("source")
                                 
