@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   CircleDashed,
   Crosshair,
+  Download,
   EthernetPort,
   Grid3X3,
   Layers,
@@ -32,7 +33,7 @@ import {
 import { useEffect, useMemo, useRef, useState, Suspense, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
 import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
 import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
@@ -154,6 +155,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
+  const [flightLogHours, setFlightLogHours] = useState(8);
+  const [flightLogExporting, setFlightLogExporting] = useState(false);
+  const [flightLogError, setFlightLogError] = useState<string | null>(null);
   const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
   const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
@@ -695,6 +699,29 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     setSelected((current) => (current?.vehicle_id === vehicleId ? ({ ...current, marker_color: color } as DemoVehicleWithStyle) : current));
   };
 
+  const saveFlightLog = async () => {
+    setFlightLogExporting(true);
+    setFlightLogError(null);
+    try {
+      const response = await exportFlightLog(flightLogHours);
+      const blob = await response.blob();
+      const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]
+        ?? `yp-flight-log-last-${flightLogHours}h.jsonl`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setFlightLogError(error instanceof Error ? error.message : "Flight log export failed");
+    } finally {
+      setFlightLogExporting(false);
+    }
+  };
+
   return (
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
       
@@ -856,6 +883,31 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
         <div className="topbar-actions">
+          {currentUser?.permissions.includes("manage_settings") && !VIEW_MODE && (
+            <div className="flight-log-control">
+              <select
+                aria-label="Flight log time range"
+                value={flightLogHours}
+                disabled={flightLogExporting}
+                onChange={(event) => setFlightLogHours(Number(event.target.value))}
+              >
+                <option value={1}>1h</option>
+                <option value={4}>4h</option>
+                <option value={8}>8h</option>
+                <option value={24}>24h</option>
+              </select>
+              <button
+                className="icon-button flight-log-button"
+                title="Save Flight Log"
+                aria-label="Save Flight Log"
+                disabled={flightLogExporting}
+                onClick={() => void saveFlightLog()}
+              >
+                {flightLogExporting ? <Loader2 className="spin" size={19} /> : <Download size={19} />}
+                <span>Save Flight Log</span>
+              </button>
+            </div>
+          )}
           <button
             className={activeTab === "map" ? "icon-button active" : "icon-button"}
             title="Global Map"
@@ -3361,6 +3413,7 @@ function MapActionMenu({
           </div>
         )}
       </div>
+        {flightLogError && <div className="flight-log-error" role="alert">{flightLogError}</div>}
     </div>
   );
 }

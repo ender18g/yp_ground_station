@@ -205,6 +205,12 @@ Updating settings requires the `manage_settings` permission. The conflicts endpo
 
 The Settings modal persists its Display, Vessel, and Man Overboard controls in the SQLite database. This includes trail duration, YP range rings, message retention, RTB update rate, stern distance, YP role, MOB track length, corridor width, swath width, search altitude, takeoff altitude, and climb speed. These values are loaded when the server starts and can also be read or updated through `GET` and `PUT /api/settings`.
 
+## Flight Log Export
+
+Users with the `manage_settings` permission can use the Save Flight Log control in the top toolbar to download the retained `yp_messages` data for the last 1, 4, 8, or 24 hours. The export is a JSON Lines (`.jsonl`) file: the first line contains export metadata, followed by one record per InfluxDB point with `timestamp`, `vehicle_id`, `vehicle_type`, `topic`, `message_type`, and `fields`.
+
+Exports read from InfluxDB and do not modify or delete its data. They contain only data still retained in InfluxDB; `message_retention_seconds` may remove older records before they can be exported.
+
 ## Web UI
 
 The map shows:
