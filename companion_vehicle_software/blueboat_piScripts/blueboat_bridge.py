@@ -557,7 +557,18 @@ async def telemetry_loop() -> None:
                             elif cmd_type == "cancel_sar":
                                 _sar_stop_event.set()
                                 print("[SAR] Cancel requested by operator.")
-                           
+
+                            elif cmd_type == "rtcm_data":
+                                flags = command_data.get("flags", 0)
+                                data_len = command_data.get("len", 0)
+                                raw_data = command_data.get("data", [])
+                                if master and data_len > 0:
+                                    padded_payload = bytearray(raw_data + [0] * (180 - len(raw_data)))
+                                    try:
+                                        master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
+                                    except Exception as e:
+                                        print(f"[RTCM] MAVLink send error: {e}")
+
                             elif cmd_type == "ship_relative_trajectory":
                                 _launch_ship_relative_mission(master, command_data)
                                 print("[INFO] Ship-relative trajectory command launched.")

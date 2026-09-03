@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import serial
+import socket
 import email.utils
 import hashlib
 import json
@@ -88,6 +90,10 @@ MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
+# RTCM streamer variables
+_rtcm_seq_id = 0
+
+
 app = FastAPI(title="YP Ground Station", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -161,6 +167,8 @@ write_api = None
 delete_api = None
 query_api = None
 cleanup_task: Optional[asyncio.Task[None]] = None
+rtcm_task: Optional[asyncio.Task[None]] = None
+
 
 # YP role assignment: any vehicle whose vehicle_id matches this value will be
 # treated as vehicle_type="yp" regardless of what it reports in its messages.
@@ -173,6 +181,11 @@ settings = {
     "influx_max_write_hz": INFLUX_MAX_WRITE_HZ,
     "tile_max_cache_age_seconds": TILE_MAX_CACHE_AGE_SECONDS,
     "rtb_update_hz": RTB_UPDATE_HZ,
+    # RTK Injection defaults
+    "rtk_source_type": "serial",      # "serial", "tcp", "udp", or "disabled"
+    "rtk_host_or_port": "/dev/ttyACM0",
+    "rtk_network_port": 9000,
+    "rtk_baudrate": 115200,
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
@@ -380,7 +393,7 @@ async def root() -> dict[str, Any]:
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize the tile cache dir, HTTP/InfluxDB clients, auth database, and background tasks."""
-    global cleanup_task, delete_api, influx_client, tile_http_client, write_api, query_api
+    global cleanup_task, delete_api, influx_client, tile_http_client, write_api, query_api, rtcm_task
     # Initialize authentication database
     init_database()
 
@@ -422,10 +435,16 @@ async def startup() -> None:
     # Start deconfliction check task
     asyncio.create_task(_deconfliction_check_loop())
 
+    # Start background RTCM base station ingestion task
+    rtcm_task = asyncio.create_task(rtcm_ingest_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
     """Cancel background tasks and close external clients on server shutdown."""
+    if rtcm_task:
+        rtcm_task.cancel()
+    
     for task in list(sitl_bridges.values()):
         task.cancel()
     if cleanup_task:
@@ -1277,6 +1296,17 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             return
         _sar_missions.set_mode(master, str(mode), wait_for_ack=False)
 
+    elif cmd_type == "rtcm_data":
+        flags = command.get("flags", 0)
+        data_len = command.get("len", 0)
+        raw_data = command.get("data", [])
+        if data_len > 0:
+            padded_data = bytearray(raw_data + [0] * (180 - len(raw_data)))
+            try:
+                master.mav.gps_rtcm_data_send(flags, data_len, padded_data)
+            except Exception as e:
+                print(f"[SITL] RTCM send error: {e}")
+
 
 @app.get("/api/vehicles")
 async def get_vehicles() -> dict[str, Any]:
@@ -1476,6 +1506,7 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
         "mob_track_seconds", "mob_swath_m", "mob_altitude_m",
         "mob_corridor_half_width_m", "mob_takeoff_altitude_m", "mob_climb_speed_ms",
         "yp_role_vehicle_id",
+        "rtk_source_type", "rtk_host_or_port", "rtk_network_port", "rtk_baudrate",
     }
     application_payload = {key: value for key, value in payload.items() if key in supported}
     if not application_payload:
@@ -3087,3 +3118,148 @@ def quaternion_to_yaw_deg(q: dict[str, Any]) -> Optional[float]:
         return math.degrees(math.atan2(siny_cosp, cosy_cosp)) % 360
     except Exception:
         return None
+
+
+
+# # Distribute RTCM correction frames for RTK fix distribution to all connected vehicles that can accept it
+async def rtcm_ingest_loop():
+    """Background loop that dynamically connects to configured RTCM sources with automatic retry logic."""
+    global _rtcm_seq_id
+    loop = asyncio.get_running_loop()
+    
+    while True:
+        # Fetch current settings from application runtime settings
+        source_type = settings.get("rtk_source_type", "disabled") # "serial", "tcp", "udp", or "disabled"
+        port_or_host = settings.get("rtk_host_or_port", "/dev/ttyACM0")
+        network_port = int(settings.get("rtk_network_port", 9000))
+        baudrate = int(settings.get("rtk_baudrate", 115200))
+
+        if source_type == "disabled":
+            await asyncio.sleep(2.0)
+            continue
+
+        buffer = bytearray()
+        stream_reader = None
+
+        try:
+            if source_type == "serial":
+                # Open USB/Serial base station
+                stream_reader = await loop.run_in_executor(
+                    None, lambda: serial.Serial(port_or_host, baudrate, timeout=1.0)
+                )
+                print(f"[RTCM] Connected to Serial base station at {port_or_host}")
+
+            elif source_type == "tcp":
+                # Connect to TCP Caster / Socket (e.g. Trimble Base over Ethernet)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(port_or_host, network_port), timeout=5.0
+                )
+                print(f"[RTCM] Connected to TCP base station at {port_or_host}:{network_port}")
+
+            elif source_type == "udp":
+                # Set up UDP socket reader
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind((port_or_host, network_port))
+                sock.setblocking(False)
+                print(f"[RTCM] Listening for UDP RTCM stream on {port_or_host}:{network_port}")
+
+            # Stream processing loop
+            while settings.get("rtk_source_type") == source_type:
+                data = b""
+                
+                if source_type == "serial":
+                    data = await loop.run_in_executor(None, lambda: stream_reader.read(1024))
+                elif source_type == "tcp":
+                    try:
+                        data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        data = b""
+                elif source_type == "udp":
+                    try:
+                        data, _ = sock.recvfrom(2048)
+                    except BlockingIOError:
+                        await asyncio.sleep(0.02)
+                        continue
+
+                if not data:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                buffer.extend(data)
+
+                # Parse RTCM3 frames starting with magic byte 0xD3
+                while len(buffer) >= 3:
+                    if buffer[0] != 0xD3:
+                        buffer.pop(0)
+                        continue
+
+                    msg_len = ((buffer[1] & 0x03) << 8) | buffer[2]
+                    frame_len = msg_len + 6  # 3 bytes header + payload + 3 bytes CRC
+
+                    if len(buffer) < frame_len:
+                        break
+
+                    rtcm_frame = bytes(buffer[:frame_len])
+                    buffer = buffer[frame_len:]
+
+                    await distribute_rtcm_frame(rtcm_frame, _rtcm_seq_id)
+                    _rtcm_seq_id = (_rtcm_seq_id + 1) % 32
+
+        except (serial.SerialException, asyncio.TimeoutError, OSError, ConnectionRefusedError) as exc:
+            # Gracefully log stream outage without crashing the server
+            print(f"[RTCM] Stream unavailable ({source_type}://{port_or_host}): {exc}. Retrying in 5 seconds...")
+            await asyncio.sleep(5.0)  # Wait before attempting auto-reconnect
+            
+        finally:
+            # Cleanup closed handles
+            if source_type == "serial" and stream_reader and stream_reader.is_open:
+                stream_reader.close()
+            elif source_type == "tcp" and 'writer' in locals():
+                writer.close()
+            elif source_type == "udp" and 'sock' in locals():
+                sock.close()
+
+def fragment_rtcm_frame(rtcm_bytes: bytes, sequence_id: int) -> list[dict]:
+    """Break raw RTCM bytes into standard MAVLink GPS_RTCM_DATA payload dictionaries."""
+    CHUNK_SIZE = 180
+    chunks = [rtcm_bytes[i:i + CHUNK_SIZE] for i in range(0, len(rtcm_bytes), CHUNK_SIZE)]
+    payloads = []
+    
+    for i, chunk in enumerate(chunks):
+        is_fragmented = 1 if len(chunks) > 1 else 0
+        fragment_id = i & 0x03
+        
+        # Flags bitmask: Bit 0 = IsFragmented | Bits 1-2 = Fragment ID | Bits 3-7 = Sequence ID
+        flags = is_fragmented | (fragment_id << 1) | ((sequence_id & 0x1F) << 3)
+        
+        payloads.append({
+            "flags": flags,
+            "len": len(chunk),
+            "data": list(chunk)  # Array of uint8_t bytes
+        })
+        
+    return payloads
+
+
+async def distribute_rtcm_frame(rtcm_frame: bytes, sequence_id: int):
+    fragments = fragment_rtcm_frame(rtcm_frame, sequence_id)
+    
+    # Distribute fragments to all active vehicle queues
+    for vehicle_id, queue in list(vehicle_queues.items()):
+        for frag in fragments:
+            cmd_payload = {
+                "op": "command",
+                "vehicle_id": vehicle_id,
+                "source": "rtcm_service",
+                "stamp": time.time(),
+                "command": {
+                    "type": "rtcm_data",
+                    "flags": frag["flags"],
+                    "len": frag["len"],
+                    "data": frag["data"]
+                }
+            }
+            try:
+                queue.put_nowait(cmd_payload)
+            except asyncio.QueueFull:
+                pass  # Drop fragment under extreme network backpressure
