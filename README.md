@@ -93,13 +93,17 @@ The map displays icons for USV, UAV (quad and fixed wing), UUV, UGV,and YP; head
 
 ### Vehicle modal
 
-![Vehicle modal](screenshots/vehicle_modal.png)
+<p align="center">
+<img src="screenshots/vehicle_modal.png" alt="Vehicle modal" height="300">
+</p>
 
 Click a vehicle marker to open its draggable modal. It provides real-time position, altitude, heading, battery, SAR status, and, when a mother ship is selected, forward/left/up and radial ship-frame distances. Depending on permissions and vehicle type it also provides RTB, Waypoint, flight-mode controls, video, and a marker color picker.
 
 ### Settings
 
-![Settings](screenshots/settings.png)
+<p align="center">
+<img src="screenshots/settings.png" alt="Settings" height="300">
+</p>
 
 The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, and Vessel.
 
@@ -125,7 +129,9 @@ Live telemetry remains available, but commands are blocked for real hardware veh
 
 ## Accounts and permissions
 
-![User Management](screenshots/users.png)
+<p align="center">
+<img src="screenshots/users.png" alt="User Management" height="300">
+</p>
 
 The web UI requires a username and password. On first server startup, the default development account is created:
 
@@ -152,7 +158,9 @@ Accounts are stored in SQLite at `data/auth/auth.db`, mounted into `yp-server` a
 
 ## Vehicle connections
 
-![Vehicle Connections](screenshots/vehicle_connections.png)
+<p align="center">
+<img src="screenshots/vehicle_connections.png" alt="Vehicle Connections" height="300">
+</p>
 
 ### Network MAVLink and ArduPilot SITL
 
@@ -370,7 +378,9 @@ The compose file defines `sim-uav1` and `sim-uav2` with fixed IDs, so scaling th
 
 ## Message transport
 
-![Messages](screenshots/messages.png)
+<p align="center">
+<img src="screenshots/messages.png" alt="Messages" height="300">
+</p>
 
 Native vehicle clients connect to:
 
