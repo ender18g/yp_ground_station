@@ -23,8 +23,8 @@ services:
       # MAVLink UDP ingress from external radios / BlueOS endpoints
       - "14550:14550/udp"
       - "14551:14551/udp"
-    devices:
-      - /dev/ttyACM0:/dev/ttyACM0
+#    devices:
+#      - /dev/ttyACM0:/dev/ttyACM0
     environment:
       INFLUX_URL: http://influxdb:8086
       INFLUX_ORG: yp
