@@ -86,6 +86,7 @@ _ship_state_lock = threading.Lock()
 _ship_state = {"vehicle_id": None, "lat": None, "lon": None, "alt": None, "heading_deg": None, "vn_ms": 0.0, "ve_ms": 0.0, "stamp": 0.0}
 _ship_relative_thread: threading.Thread | None = None
 _ship_relative_stop_event = threading.Event()
+_last_guided_request = 0.0
 
 # --- CONFIG MANAGEMENT & WEB SERVER ---
 
@@ -455,11 +456,18 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
 
 
 def follow_yp_velocity(master, command_data: dict) -> None:
+    global _last_guided_request
     """Stream a YP-relative velocity and heading while holding the aft target."""
     target = command_data.get("target", {})
     lat, lon = target.get("latitude"), target.get("longitude")
     if lat is None or lon is None:
         return
+    if time.monotonic() - _last_guided_request >= 5.0:
+        try:
+            master.set_mode("GUIDED")
+            _last_guided_request = time.monotonic()
+        except Exception as exc:
+            print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
 
 # --- SAR MISSIONS THREAD TARGETS ---

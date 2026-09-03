@@ -96,6 +96,7 @@ _ship_state = {
 }
 _ship_relative_thread: threading.Thread | None = None
 _ship_relative_stop_event = threading.Event()
+_last_guided_request = 0.0
 
 
 def create_navsatfix_message(lat: float, lon: float, alt: float, heading: float | None = None) -> dict:
@@ -448,10 +449,17 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
 
 def follow_yp_velocity(master, command_data: dict) -> None:
     """Stream a YP-relative velocity and heading while holding the aft target."""
+    global _last_guided_request
     target = command_data.get("target", {})
     lat, lon = target.get("latitude"), target.get("longitude")
     if lat is None or lon is None:
         return
+    if time.monotonic() - _last_guided_request >= 5.0:
+        try:
+            master.set_mode("GUIDED")
+            _last_guided_request = time.monotonic()
+        except Exception as exc:
+            print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
     master.mav.set_position_target_global_int_send(
         0, master.target_system, master.target_component,
         mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,

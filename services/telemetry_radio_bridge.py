@@ -134,17 +134,27 @@ def build_mavlink_connection(port: str, baud: int) -> mavutil.mavlink_connection
     return mavutil.mavlink_connection(f"serial:{port}:{baud}", source_system=255, autoreconnect=False)
 
 
+_last_guided_request = 0.0
+
+
 def send_radio_command(
     master: mavutil.mavlink_connection,
     command: dict[str, object],
     source: Optional[str] = None,
 ) -> None:
+    global _last_guided_request
     cmd_type = command.get("type")
     if cmd_type == "rtb_follow":
         target = command.get("target", {})
         lat = target.get("latitude")
         lon = target.get("longitude")
         if lat is not None and lon is not None:
+            if time.monotonic() - _last_guided_request >= 5.0:
+                try:
+                    master.set_mode("GUIDED")
+                    _last_guided_request = time.monotonic()
+                except Exception as exc:
+                    print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
             master.mav.set_position_target_global_int_send(
                 0, master.target_system, master.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,

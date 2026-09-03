@@ -116,6 +116,7 @@ shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
 sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
 _rtb_follow_tasks: dict[str, asyncio.Task[None]] = {}
+_sitl_follow_guided_requests: dict[str, float] = {}
 
 # MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
 _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
@@ -1154,6 +1155,41 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                 0, 0, 0,
                 0, 0, 0,
                 0, 0,
+            )
+
+    elif cmd_type == "rtb_follow":
+        target = command.get("target", {})
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        if lat is not None and lon is not None:
+            vehicle_id = str(cmd_payload.get("vehicle_id") or "")
+            now = time.monotonic()
+            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) >= 5.0:
+                mode_mapping = master.mode_mapping()
+                if mode_mapping and "GUIDED" in mode_mapping:
+                    master.mav.set_mode_send(
+                        master.target_system,
+                        _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        mode_mapping["GUIDED"],
+                    )
+                    _sitl_follow_guided_requests[vehicle_id] = now
+            master.mav.set_position_target_global_int_send(
+                0,
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0b100111000000,
+                int(float(lat) * 1e7),
+                int(float(lon) * 1e7),
+                float(target.get("altitude") or 30.0),
+                float(command.get("velocity_north_ms") or 0.0),
+                float(command.get("velocity_east_ms") or 0.0),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                math.radians(float(command.get("heading") or 0.0)),
+                0.0,
             )
 
     elif cmd_type == "mission_plan":
@@ -2615,6 +2651,7 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                     vehicle_lat = target_pos.get("latitude")
                     vehicle_lon = target_pos.get("longitude")
                     approach_lat, approach_lon = stern_lat, stern_lon
+                    follow_heading = yp_heading
                     if vehicle_lat is not None and vehicle_lon is not None:
                         relative_bearing = (
                             _bearing_deg(
@@ -2624,26 +2661,9 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                                 float(vehicle_lon),
                             ) - yp_heading
                         ) % 360.0
-                        # Vehicles not already near the aft centerline stage at
-                        # the beam and then the aft centerline before approaching.
-                        if not 165.0 <= relative_bearing <= 195.0:
-                            if approach_side is None:
-                                approach_side = -1 if relative_bearing < 180.0 else 1
-                                safety_radius = (
-                                    deconfliction_engine.get_radius(target_vehicle.get("vehicle_type", "uav"))
-                                    + deconfliction_engine.get_radius("yp")
-                                )
-                                route_distance = max(
-                                    float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)) + 10.0,
-                                    (safety_radius * 2.0) + 10.0,
-                                )
-                                current_distance = _haversine_m(
-                                    float(yp_pos["latitude"]),
-                                    float(yp_pos["longitude"]),
-                                    float(vehicle_lat),
-                                    float(vehicle_lon),
-                                )
-                                approach_stage = 1 if current_distance >= route_distance else 0
+                        if approach_side is None and not 165.0 <= relative_bearing <= 195.0:
+                            approach_side = -1 if relative_bearing < 180.0 else 1
+                            approach_stage = 1
                         if approach_side is not None:
                             safety_radius = (
                                 deconfliction_engine.get_radius(target_vehicle.get("vehicle_type", "uav"))
@@ -2653,45 +2673,27 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                                 float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)) + 10.0,
                                 (safety_radius * 2.0) + 10.0,
                             )
-                            if approach_stage == 0:
-                                approach_bearing = _bearing_deg(
-                                    float(yp_pos["latitude"]),
-                                    float(yp_pos["longitude"]),
-                                    float(vehicle_lat),
-                                    float(vehicle_lon),
-                                )
-                                approach_distance = route_distance
-                            elif approach_stage == 1:
+                            if approach_stage == 1:
                                 approach_bearing = (yp_heading + (90.0 if approach_side < 0 else 270.0)) % 360.0
                                 approach_distance = route_distance
                             else:
                                 approach_bearing = (yp_heading + 180.0) % 360.0
-                                approach_distance = (
-                                    route_distance
-                                    if approach_stage == 2
-                                    else float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M))
-                                )
+                                approach_distance = route_distance
                             approach_lat, approach_lon = _destination_point(
                                 float(yp_pos["latitude"]),
                                 float(yp_pos["longitude"]),
                                 approach_bearing,
                                 approach_distance,
                             )
+                            follow_heading = _bearing_deg(
+                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                            )
                             approach_tolerance = max(5.0, min(10.0, route_distance * 0.2))
-                            if approach_stage == 0 and _haversine_m(
-                                float(yp_pos["latitude"]), float(yp_pos["longitude"]),
-                                float(vehicle_lat), float(vehicle_lon),
-                            ) >= route_distance:
-                                approach_stage = 1
-                            elif approach_stage == 1 and _haversine_m(
+                            if approach_stage == 1 and _haversine_m(
                                 float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
                             ) <= approach_tolerance:
                                 approach_stage = 2
                             elif approach_stage == 2 and _haversine_m(
-                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
-                            ) <= approach_tolerance:
-                                approach_stage = 3
-                            elif approach_stage == 3 and _haversine_m(
                                 float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
                             ) <= approach_tolerance:
                                 approach_side = None
@@ -2719,6 +2721,7 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                         "veh_lat": float(target_pos.get("latitude")) if target_pos.get("latitude") is not None else None,
                         "veh_lon": float(target_pos.get("longitude")) if target_pos.get("longitude") is not None else None,
                         "yp_heading": yp_heading,
+                        "follow_heading": follow_heading,
                         "yp_speed_mps": yp_speed_mps,
                         "yp_velocity_north_ms": yp_speed_mps * math.cos(math.radians(yp_heading)),
                         "yp_velocity_east_ms": yp_speed_mps * math.sin(math.radians(yp_heading)),
@@ -2741,6 +2744,8 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                 follow_command["speed_mps"] = target_snapshot["yp_speed_mps"]
                 follow_command["velocity_north_ms"] = target_snapshot["yp_velocity_north_ms"]
                 follow_command["velocity_east_ms"] = target_snapshot["yp_velocity_east_ms"]
+            else:
+                follow_command["heading"] = target_snapshot["follow_heading"]
 
             await _dispatch_vehicle_command(
                 vehicle_id,
