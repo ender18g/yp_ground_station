@@ -220,6 +220,8 @@ The map shows:
 - Hover popup with telemetry
 - Click modal with `RTB`, `Waypoint`, flight mode control, and stream video actions (hidden for non-commandable vehicles in view-only mode)
 - Hideable map layer/source menu opened with the layer icon
+- Optional NOAA weather radar overlay and Open-Meteo wind vectors, enabled from the map layer menu
+- Wind direction and speed readout at the bottom center of the UI
 - Optional YP range rings at 50 m, 100 m, and 200 m
 - Live message drawer opened with the message icon
 - Vehicle Connections panel (cable icon) to connect ArduPilot SITL instances or RFD-900 radios at runtime
