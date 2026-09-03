@@ -1,26 +1,59 @@
 # TRIDENT YP
-### Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking — Yard Patrol
 
-![TRIDENT YP screenshot](screenshots/screen1.png)
+**Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking - Yard Patrol**
 
-Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects telemetry from USVs, UAVs, UUVs, a YP GPS feed, and an optional PX4/MAVROS UAV simulation, logs ROS-shaped messages to InfluxDB, and serves a local-first React/Leaflet map interface for monitoring and command.
+Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collects telemetry from USVs, UAVs, UUVs, a YP GPS feed, and an optional PX4/MAVROS UAV simulation; logs ROS-shaped messages to InfluxDB; and serves a local-first React/Leaflet map interface for monitoring and command.
 
-## What Is Included
+## Contents
+
+- [Overview](#overview)
+- [Quick start](#quick-start)
+- [User interface](#user-interface)
+- [Accounts and permissions](#accounts-and-permissions)
+- [Vehicle connections](#vehicle-connections)
+- [Commanding and mission planning](#commanding-and-mission-planning)
+- [Search and rescue operations](#search-and-rescue-operations)
+- [Video streams](#video-streams)
+- [Vehicle deconfliction](#vehicle-deconfliction)
+- [Advanced integrations](#advanced-integrations)
+- [Message transport](#message-transport)
+- [Maps, GPS, and configuration](#maps-gps-and-configuration)
+- [Development](#development)
+- [Notes for real vehicles](#notes-for-real-vehicles)
+
+## Overview
+
+### Included services
 
 - `yp-server`: FastAPI service with native vehicle WebSockets, a lightweight rosbridge-compatible WebSocket, REST APIs, on-demand map tile caching, command routing, automatic vehicle deconfliction, InfluxDB logging, and SQLite/JWT account authorization.
-- `web`: React + TypeScript + Leaflet UI with vehicle markers (UAV, USV, UUV, UGV, YP), headings, altitude labels, recent trails, YP range rings, hideable map layers, RTB commands, click-to-waypoint commands, a live message drawer, a visual waypoint planner tab, a YP role override, view-only mode, login, admin user management, and deconfliction settings.
-- `sim-vehicle`: Lightweight configurable simulated UAV, USV, UUV, or UGV container. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz. Supports full SAR mission execution and temporary deconfliction waypoint detours from the server.
-- `sim-umaa`: Lightweight UMAA loopback vehicle for testing the ground-station workflow before real DDS topics are available. Publishes heartbeat, `NavSatFix`, `BatteryState`, and bridge-status messages, accepts waypoint/RTB/SAR commands, and simulates motion toward the received target.
-- `yp-gps`: YP GPS publisher. Runs in simulated mode near the US Naval Academy or reads NMEA GPS data from a serial port.
-- `arducopter_ws_bridge`: Hardware bridge that connects a real ArduPilot/MAVLink vehicle (Cube, Pixhawk, etc.) to the ground station over a WebSocket. Supports SAR mission dispatch.
-- `px4-sitl-uav`: Optional profile-gated PX4 SITL multicopter simulation.
-- `mavros`, `ros-master`, and `rosbridge`: Optional ROS/MAVROS path used by the PX4 UAV simulation.
-- `px4-yp-bridge`: Optional bridge that discovers and subscribes to MAVROS topics through rosbridge, forwards MAVROS messages into TRIDENT YP, and translates YP waypoint/RTB commands back to MAVROS/PX4.
-- `umaa-bridge`: RTI Connext DDS bridge shell for a real UMAA vehicle once the DDS topic/type map is known.
+- `web`: React, TypeScript, Leaflet, and Three.js UI with vehicle markers, headings, altitude labels, trails, YP range rings, map layers, commands, mission planning, live messages, login, user management, settings, and video playback.
+- `sim-vehicle`: Configurable simulated UAV, USV, UUV, or UGV. Publishes heartbeat, `NavSatFix`, `Pose`, `BatteryState`, and `MultiDOFJointTrajectory` messages at 5 Hz; supports SAR missions and temporary deconfliction detours.
+- `sim-umaa`: Loopback UMAA vehicle for testing the ground-station workflow before real DDS topics are available.
+- `yp-gps`: Simulated or serial NMEA YP GPS publisher.
+- `arducopter_ws_bridge`: Hardware WebSocket bridge for real ArduPilot/MAVLink vehicles.
+- `px4-sitl-uav`, `mavros`, `ros-master`, `rosbridge`, and `px4-yp-bridge`: Optional PX4/MAVROS simulation path.
+- `umaa-bridge`: RTI Connext DDS bridge shell for a real UMAA vehicle.
 - `influxdb`: Time-series storage for telemetry and command messages.
-- `companion_vehicle_software`: Scripts and containers that run on the companion computer of a mobile vehicle.
+- `companion_vehicle_software`: Vehicle-side BlueBoat, ArduPilot, and YP emulator scripts.
 
-## Quick Start
+### Repository map
+
+| Path | Purpose |
+| --- | --- |
+| `web/` | React frontend and production Nginx image |
+| `services/server/` | FastAPI backend and authorization/database code |
+| `services/sim_vehicle/` | Lightweight simulated vehicles |
+| `services/umaa_bridge/` | UMAA loopback and RTI adapter |
+| `services/arducopter_ws_bridge/` | ArduPilot WebSocket bridge |
+| `services/px4_*` and `services/mavros/` | Optional PX4/MAVROS path |
+| `services/yp_gps/` | YP GPS publisher |
+| `services/telemetry_radio_bridge.py` | Standalone serial-radio bridge |
+| `services/com_tcp_relay.py` | Windows COM-to-TCP relay |
+| `companion_vehicle_software/` | Companion-computer integrations |
+| `scripts/download_tiles.py` | Optional offline tile-source helper |
+| `data/auth/` and `data/tile-cache/` | Local persistent runtime data |
+
+## Quick start
 
 Start the normal lightweight stack:
 
@@ -28,462 +61,157 @@ Start the normal lightweight stack:
 docker compose up --build
 ```
 
-Then open:
+Open:
 
 - Web UI: `http://localhost:8080`
 - API docs: `http://localhost:8000/docs`
 - API root/status links: `http://localhost:8000`
 - InfluxDB: `http://localhost:8086`
 
-The default compose file starts two simulated UAVs, one simulated USV, one simulated UUV, and a simulated YP GPS source located near the Severn River off the US Naval Academy.
+The default compose file starts two simulated UAVs (`sim-uav1`, `sim-uav2`), one simulated USV, one simulated UUV, the `sim-umaa` loopback vehicle, and a simulated YP GPS source near the Severn River off the US Naval Academy.
 
-## Accounts And Permissions
+The normal stack does not require ROS. ROS is only required for the optional PX4/MAVROS profile.
 
-The web UI requires a username and password. On the first server startup, it creates a default administrator account:
+## User interface
+
+![Global Map](screenshots/global.png)
+
+The top bar provides these navigation modes and tools:
+
+| Control | Purpose |
+| --- | --- |
+| Global Map | Live operational map with vehicles, trails, commands, weather, and overlays |
+| Mission Planner | Create, edit, import, export, and upload full waypoint missions |
+| Local Waypoint Planner | Build ship-relative waypoint trajectories using the current YP position |
+| Vehicle Connections | Connect network MAVLink endpoints or RFD-900 serial radios |
+| Settings | Display, vessel, deconfliction, and MOB configuration |
+| Messages | Live message drawer with per-topic filtering and retained snapshots |
+| User Management | Available to accounts with `manage_users` |
+| Logout | End the current session |
+
+The map displays icons for USV, UAV (quad and fixed wing), UUV, UGV,and YP; heading; altitude; telemetry popups; recent trails; optional YP range rings; SAR patterns; an optional NOAA radar layer; Open-Meteo wind vectors; and a bottom-center wind readout. The layer button selects Street Maps or Satellite and `Auto`, `Cached only`, or `Online only` tile behavior.
+
+### Vehicle modal
+
+![Vehicle modal](screenshots/vehicle_modal.png)
+
+Click a vehicle marker to open its draggable modal. It provides real-time position, altitude, heading, battery, SAR status, and, when a mother ship is selected, forward/left/up and radial ship-frame distances. Depending on permissions and vehicle type it also provides RTB, Waypoint, flight-mode controls, video, and a marker color picker.
+
+### Settings
+
+![Settings](screenshots/settings.png)
+
+The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, and Vessel.
+
+- **Display:** trail window, YP range rings, and database message retention.
+- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate and stern distance.
+- **Deconfliction:** enable the feature, configure global and per-type safety radii, avoidance orbit radius, and maximum pause duration.
+- **Man Overboard:** configure track length, swath width, search altitude, corridor width, takeoff altitude, and climb speed.
+
+Settings persist in SQLite and are available through `GET` and `PUT /api/settings`. Deconfliction settings use `GET` and `PUT /api/deconfliction/settings`.
+
+### Demo and view-only modes
+
+Static demo mode renders local vehicles without a live server. Use `/demo`, `?demo=true`, or build with `VITE_STATIC_DEMO=true`.
+
+View-only mode uses `/view` or `?view=true`:
+
+```text
+http://localhost:8080/view
+http://localhost:8080/?view=true
+```
+
+Live telemetry remains available, but commands are blocked for real hardware vehicles, the Connections panel is hidden, and a **View only** badge is shown. Vehicles whose IDs start with `sim-` remain commandable.
+
+## Accounts and permissions
+
+![User Management](screenshots/users.png)
+
+The web UI requires a username and password. On first server startup, the default development account is created:
 
 ```text
 Username: admin
 Password: admin
 ```
 
-Change this password immediately after first login. The default credentials are for initial local setup only and must not be used on a reachable or operational network.
+Change it immediately. Never use these credentials on a reachable or operational network. Set a unique `JWT_SECRET` for non-development deployments.
 
-Administrators can open **User Management** from the users icon in the top bar. The icon is visible only to accounts with the `manage_users` permission. The panel can create and delete accounts, reset passwords, apply a role preset, and save a custom combination of individual permissions.
-
-### Role Presets
+Administrators open **User Management** from the users icon. The panel creates and deletes accounts, resets passwords, applies role presets, and saves custom permissions. The server enforces authorization on protected REST endpoints and UI WebSocket commands; hiding a button is not authorization.
 
 | Role | Capabilities |
 | --- | --- |
 | `view_only` | Read telemetry and vehicle status |
 | `waypoint_command` | View permissions plus waypoints, RTB, mode changes, and SAR cancellation |
 | `mission_planning` | Waypoint permissions plus mission creation, upload, and search grids |
-| `man_overboard` | Mission planning permissions plus MOB dispatch |
-| `admin` | All operational permissions plus settings, connections, video stream, and user management |
+| `man_overboard` | Mission planning plus MOB dispatch |
+| `admin` | All operational permissions plus settings, connections, video streams, and user management |
 
-Custom permission sets can combine any of the following permissions: `read_telemetry`, `read_vehicle_status`, `send_waypoint`, `send_rtb`, `set_vehicle_mode`, `cancel_sar`, `create_mission`, `upload_mission`, `search_grid`, `trigger_mob`, `manage_sitl`, `manage_settings`, `manage_video_streams`, and `manage_users`.
+Custom permissions: `read_telemetry`, `read_vehicle_status`, `send_waypoint`, `send_rtb`, `set_vehicle_mode`, `cancel_sar`, `create_mission`, `upload_mission`, `search_grid`, `trigger_mob`, `manage_sitl`, `manage_settings`, `manage_video_streams`, and `manage_users`.
 
-The server enforces permissions on protected REST endpoints and commands received through the UI WebSocket; hiding an action in the UI is not the authorization mechanism.
+Accounts are stored in SQLite at `data/auth/auth.db`, mounted into `yp-server` as `/data/auth/auth.db`. They persist across rebuilds and container recreation. Deleting the database intentionally resets the store to `admin` / `admin`; the database contains password hashes and is excluded from Git.
 
-### Account Persistence
+## Vehicle connections
 
-The default Compose configuration stores accounts in SQLite at [data/auth/auth.db](data/auth/auth.db) on the host, mounted as `/data/auth/auth.db` in `yp-server`. Accounts therefore persist across `docker compose up --build`, container recreation, and `docker compose down` followed by another `docker compose up`.
+![Vehicle Connections](screenshots/vehicle_connections.png)
 
-The database contains account metadata and password hashes. Keep it local and back it up when needed; it is excluded from Git. Deleting `data/auth/auth.db` deliberately resets the account store and causes the server to create the initial `admin` / `admin` account again.
+### Network MAVLink and ArduPilot SITL
 
-The default mount is configured in `docker-compose.yml`:
-
-```yaml
-services:
-  yp-server:
-    environment:
-      AUTH_DB_PATH: /data/auth/auth.db
-    volumes:
-      - ./data/auth:/data/auth
-```
-
-Set a unique `JWT_SECRET` for any non-development deployment.
-
-## UMAA Bridge
-
-The repository now includes a UMAA bridge path for testing a future RTI Connext DDS vehicle alongside the existing MAVLink and PX4 adapters.
-
-### Simulated UMAA Vehicle
-
-The default compose stack includes `sim-umaa`, a loopback vehicle that behaves like a moving USV and is meant for local testing before the real DDS topic map exists.
-
-It starts with:
-
-```bash
-docker compose up --build sim-umaa
-```
-
-The simulated vehicle can be smoke-tested with:
-
-```bash
-python services/umaa_bridge/sim_umaa_smoke_test.py
-```
-
-That smoke test connects to `sim-umaa`, sends a waypoint, watches the simulated telemetry move, and then sends RTB.
-
-### Real UMAA Bridge
-
-When the real UMAA vehicle arrives, enable the `umaa-real` profile and run `umaa-bridge`. At that point you will fill in the RTI topic names and any generated DDS package details for the vehicle.
-
-```bash
-docker compose --profile umaa-real up --build umaa-bridge
-```
-
-The UMAA bridge is intentionally split into a simulation-friendly loopback path and a real DDS adapter shell so the same YP websocket contract can be exercised now and reused later without changing the UI or server command routing.
-
-## PX4/MAVROS UAV Simulation
-
-The PX4 UAV path is intentionally separate from the existing `sim-vehicle` containers. The repo includes the PX4 SITL container, `ros-master`, `mavros`, `rosbridge`, and `px4-yp-bridge` services for that path.
-
-The PX4 setup is intended to run with the `px4` compose profile enabled:
-
-```bash
-docker compose --profile px4 up --build
-```
-
-The PX4 path connects PX4 SITL to MAVROS over MAVLink, exposes the ROS graph over WebSocket, and forwards MAVROS telemetry into `yp-server` as vehicle `px4-uav`.
-
-### MAVROS Topics Forwarded
-
-`px4-yp-bridge` uses rosapi discovery through rosbridge to subscribe to every advertised `/mavros/...` topic it can see. It also keeps these core subscriptions configured up front so important topics are covered while the ROS graph is still coming up:
-
-- `/mavros/state`
-- `/mavros/extended_state`
-- `/mavros/global_position/global`
-- `/mavros/global_position/compass_hdg`
-- `/mavros/global_position/rel_alt`
-- `/mavros/local_position/pose`
-- `/mavros/local_position/velocity_local`
-- `/mavros/battery`
-- `/mavros/imu/data`
-- `/mavros/home_position/home`
-- `/mavros/gpsstatus/gps1/raw`
-
-The bridge also publishes canonical aliases that the existing map understands:
-
-- `/vehicles/px4-uav/navsatfix`
-- `/vehicles/px4-uav/pose`
-- `/vehicles/px4-uav/battery`
-- `/vehicles/px4-uav/heading`
-
-Every forwarded topic is written into the ground station under `/vehicles/px4-uav/mavros/...`, ingested by `yp-server`, written to InfluxDB, and broadcast to the web UI message drawer.
-
-## Demo Mode
-
-The UI also supports a static demo mode for local previews and screenshots.
-
-Open the app on `/demo`, add `?demo=true` to any URL, or build the frontend with `VITE_STATIC_DEMO=true`.
-
-In demo mode the UI renders simulated vehicles locally instead of connecting to the live server.
-
-## Scaling Existing Simulated Vehicles
-
-To stress test with more of the lightweight simulated vehicles:
-
-```bash
-docker compose up --build --scale sim-uav=10 --scale sim-usv=4 --scale sim-uuv=3
-```
-
-Each simulator derives a unique ID from its container hostname unless `VEHICLE_ID` is explicitly set.
-
-## Vehicle Deconfliction
-
-The server can automatically separate vehicles whose reported three-dimensional positions conflict. Detection runs every 0.5 seconds and combines great-circle horizontal distance with altitude difference. A conflict occurs when the vehicles are closer than the sum of their individual safety radii. With the default 10 m UAV radius, two UAVs deconflict below 20 m separation.
-
-When a conflict occurs, the vehicle with lower mission priority is temporarily sent to an avoidance waypoint away from the higher-priority vehicle. Its original command is preserved and automatically re-dispatched after the conflict clears. This applies to the built-in `sim-` vehicles as well as bridge-connected vehicles that accept standard waypoint commands.
-
-Mission priority is:
-
-1. `mob`
-2. `search_grid`
-3. `mission_plan`
-4. `waypoint` and `rtb`
-
-Equal-priority conflicts use a deterministic ordering and divert one vehicle; operators should avoid scheduling overlapping equal-priority missions where possible.
-
-### RTB Stern Follow
-
-RTB is a persistent stern-follow mode. The server continuously computes a moving target directly aft of the YP's current heading and sends updated waypoint setpoints at the configured RTB update rate. Vehicles approaching from the bow or beam are first routed outside the combined safety envelope, around an aft quarter, and then into the stern station; they do not take a direct path across the YP. RTB remains active until the vehicle is retasked or the RTB-follow task is canceled.
-
-### Configuration
-
-An administrator can open **Settings** and select the **Deconfliction** tab, positioned between **Display** and **Man Overboard**, to enable the feature and set the global and per-vehicle safety radii. The default radii are 10 m for UAV/UAVF, 15 m for USV/UGV/UUV, and 20 m for the YP. Settings persist in the SQLite database alongside account data and are loaded when `yp-server` starts.
-
-The following API endpoints are also available:
-
-```http
-GET /api/deconfliction/settings
-PUT /api/deconfliction/settings
-GET /api/deconfliction/conflicts
-```
-
-Updating settings requires the `manage_settings` permission. The conflicts endpoint returns the currently detected lower-priority and higher-priority vehicle pairs.
-
-The Settings modal persists its Display, Vessel, and Man Overboard controls in the SQLite database. This includes trail duration, YP range rings, message retention, RTB update rate, stern distance, YP role, MOB track length, corridor width, swath width, search altitude, takeoff altitude, and climb speed. These values are loaded when the server starts and can also be read or updated through `GET` and `PUT /api/settings`.
-
-## Web UI
-
-The map shows:
-
-- Green USV markers
-- Orange UAV markers
-- Yellow UUV markers
-- Amber UGV markers (ground rovers)
-- Gray YP marker
-- Heading arrow for each vehicle
-- Altitude beside each marker
-- Adjustable recent trail duration
-- Hover popup with telemetry
-- Click modal with `RTB`, `Waypoint`, flight mode control, and stream video actions (hidden for non-commandable vehicles in view-only mode)
-- Hideable map layer/source menu opened with the layer icon
-- Optional NOAA weather radar overlay and Open-Meteo wind vectors, enabled from the map layer menu
-- Wind direction and speed readout at the bottom center of the UI
-- Optional YP range rings at 50 m, 100 m, and 200 m
-- Live message drawer opened with the message icon
-- Vehicle Connections panel (cable icon) to connect ArduPilot SITL instances or RFD-900 radios at runtime
-- SAR mission patterns overlaid on the map when a grid search or MOB mission is dispatched; click the filled start dot to open a popup and clear the pattern manually
-- YP role override in the Settings menu for assigning another connected vessel as the mother ship
-
-The top bar also contains a **Waypoint Planner** tab (chart icon) for visual top-down mission planning, and a **View only** badge is shown when the UI is loaded in view-only mode (see [View-Only Mode](#view-only-mode)).
-
-The Settings menu controls trail duration and YP range rings. The message drawer shows the newest live messages and the latest per-topic messages included in the initial vehicle snapshot, which helps inspect the extra MAVROS topics from `px4-uav`.
-
-### Vehicle Modal Features
-
-When clicking a vehicle marker, a draggable modal window appears with the following features:
-
-- **Position and Telemetry**: Real-time latitude, longitude, altitude, heading, battery percentage, and SAR mission status
-- **Ship Reference Frame**: For vehicles with a selected mother ship, displays forward/left/up distances and radial distance in ship-fixed coordinates (FLU convention)
-- **Commands**: RTB button to return the vehicle to the mother ship, Waypoint button to set a single target waypoint
-- **Flight Mode Control**: For ArduPilot and PX4 vehicles, a Settings button expands to show vehicle-type-specific flight modes. Click any mode to change the vehicle's current flight mode
-- **Video Stream**: If the vehicle has video streams enabled, a Stream Video button opens a WHEP WebRTC player
-- **Color Picker**: A Color button toggles a palette to customize the vehicle marker colour on the map
-
-### Waypoint Planner
-
-The visual **Waypoint Planner** tab provides a dedicated map mode for building waypoint missions before dispatch:
-
-- **Dynamic Scaling**: Vehicle icons scale smoothly when zooming in and out, matching the zoom behavior of Global Map mode
-- **Map Persistence**: When switching between Global Map and Mission Planner modes, the map center position and zoom level are preserved
-- **Waypoint Editing**: Left-click the map to add waypoints; drag to move; click a waypoint to edit altitude and parameters
-- **Waypoint Reordering**: Move waypoints up or down in the sequence using the waypoint list panel
-- **Mission Upload**: Select a target vehicle and click Upload Mission to arm the vehicle, set AUTO mode, and start the waypoint sequence
-- **Optional Force Guided**: Add a GUIDED waypoint at the mission end to hold position after completing all waypoints
-- **File Export**: Download missions as QGC Plan or .wpl format; upload previously saved missions
-
-## Video Streams
-
-The UI shows the **Stream Video** action when a vehicle payload includes `video.enabled=true` and either at least one entry in `video.streams`, or a canonical `video.playback_url` (e.g. from [MAVLink camera discovery](#camera-discovery)).
-
-Each `streams` entry is expected to look like:
-
-```json
-{ "label": "Bow Camera", "url": "http://<whep-host>/<stream-id>/whep" }
-```
-
-The current frontend player negotiates WebRTC using WHEP by POSTing SDP offers directly to the selected stream `url`. When `video.streams` is absent but `video.playback_url` is present, the player treats `playback_url` as the single displayable WHEP stream.
-
-The backend video stream API remains available for storing per-vehicle stream metadata (`stream_id`, `source_rtsp_url`, `playback_url`). Those API-managed fields are useful for control/config workflows, and are also how MAVLink camera discovery publishes its canonical stream.
-
-### Video Stream API
-
-```http
-GET    /api/video/streams                         -> list stream mappings (safe fields)
-PUT    /api/video/streams/{vehicle_id}            -> create/update mapping
-DELETE /api/video/streams/{vehicle_id}            -> remove mapping
-GET    /api/video/streams?include_sources=true    -> include RTSP source URLs (admin use)
-```
-
-Example update call:
-
-```bash
-curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
-  -H 'Content-Type: application/json' \
-  -d '{"source_rtsp_url":"rtsp://user:pass@10.0.0.23:554/stream1","stream_id":"blueboat-03"}'
-```
-
-## ArduPilot SITL Bridge
-
-The ground station includes a built-in MAVLink bridge that connects directly to ArduPilot or ArduCopter SITL instances at runtime — no separate bridge container required. This is useful for testing SAR missions against a simulated vehicle without deploying hardware.
-
-### Connecting a SITL Instance
-
-Open the **SITL** panel in the UI (cable icon in the top bar), enter a pymavlink-compatible connection string, and click **Connect**:
+Open **Vehicle Connections** and use the **Network** tab. Supported connection strings include:
 
 | Protocol | Example | Notes |
 | --- | --- | --- |
 | TCP client | `tcp:localhost:5760` | ArduPilot default SITL port |
-| TCP server | `tcpin:0.0.0.0:5760` | Server waits for SITL to connect |
-| UDP input | `udpin:0.0.0.0:14551` | Receive MAVLink datagrams |
-| UDP output | `udpout:192.168.1.100:14550` | Send MAVLink datagrams to host |
+| TCP server | `tcpin:0.0.0.0:5760` | Waits for SITL to connect |
+| UDP input | `udpin:0.0.0.0:14551` | Receives MAVLink datagrams |
+| UDP output | `udpout:192.168.1.100:14550` | Sends MAVLink datagrams |
+| Serial | `serial:/dev/ttyUSB0:57600` | Native Linux/device passthrough |
 
-Leave the **Vehicle ID** field empty to auto-derive an ID from the connection URL (e.g. `vehicle-localhost-5760`), or enter a custom ID.
+Vehicle ID and Camera Host are optional. IDs are derived from the URL when omitted. The bridge detects vehicle frame type from the first heartbeat, streams telemetry at 10 Hz, and supports multiple simultaneous connections.
 
-The bridge detects the vehicle frame type from the first MAVLink heartbeat and updates the map marker style accordingly. Telemetry is streamed at 10 Hz. Multiple SITL instances can be connected simultaneously.
-
-### Camera Discovery
-
-The built-in bridge can automatically discover a camera reachable at `<camera-host>:8889` and publish it as the vehicle's video stream, without requiring the operator to configure `video.streams` by hand.
-
-- The optional **Camera Host** field in both the Network and RFD-900 connection forms accepts a hostname or IP address, sent as `camera_host` in `POST /api/sitl`.
-- If `camera_host` is omitted, the server derives it from host-based MAVLink URLs (`tcp:`, `tcpout:`, `udpout:`, `udpbcast:`) using the URL's host. Serial URLs (`serial:...`) and inbound/wildcard listeners (`tcpin:`, `udpin:`, or a host of `0.0.0.0`/`localhost`) cannot be used to derive a camera host — set the field explicitly for these.
-- Once the bridge reaches `connected`, the server probes `camera_host:8889` over TCP once immediately, then every 60 seconds for as long as the bridge is running. This is a raw TCP reachability check, not a WHEP/SDP handshake.
-- On a successful probe, the server upserts and broadcasts the canonical video record `{"vehicle_id", "playback_url": "http://<camera-host>:8889/cam/whep", "enabled": true}` via `video_stream_update`, matching the response of `GET /api/video/streams`. The browser negotiates the actual WHEP/WebRTC session only when the operator opens the video stream.
-- A failed probe does not remove or overwrite a previously published stream — transient camera outages will not erase an already-working `playback_url`.
-- **Docker networking**: the `yp-server` container must be able to reach the vehicle's camera host at TCP port `8889` (the MediaMTX WHEP default). If the camera is on the same LAN as the Docker host but not exposed to the container network, add appropriate routing or `extra_hosts`/host networking so the probe can succeed.
-
-### REST API
+REST API:
 
 ```http
-GET  /api/sitl                                          → list all active bridges
-POST /api/sitl  { url, vehicle_id, camera_host }         → open a new bridge
-DEL  /api/sitl/{vehicle_id}                              → close and remove a bridge
+GET    /api/sitl
+POST   /api/sitl                    { url, vehicle_id, camera_host }
+DELETE /api/sitl/{vehicle_id}
 ```
 
-### Supported Commands Over SITL Bridge
+### RFD-900 and telemetry radios
 
-| Command type | Behaviour |
-| --- | --- |
-| `waypoint` | Sets the target lat/lon/alt |
-| `rtb` | Starts server-side return-to-boat follow (continuous waypoint updates to a stern offset from the current YP vessel) |
-| `search_grid` | Runs a streaming boustrophedon lawnmower mission (carrot-chase waypoints) |
-| `mob` | Runs a streaming curved track-following MOB mission (carrot-chase waypoints) |
-| `cancel_sar` | Cancels an in-progress streaming SAR mission |
-| `mission_plan` | Uploads a full waypoint sequence and optionally arms + starts the vehicle in AUTO mode |
-| `set_mode` | Changes the vehicle's flight mode (e.g., "AUTO", "RTL", "LOITER") |
-
-For `search_grid` and `mob`, the bridge now executes missions in streaming mode (one waypoint at a time) instead of full mission upload. During streaming, the mission worker keeps forwarding position telemetry so vehicle updates and map motion remain live.
-
-For `rtb`, the server does not send a one-shot RTL command. It continuously computes a dynamic stern target behind the selected YP vessel and pushes updates until RTB is canceled or the vehicle is retasked. Built-in `sim-*` vehicles and MAVLink bridges use a dedicated follow mode after the aft approach, matching the YP's estimated speed and heading with bounded position correction instead of chasing the moving stern point. The UMAA loopback accepts the command through its waypoint fallback; the real UMAA DDS adapter remains a command-schema placeholder until its vehicle-specific DDS types are integrated.
-
-For `set_mode`, the vehicle modal's Settings button expands to show a grid of available modes for the vehicle type. Supported modes are:
-
-- **ArduPilot Vehicles (UAV/USV/UGV)**: STABILIZE, ACRO, ALT_HOLD, AUTO, GUIDED, LOITER, RTL, CIRCLE, LAND, DRIFT, SPORT, FLIP, AUTOTUNE, POSHOLD
-- **PX4 Vehicles (UAVF)**: MANUAL, ALTITUDE_CONTROL, POSITION_CONTROL, AUTO, OFFBOARD, EMERGENCY
-
-The mode selector automatically appears only for vehicles that have defined modes, and mode changes are sent to all bridge types (SITL, hardware, and distributed bridges).
-
-## SAR Missions
-
-The ground station can generate and dispatch Search and Rescue missions to any connected vehicle — SITL bridge or real hardware bridge.
-
-### Search Grid
-
-Right-click anywhere on the map, select **Search Grid**, choose a vehicle and the optional parameters, then click **Send**.
-
-| Parameter | Default | Description |
-| --- | --- | --- |
-| Grid size | 200 m | Side length of the square search area |
-| Swath width | 20 m | Track spacing (sensor coverage width) |
-| Altitude | 30 m | Search altitude above home |
-
-The server computes a boustrophedon (lawnmower) waypoint pattern centred on the clicked point, uploads the mission, arms the vehicle, and starts AUTO mode. The flight path is drawn on the map in the vehicle's colour as a dashed polyline.
-
-### Man Overboard (MOB)
-
-Click the **MOB** button in the top bar and confirm. The MOB modal now includes a **Dispatch vehicle** dropdown so you can choose exactly which connected vehicle receives the mission. UGV vehicles and the YP itself are excluded from the dropdown. The server:
-
-1. Reads the YP vessel's recent position history to reconstruct the ship's track.
-2. Generates a set of parallel lanes centred on the track and expanding outward — the number of lanes is determined by the corridor half-width divided by the swath width.
-3. Dispatches the mission to the best available connected vehicle (preferring UAV SITL bridges, then any SITL bridge, then hardware bridges).
-
-| Server variable | Default | Description |
-| --- | --- | --- |
-| `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | Half the total search corridor around the YP track |
-| `SAR_SWATH_M` | `20.0` | Lane spacing |
-| `SAR_ALTITUDE_M` | `30.0` | Search altitude |
-| `SAR_TAKEOFF_ALT_M` | `30.0` | Takeoff altitude before transitioning to search altitude |
-| `SAR_CLIMB_SPEED_MS` | `8.0` | Climb speed in m/s |
-
-If no SITL bridge or hardware bridge is connected, the MOB endpoint returns an error and the modal shows the reason inline — the YP GPS feed must also be running and have at least two position fixes.
-
-### Pattern Overlay
-
-When a SAR mission is dispatched the full flight path is broadcast to all connected UI clients and drawn on the map as a dashed polyline in the assigned vehicle colour. A filled dot marks the start waypoint and a hollow dot marks the end. The pattern persists until manually cleared: click the start dot and choose **Clear pattern** from the popup.
-
-### SAR With Hardware Bridges
-
-The `arducopter_ws_bridge` service supports the same `search_grid`, `mob`, and `set_mode` command types. When a command is routed to a hardware bridge vehicle, `arducopter_ws_bridge.py` receives it over WebSocket and executes it in streaming carrot-chase mode over direct MAVLink. The pattern overlay is shown on the map at dispatch time. Flight mode changes are sent immediately to the connected vehicle.
-
-## RFD-900 / Telemetry Radio Support
-
-The ground station can connect to a real MAVLink vehicle over an RFD-900 (or any serial telemetry radio) through the browser Connections panel.
-
-### Windows Host TCP Relay
-
-Because Docker on Windows cannot directly access COM ports, a host-side relay script bridges the serial radio to a TCP port that the `yp-server` container can reach:
+On Windows, Docker Desktop cannot directly access COM ports. Run this on the Windows host:
 
 ```bash
 pip install pyserial
 python services/com_tcp_relay.py --port COM12 --baud 57600 --tcp-port 5762
 ```
 
-The relay opens the COM port and listens for a single TCP connection. When `yp-server` connects, bytes flow bidirectionally between Docker and the radio. The relay keeps the serial port open and accepts a new TCP connection automatically each time Docker reconnects.
-
-### Connecting in the UI
-
-Open the **Connections** panel (cable icon), switch to the **RFD-900** tab. Select a serial port from the dropdown (populated by the `/api/serial-ports` endpoint), set a baud rate, and click **Connect** — the server connects using the relay URL `tcp:host.docker.internal:5762` automatically.
-
-Alternatively, use the **Network** tab and enter the relay URL directly:
-
-```
-tcp:host.docker.internal:5762
-```
-
-### Serial Device Passthrough (Linux / native Docker)
-
-On Linux the radio can be passed directly to the server container without a relay. Uncomment the `devices:` block in `docker-compose.yml` under `yp-server`:
-
-```yaml
-devices:
-  - /dev/ttyUSB0:/dev/ttyUSB0
-```
-
-Then connect using the serial URL in the Network tab:
-
-```
-serial:/dev/ttyUSB0:57600
-```
-
-### Serial Port API
+Then use the RFD-900 tab, or enter `tcp:host.docker.internal:5762` in the Network tab. The relay keeps the COM port open and accepts a new Docker connection after disconnects. On Linux/native Docker, uncomment the `devices` mapping under `yp-server` and use `serial:/dev/ttyUSB0:57600`.
 
 ```http
-GET /api/serial-ports   → list serial ports visible to the server container
+GET /api/serial-ports
 ```
 
-## Bridge Utilities
+The standalone `services/telemetry_radio_bridge.py` can also forward a serial radio directly to the YP WebSocket.
 
-The repository also includes a few standalone bridge scripts that are useful outside the main compose stack:
+### Hardware and companion bridges
 
-- `services/server/app/main.py`: FastAPI SITL bridge with support for waypoints, RTB follow, SAR missions, mission upload, and flight mode changes
-- `services/telemetry_radio_bridge.py`: Direct serial-radio to YP WebSocket bridge with MAVLink telemetry forwarding and command routing
-- `services/arducopter_ws_bridge/arducopter_ws_bridge.py`: ArduPilot WebSocket bridge with SAR mission handling and flight mode control
-- `services/px4_mavros_bridge/px4_mavros_bridge.py`: ROS/MAVROS to YP bridge with PX4-specific mode mapping
-- `services/umaa_bridge/umaa_bridge.py`: RTI Connext DDS bridge for UMAA vehicles
-- `blueboat_piScripts/blueboat_bridge.py`: BlueBoat/ArduPilot bridge with SAR mission handling and flight mode support
-- `blueboat_piScripts/simplified_bridge.py`: Minimal MAVLink-to-YP telemetry bridge example
+- `arducopter_ws_bridge` connects a real ArduPilot/MAVLink vehicle over WebSocket and supports waypoint, RTB, SAR, and flight-mode commands.
+- `companion_vehicle_software/arducopter_piScripts/` contains Raspberry Pi ArduPilot bridge variants and configuration.
+- `companion_vehicle_software/blueboat_piScripts/` contains BlueBoat bridge variants.
+- `companion_vehicle_software/Hunter_YPEmulator/` contains the YP emulator.
 
-## View-Only Mode
+The other standalone bridge utilities are:
 
-The UI can be opened in view-only mode by navigating to the `/view` path or appending `?view=true` to any URL:
+- `services/server/app/main.py`: FastAPI SITL bridge with waypoint, RTB, SAR, mission-upload, and flight-mode support.
+- `services/px4_mavros_bridge/px4_mavros_bridge.py`: ROS/MAVROS to YP bridge with PX4 mode mapping.
+- `services/umaa_bridge/umaa_bridge.py`: RTI Connext DDS bridge for UMAA vehicles.
+- `companion_vehicle_software/blueboat_piScripts/simplified_bridge.py`: Minimal MAVLink-to-YP telemetry bridge example.
 
-```
-http://localhost:8080/view
-http://localhost:8080/?view=true
-```
+## Commanding and mission planning
 
-In view-only mode:
+### Waypoint and RTB commands
 
-- Live telemetry updates and the map operate normally.
-- Commands (RTB, Waypoint, SAR) are **blocked** for real hardware vehicles. The RTB and Waypoint buttons are hidden in the vehicle modal.
-- Simulated vehicles (those whose IDs start with `sim-`) remain fully commandable.
-- The Vehicle Connections panel (cable icon) is hidden; new connections cannot be added.
-- A **View only** badge is displayed in the top status bar.
-
-This is useful for displaying the situational picture on secondary screens or for observers who should not be able to send commands to real vehicles.
-
-## Waypoint Planner
-
-A visual **Waypoint Planner** tab is available in the top bar (chart/ruler icon). It provides a top-down planning view for building waypoint routes before dispatching them, and it can send ship-relative trajectories using the current YP position for spatial context.
-
-### Mission Planner Features
-
-- **Dynamic Vehicle Scaling**: Vehicle icons automatically scale when zooming the map, providing visual consistency with the Global Map mode
-- **Map Persistence**: Map center and zoom level persist when switching between Global Map and Mission Planner modes
-- **Interactive Waypoints**: Left-click to add waypoints, drag to reposition, click to edit details
-- **Sequence Management**: Reorder waypoints or remove individual waypoints from the mission
-- **Vehicle Selection**: Choose which connected vehicle receives the mission upload
-- **Parameter Configuration**: Set altitude, acceptance radius, hold time, and yaw for each waypoint
-- **Mission File Support**: Export missions in QGC Plan (.plan) or .wpl format; import previously saved missions
-- **One-Click Upload**: Send the complete mission to the selected vehicle with optional auto-arm and mission start
-
-## Waypoint And RTB Commands
-
-To command a waypoint, click a vehicle, choose `Waypoint`, then click the map. The browser sends this message to `yp-server` over `/ws/ui`:
+Click a vehicle, choose **Waypoint**, and click the map. The browser sends a command over `/ws/ui`:
 
 ```json
 {
@@ -491,61 +219,166 @@ To command a waypoint, click a vehicle, choose `Waypoint`, then click the map. T
   "vehicle_id": "px4-uav",
   "command": {
     "type": "waypoint",
-    "target": {
-      "latitude": 38.98495,
-      "longitude": -76.47872,
-      "altitude": 45.0
-    }
+    "target": { "latitude": 38.98495, "longitude": -76.47872, "altitude": 45.0 }
   }
 }
 ```
 
-`latitude` and `longitude` are WGS84 decimal degrees from the clicked Leaflet map point. `altitude` is meters.
+`latitude` and `longitude` are WGS84 decimal degrees; altitude is metres. RTB sends `{ "type": "rtb" }` and starts persistent stern-follow mode. The server targets the configured distance aft of the YP heading and updates it at `rtb_update_hz` until canceled or retasked. Vehicles approaching from the bow or beam are routed around an aft quarter rather than across the YP safety envelope.
 
-For the existing lightweight `sim-vehicle`, altitude is interpreted as a map/display altitude in meters and the simulator moves toward that latitude/longitude.
+For PX4, waypoint commands are translated to `/mavros/setpoint_raw/global` using `mavros_msgs/GlobalPositionTarget`, frame `6` (`MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`), and a default stream rate of 5 Hz. `AUTO_ARM_OFFBOARD=true` also requests `/mavros/cmd/arming true` and `/mavros/set_mode OFFBOARD`. PX4 may reject commands when sensors, EKF, preflight, or failsafe state are not ready; inspect the PX4, MAVROS, and bridge logs.
 
-For the PX4/MAVROS vehicle, `px4-yp-bridge` translates the same command to a MAVROS publish on:
+All bridge types support these command types where the vehicle can execute them:
 
-```text
-/mavros/setpoint_raw/global
-```
+| Command | Behavior |
+| --- | --- |
+| `waypoint` | Set a target latitude, longitude, and altitude |
+| `rtb` | Start continuous server-side stern-follow |
+| `search_grid` | Stream a boustrophedon SAR mission |
+| `mob` | Stream a curved track-following MOB mission |
+| `cancel_sar` | Cancel an active streaming SAR mission |
+| `mission_plan` | Upload a waypoint sequence and optionally arm/start AUTO |
+| `set_mode` | Change the vehicle flight mode |
 
-with message type:
+Available mode lists are vehicle-specific. ArduPilot UAVs support `STABILIZE`, `ACRO`, `ALT_HOLD`, `AUTO`, `GUIDED`, `LOITER`, `RTL`, `CIRCLE`, `LAND`, `DRIFT`, `SPORT`, `FLIP`, `AUTOTUNE`, and `POSHOLD`; ArduPilot USV/UGV support `MANUAL`, `GUIDED`, `AUTO`, `RTL`, `LOITER`, and `CIRCLE`; PX4 UAVF supports `MANUAL`, `ALTITUDE_CONTROL`, `POSITION_CONTROL`, `AUTO`, `OFFBOARD`, and `EMERGENCY`.
 
-```text
-mavros_msgs/GlobalPositionTarget
-```
+### Mission Planner
 
-The default `coordinate_frame` is `6`, MAVLink `MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`. In that frame, latitude and longitude are WGS84 decimal degrees, and altitude is meters relative to PX4 home altitude. The bridge streams the setpoint at `SETPOINT_HZ` (default `5`) because PX4 Offboard mode requires a continuous setpoint stream. With `AUTO_ARM_OFFBOARD=true`, the bridge also calls:
+![Mission Planner](screenshots/mission_planner.png)
 
-```text
-/mavros/cmd/arming true
-/mavros/set_mode OFFBOARD
-```
+The **Mission Planner** tab is the full-mission editor. It supports:
 
-RTB sends:
+- map-click waypoint creation, dragging, editing, reordering, and deletion;
+- target vehicle selection and default altitude;
+- waypoint, takeoff, loiter-time, land, RTL, and `DO_JUMP` items;
+- per-waypoint altitude, hold time, acceptance radius, parameter 3, and yaw;
+- optional GUIDED mode after completion;
+- native JSON, QGroundControl `.plan`, and Mission Planner `.waypoints`/WPL import and export;
+- one-click upload that arms, starts, and sends the mission in AUTO mode.
+
+Published mission overlays remain on the map until cleared.
+
+### Local Waypoint Planner
+
+![Local Waypoint Planner](screenshots/local_waypoint_planner.png)
+
+The **Local Waypoint Planner** tab is separate from Mission Planner. It creates ship-relative trajectories from the current YP position and provides spatial context for local operations. It uses the `ship_relative_trajectory` command with `RelativeWaypoint` values (`x`, `y`, `z`).
+
+## Search and rescue operations
+
+![SAR overlay](screenshots/sar_overlay.png)
+
+### Search Grid
+
+Right-click the map, select **Search Grid**, choose a vehicle, and send. The server creates a centered boustrophedon/lawnmower pattern, dispatches it, and draws the assigned vehicle's path.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| Grid size | 200 m | Side length of the square search area |
+| Swath width | 20 m | Track spacing/sensor coverage width |
+| Altitude | 30 m | Search altitude above home |
+
+### Man Overboard (MOB)
+
+Click **MOB**, choose an optional dispatch vehicle, and confirm. UGVs and the YP are excluded. The server reads recent YP fixes, builds parallel lanes around the track, and prefers UAV SITL, then other SITL, then hardware bridges. The YP GPS feed must be running with at least two fixes.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | Search corridor half-width |
+| `SAR_SWATH_M` | `20.0` | Lane spacing |
+| `SAR_ALTITUDE_M` | `30.0` | Search altitude |
+| `SAR_TAKEOFF_ALT_M` | `30.0` | Takeoff altitude |
+| `SAR_CLIMB_SPEED_MS` | `8.0` | Climb speed in m/s |
+
+Both SAR modes support streaming carrot-chase execution through SITL and hardware ArduPilot bridges. The full path is broadcast to UI clients; a filled start dot and hollow end dot identify the pattern. Click the start dot to clear it. `cancel_sar` stops an active SAR mission.
+
+## Video streams
+
+The vehicle modal shows **Stream Video** when `video.enabled=true` and either `video.streams` or `video.playback_url` is available. Each stream can be supplied as:
 
 ```json
-{ "type": "rtb" }
+{ "label": "Bow Camera", "url": "http://<whep-host>/<stream-id>/whep" }
 ```
 
-On the server, this command starts return-to-boat follow mode for that vehicle. The server continuously emits RTB updates (`source="rtb_follow"`) toward a stern offset from the current YP vessel at `rtb_update_hz` until RTB is canceled or the vehicle is retasked.
+The frontend negotiates WebRTC using WHEP by POSTing SDP offers to the selected URL. The backend metadata API is:
 
-Bridge implementations treat `source="rtb_follow"` as a lightweight stream and skip repeated mode/arm transitions so telemetry remains responsive while tracking the moving stern target.
+```http
+GET    /api/video/streams
+PUT    /api/video/streams/{vehicle_id}
+DELETE /api/video/streams/{vehicle_id}
+GET    /api/video/streams?include_sources=true
+```
 
-For the PX4/MAVROS vehicle, behavior still depends on bridge configuration and PX4 state. PX4 may reject arming, Offboard, or streamed setpoints if its simulated sensors, EKF state, preflight checks, or failsafe state are not ready. Check the `mavros`, `px4-sitl-uav`, and `px4-yp-bridge` logs when a command is acknowledged by the UI but not acted on by PX4.
+Example:
 
-## Message Transport
+```bash
+curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
+  -H 'Content-Type: application/json' \
+  -d '{"source_rtsp_url":"rtsp://user:pass@10.0.0.23:554/stream1","stream_id":"blueboat-03"}'
+```
 
-### Native Vehicle WebSocket
+MAVLink camera discovery probes `<camera-host>:8889` after bridge connection and every 60 seconds. On success it publishes `http://<camera-host>:8889/cam/whep`. The `yp-server` container must be able to reach that host and port. A failed probe does not erase an existing stream. The optional Camera Host field is sent as `camera_host`; when omitted, host-based `tcp:`, `tcpout:`, `udpout:`, and `udpbcast:` URLs can provide the host. Serial URLs, inbound/wildcard listeners, `0.0.0.0`, and `localhost` require an explicit camera host. The probe checks raw TCP reachability; the browser negotiates WHEP only when video is opened.
 
-Vehicle clients connect to:
+## Vehicle deconfliction
+
+When enabled, detection runs every 0.5 seconds using horizontal great-circle distance plus altitude difference. A conflict occurs below the sum of the vehicles' safety radii. The lower-priority vehicle receives a temporary avoidance waypoint; its original command is preserved and re-dispatched after the conflict clears.
+
+Priority order: `mob`, `search_grid`, `mission_plan`, then `waypoint`/`rtb`. Equal-priority conflicts use deterministic ordering. Default radii are 10 m for UAV/UAVF, 15 m for USV/UGV/UUV, and 20 m for YP. The API is:
+
+```http
+GET /api/deconfliction/settings
+PUT /api/deconfliction/settings
+GET /api/deconfliction/conflicts
+```
+
+## Advanced integrations
+
+### UMAA
+
+The default `sim-umaa` loopback bridge publishes heartbeat, `NavSatFix`, battery, and bridge-status messages, moves toward waypoints, and accepts waypoint, RTB, and SAR commands. Smoke-test it with:
+
+```bash
+docker compose up --build sim-umaa
+python services/umaa_bridge/sim_umaa_smoke_test.py
+```
+
+The real RTI shell is enabled with:
+
+```bash
+docker compose --profile umaa-real up --build umaa-bridge
+```
+
+Fill in the vehicle-specific RTI topic map and generated DDS types. See [services/umaa_bridge/README.md](services/umaa_bridge/README.md) for loopback tuning and RTI variables.
+
+Loopback tuning variables are `LOOPBACK_SPEED_MPS`, `LOOPBACK_TURN_RATE_DPS`, `LOOPBACK_ARRIVAL_RADIUS_M`, `LOOPBACK_BATTERY_DRAIN_PER_M`, and `LOOPBACK_BATTERY_DRAIN_PER_S`. RTI wiring variables include `RTI_DOMAIN_ID`, `RTI_QOS_FILE`, `RTI_SOURCE_GUID`, `RTI_COMMAND_TOPIC`, `RTI_ACK_TOPIC`, `RTI_STATUS_TOPIC`, `RTI_NAVSATFIX_TOPIC`, `RTI_BATTERY_TOPIC`, `RTI_HEARTBEAT_TOPIC`, `RTI_PUBLISHER_NAME`, and `RTI_SUBSCRIBER_NAME`.
+
+### PX4/MAVROS
+
+Enable the PX4 profile with:
+
+```bash
+docker compose --profile px4 up --build
+```
+
+The path is PX4 SITL -> MAVROS -> rosbridge -> `px4-yp-bridge` -> `yp-server`, with vehicle ID `px4-uav`. The bridge discovers `/mavros/...` topics through rosapi and keeps these core topics subscribed: `/mavros/state`, `/mavros/extended_state`, `/mavros/global_position/global`, `/mavros/global_position/compass_hdg`, `/mavros/global_position/rel_alt`, `/mavros/local_position/pose`, `/mavros/local_position/velocity_local`, `/mavros/battery`, `/mavros/imu/data`, `/mavros/home_position/home`, and `/mavros/gpsstatus/gps1/raw`.
+
+Canonical aliases are published at `/vehicles/px4-uav/navsatfix`, `/vehicles/px4-uav/pose`, `/vehicles/px4-uav/battery`, and `/vehicles/px4-uav/heading`. All forwarded topics are ingested, written to InfluxDB, and shown in the message drawer.
+
+### Scaling simulators
+
+The compose file defines `sim-uav1` and `sim-uav2` with fixed IDs, so scaling those services without overriding `VEHICLE_ID` would create duplicate vehicle IDs. For additional vehicles, add services or run `sim_vehicle.py` instances with unique IDs. The older `sim-uav` service is commented out and should not be used as a scaling target.
+
+## Message transport
+
+![Messages](screenshots/messages.png)
+
+Native vehicle clients connect to:
 
 ```text
 ws://<server-host>:8000/ws/vehicle/<vehicle_id>
 ```
 
-Publish messages shaped like:
+Messages use ROS-shaped JSON, for example:
 
 ```json
 {
@@ -554,90 +387,25 @@ Publish messages shaped like:
   "topic": "/vehicles/uav-alpha/navsatfix",
   "type": "sensor_msgs/msg/NavSatFix",
   "stamp": 1778952000.25,
-  "msg": {
-    "header": {
-      "stamp": { "sec": 1778952000, "nanosec": 250000000 },
-      "frame_id": "map"
-    },
-    "status": { "status": 0, "service": 1 },
-    "latitude": 38.982,
-    "longitude": -76.483,
-    "altitude": 45.0,
-    "position_covariance": [0, 0, 0, 0, 0, 0, 0, 0, 0],
-    "position_covariance_type": 0
-  }
+  "msg": { "latitude": 38.982, "longitude": -76.483, "altitude": 45.0 }
 }
 ```
 
-Commands sent back to vehicles over the same socket look like:
+Commands return over the same socket. The YP rosbridge-like endpoint is `ws://<server-host>:8000/ws/rosbridge` and supports `publish`, `subscribe`, `unsubscribe`, and `command`. The PX4 profile uses a real `rosbridge_server` container before converting ROS messages to the native YP contract.
 
-```json
-{
-  "op": "command",
-  "vehicle_id": "uav-alpha",
-  "command": {
-    "type": "waypoint",
-    "target": { "latitude": 38.9825, "longitude": -76.4841, "altitude": 35.0 }
-  }
-}
-```
+Supported ROS-shaped message families include `NavSatFix`, `Pose`, `PoseStamped`, `BatteryState`, `Imu`, `MultiDOFJointTrajectory`, `mavros_msgs/State`, and `mavros_msgs/GlobalPositionTarget`.
 
-### YP Rosbridge-Like WebSocket
+## Maps, GPS, and configuration
 
-The server also exposes a small rosbridge-like endpoint:
+### YP GPS
 
-```text
-ws://<server-host>:8000/ws/rosbridge
-```
-
-Supported operations:
-
-- `publish`
-- `subscribe`
-- `unsubscribe`
-- `command`
-
-Example publish:
-
-```json
-{
-  "op": "publish",
-  "topic": "/vehicles/uav-alpha/navsatfix",
-  "type": "sensor_msgs/msg/NavSatFix",
-  "msg": {
-    "latitude": 38.982,
-    "longitude": -76.483,
-    "altitude": 45.0
-  }
-}
-```
-
-This endpoint is intentionally small and practical. The PX4/MAVROS profile uses a real `rosbridge_server` container for the ROS graph, then `px4-yp-bridge` converts those messages into the native YP vehicle WebSocket.
-
-## ROS-Shaped Messages
-
-The simulator, server, and bridge use JSON messages matching the main ROS field names for:
-
-- `trajectory_msgs/msg/MultiDOFJointTrajectoryPoint`
-- `trajectory_msgs/msg/MultiDOFJointTrajectory`
-- `sensor_msgs/msg/NavSatFix`
-- `geometry_msgs/msg/Pose`
-- `geometry_msgs/msg/PoseStamped`
-- `sensor_msgs/msg/BatteryState`
-- `sensor_msgs/msg/Imu`
-- `mavros_msgs/msg/State`
-- `mavros_msgs/msg/GlobalPositionTarget`
-
-The server does not require ROS to be installed for the normal stack. ROS is only required for the optional PX4/MAVROS profile.
-
-## YP GPS
-
-The default compose file runs:
+The default simulated YP uses:
 
 ```yaml
 GPS_MODE: sim
 HOME_LAT: "38.989639"
 HOME_LON: "-76.478643"
+HOME_ALT: "2.0"
 HEADING_DEG: "330"
 SPEED_KNOTS: "3"
 CIRCLE_LEFT_LON: "-76.487031"
@@ -645,124 +413,66 @@ CIRCLE_RIGHT_LON: "-76.479393"
 CIRCLE_CW: "true"
 ```
 
-To use a real serial GPS, change the `yp-gps` service:
+For real NMEA GPS, use `GPS_MODE: serial`, set `SERIAL_PORT` and `BAUD_RATE`, and pass the device through to the container. The publisher provides YP `NavSatFix`, `Pose`, `BatteryState`, and heartbeat messages.
 
-```yaml
-environment:
-  GPS_MODE: serial
-  SERIAL_PORT: /dev/ttyUSB0
-  BAUD_RATE: 9600
-devices:
-  - /dev/ttyUSB0:/dev/ttyUSB0
-```
+### Map tiles
 
-The GPS container publishes the YP as a `yp` vehicle with `NavSatFix`, `Pose`, `BatteryState`, and heartbeat messages so the map can center on the ship.
-
-In simulated mode, the YP starts at latitude `38.989639`, longitude `-76.478643`, heading `330` degrees, and moves at `3` knots unless those environment variables are changed.
-
-## Map Tiles
-
-The web UI has two map bases:
-
-- `Street Maps`: OpenStreetMap raster tiles.
-- `Satellite`: Esri World Imagery tiles.
-
-Each map base has three source modes:
-
-- `Auto`: serve from cache when present; otherwise fetch the visible tile from the configured online source and cache it.
-- `Cached only`: serve only previously cached tiles.
-- `Online only`: request tiles directly from the public provider in the browser.
-
-The server tile proxy uses:
+Street Maps use OpenStreetMap; Satellite uses Esri World Imagery. The server proxies and caches visible tiles at:
 
 ```text
 http://localhost:8000/tiles/osm/<z>/<x>/<y>.png
 http://localhost:8000/tiles/earth/<z>/<x>/<y>.png
 ```
 
-When the operator views or pans the map, Leaflet requests only the tiles needed for the current viewport. The server fetches missing tiles from:
-
-```text
-https://tile.openstreetmap.org/{z}/{x}/{y}.png
-https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
-```
-
-Fetched tiles are cached on the server in:
-
-```text
-data/tile-cache/
-```
-
-That folder is mounted into Docker as `/data/tile-cache`, so cached map tiles persist across container restarts and rebuilds. If a tile is not cached and the server cannot reach the internet, the server returns a plain light-blue tile instead of a broken image.
-
-Check cache status:
+Cached tiles persist in `data/tile-cache/`. Check or clear the cache:
 
 ```bash
 curl http://localhost:8000/api/tile-cache
-```
-
-Clear the cache:
-
-```bash
 rm -rf data/tile-cache
 ```
 
-The runtime app does not bulk download, pre-seed, or scan map areas. It caches only tiles requested by the active map viewport. OpenStreetMap's public tile service allows normal interactive viewing and local caching according to HTTP cache headers, but prohibits bulk downloads and offline prefetch features. The separate `scripts/download_tiles.py` helper exists for offline tile sources that explicitly permit preloading.
+Runtime viewing caches only tiles requested by the active viewport. It does not bulk download or pre-seed public providers. Use `scripts/download_tiles.py` only with offline sources that explicitly permit preloading.
 
-## Configuration
-
-Useful environment variables:
+### Main environment variables
 
 | Service | Variable | Default | Description |
 | --- | --- | --- | --- |
 | `yp-server` | `INFLUX_URL` | `http://influxdb:8086` | InfluxDB URL |
-| `yp-server` | `INFLUX_ORG` | `yp` | InfluxDB org |
-| `yp-server` | `INFLUX_BUCKET` | `telemetry` | InfluxDB bucket |
+| `yp-server` | `INFLUX_ORG` / `INFLUX_BUCKET` | `yp` / `telemetry` | InfluxDB organization and bucket |
 | `yp-server` | `INFLUX_TOKEN` | `yp-dev-token` | InfluxDB token |
-| `yp-server` | `AUTH_DB_PATH` | `/data/auth/auth.db` in Compose | SQLite account database path; host-mounted at `data/auth/` by default |
-| `yp-server` | `JWT_SECRET` | `yp-dev-secret-change-me` | JWT signing secret; set a unique long random value for any non-development deployment |
-| `yp-server` | `JWT_EXPIRATION_MINUTES` | `1440` | JWT session lifetime in minutes |
-| `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent on-demand map tile cache |
-| `yp-server` | `OSM_TILE_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Street tile source URL template |
-| `yp-server` | `EARTH_TILE_URL` | `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}` | Satellite tile source URL template |
-| `yp-server` | `MAX_TILE_ZOOM` | `20` | Maximum tile zoom level served by the proxy |
-| `yp-server` | `VEHICLE_TTL_SECONDS` | `30` | Seconds before an unheard vehicle is considered stale |
-| `yp-server` | `HISTORY_MAX_POINTS` | `5000` | Maximum position history points kept per vehicle |
-| `yp-server` | `SAR_CORRIDOR_HALF_WIDTH_M` | `50.0` | MOB search corridor half-width in metres |
-| `yp-server` | `SAR_SWATH_M` | `20.0` | SAR lane spacing in metres |
-| `yp-server` | `SAR_ALTITUDE_M` | `30.0` | SAR search altitude in metres |
-| `yp-server` | `SAR_MOB_TRACK_SECONDS` | `120.0` | Default YP history window used for MOB mission generation |
-| `yp-server` | `SAR_TAKEOFF_ALT_M` | `30.0` | SAR takeoff altitude in metres |
-| `yp-server` | `SAR_CLIMB_SPEED_MS` | `8.0` | SAR climb speed in m/s |
-| `yp-server` | `RTB_STERN_DISTANCE_M` | `35.0` | Distance behind YP heading used as RTB-follow target |
-| `yp-server` | `RTB_UPDATE_HZ` | `2.0` | Default RTB-follow waypoint update rate |
+| `yp-server` | `AUTH_DB_PATH` | `/data/auth/auth.db` | SQLite account database |
+| `yp-server` | `JWT_SECRET` | development placeholder | JWT signing secret; replace outside development |
+| `yp-server` | `JWT_EXPIRATION_MINUTES` | `1440` | Session lifetime |
+| `yp-server` | `TILE_CACHE_DIR` | `/data/tile-cache` | Persistent tile cache |
+| `yp-server` | `OSM_TILE_URL` / `EARTH_TILE_URL` | OpenStreetMap / Esri templates | Online tile sources |
+| `yp-server` | `OSM_USER_AGENT` / `OSM_REFERER` | `YPGroundStation/0.1` / `http://localhost:8080/` | Street tile request identity |
+| `yp-server` | `EARTH_USER_AGENT` / `EARTH_REFERER` | `YPGroundStation/0.1` / `http://localhost:8080/` | Satellite tile request identity |
+| `yp-server` | `TILE_MAX_CACHE_AGE_SECONDS` | `31536000` | Maximum cached tile age |
+| `yp-server` | `MAX_TILE_ZOOM` | `20` | Maximum proxy zoom |
+| `yp-server` | `VEHICLE_TTL_SECONDS` | `30` | Stale vehicle threshold |
+| `yp-server` | `HISTORY_MAX_POINTS` | `5000` | Position history limit |
+| `yp-server` | `MESSAGE_RETENTION_SECONDS` | `600` | Message retention |
+| `yp-server` | `MESSAGE_CLEANUP_INTERVAL_SECONDS` | `600` | Message cleanup interval |
+| `yp-server` | `INFLUX_MAX_WRITE_HZ` | `5` | Influx write limit |
+| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` | `35.0` / `2.0` | RTB target and update rate |
+| `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
-| `sim-*` | `VEHICLE_ID` | auto | Optional fixed vehicle ID |
-| `sim-*` | `HOME_LAT` | `38.9822` | RTB/home latitude |
-| `sim-*` | `HOME_LON` | `-76.4819` | RTB/home longitude |
+| `sim-*` | `VEHICLE_ID` | auto | Stable vehicle ID |
+| `sim-*` | `HOME_LAT` / `HOME_LON` | `38.9822` / `-76.4819` | Home/RTB position |
 | `yp-gps` | `GPS_MODE` | `sim` | `sim` or `serial` |
-| `yp-gps` | `SERIAL_PORT` | `/dev/ttyUSB0` | NMEA GPS serial device |
-| `yp-gps` | `HEADING_DEG` | `330` | Simulated YP heading in degrees |
-| `yp-gps` | `SPEED_KNOTS` | `3` | Simulated YP speed |
-| `yp-gps` | `CIRCLE_LEFT_LON` | *(unset)* | Left longitude bound for circular YP movement in sim mode |
-| `yp-gps` | `CIRCLE_RIGHT_LON` | *(unset)* | Right longitude bound for circular YP movement in sim mode |
-| `yp-gps` | `CIRCLE_CW` | `false` | `true` to start the circular track clockwise |
-| `px4-sitl-uav` | `PX4_HOME_LAT` | `38.98490` | PX4 SITL home latitude |
-| `px4-sitl-uav` | `PX4_HOME_LON` | `-76.47880` | PX4 SITL home longitude |
-| `px4-sitl-uav` | `PX4_HOME_ALT` | `45.0` | PX4 SITL home altitude |
-| `px4-sitl-uav` | `PX4_SYS_AUTOSTART` | `4001` | PX4 x500 airframe autostart ID |
-| `px4-sitl-uav` | `PX4_SIM_MODEL` | `gz_x500` | PX4 Gazebo vehicle model |
-| `px4-sitl-uav` | `PX4_GZ_MODEL` | `gz_x500` | Gazebo model spawned by PX4 |
-| `px4-yp-bridge` | `VEHICLE_ID` | `px4-uav` | Vehicle ID shown in the YP UI |
-| `px4-yp-bridge` | `ROSBRIDGE_URL` | `ws://rosbridge:9090` | Real rosbridge WebSocket URL |
-| `px4-yp-bridge` | `SETPOINT_HZ` | `5` | Global setpoint publish rate |
-| `px4-yp-bridge` | `AUTO_ARM_OFFBOARD` | `true` | Arm and switch to Offboard after waypoint command |
-| `px4-yp-bridge` | `GLOBAL_SETPOINT_FRAME` | `6` | MAVROS `GlobalPositionTarget.coordinate_frame` |
-| `px4-yp-bridge` | `DISCOVER_MAVROS_TOPICS` | `true` | Subscribe to every rosapi-discovered `/mavros/...` topic |
+| `yp-gps` | `SERIAL_PORT` / `BAUD_RATE` | `/dev/ttyUSB0` / `9600` | NMEA device settings |
+| `px4-sitl-uav` | `PX4_HOME_LAT`, `PX4_HOME_LON`, `PX4_HOME_ALT` | `38.98490`, `-76.47880`, `45.0` | PX4 home |
+| `px4-sitl-uav` | `PX4_SYS_AUTOSTART` / `PX4_SIM_MODEL` | `4001` / `gz_x500` | PX4 x500 setup |
+| `px4-yp-bridge` | `VEHICLE_ID` | `px4-uav` | UI vehicle ID |
+| `px4-yp-bridge` | `ROSBRIDGE_URL` | `ws://rosbridge:9090` | ROS bridge URL |
+| `px4-yp-bridge` | `SETPOINT_HZ` | `5` | Setpoint rate |
+| `px4-yp-bridge` | `AUTO_ARM_OFFBOARD` | `true` | Arm and request Offboard |
+| `px4-yp-bridge` | `GLOBAL_SETPOINT_FRAME` | `6` | MAVROS coordinate frame |
+| `px4-yp-bridge` | `DISCOVER_MAVROS_TOPICS` | `true` | Discover `/mavros/...` topics |
 
 ## Development
 
-Run just the backend locally:
+Backend:
 
 ```bash
 cd services/server
@@ -772,7 +482,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Run the frontend locally:
+Frontend:
 
 ```bash
 cd web
@@ -780,11 +490,13 @@ npm install
 npm run dev
 ```
 
-## Notes For Real Vehicles
+Production frontend commands are `npm run build`, `npm run build:demo`, and `npm run preview`.
+
+## Notes for real vehicles
 
 - Keep vehicle IDs stable and unique.
-- Prefer one WebSocket per vehicle.
-- Use the native WebSocket first for the smallest moving part count.
-- Set a strong `JWT_SECRET` and use unique administrator credentials before putting this on anything other than a trusted local shipboard network.
-- Validate waypoint commands on the vehicle side before forwarding to the Cube/Pixhawk.
-- Keep a manual RC/safety pilot path independent of the web UI.
+- Prefer one WebSocket per vehicle and the native WebSocket contract for the smallest moving part count.
+- Use a strong `JWT_SECRET` and unique administrator credentials.
+- Validate waypoint commands on the vehicle side before forwarding to a Cube/Pixhawk.
+- Keep an independent manual RC/safety-pilot path.
+- For camera discovery, ensure the `yp-server` container can reach the vehicle camera host on TCP port 8889.
