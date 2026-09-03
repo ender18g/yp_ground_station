@@ -210,7 +210,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [mobCorridorHalfWidthM, setMobCorridorHalfWidthM] = useState(50);
   const [mobTakeoffAltitudeM, setMobTakeoffAltitudeM] = useState(30);
   const [mobClimbSpeedMs, setMobClimbSpeedMs] = useState(8);
-  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction" | "rtk">("display");
+  const [rtkSourceType, setRtkSourceType] = useState<"serial" | "tcp" | "udp" | "disabled">("serial");
+  const [rtkHostOrPort, setRtkHostOrPort] = useState("/dev/ttyACM0");
+  const [rtkNetworkPort, setRtkNetworkPort] = useState(9000);
+  const [rtkBaudrate, setRtkBaudrate] = useState(115200);
   const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
   const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
   const [deconflictionRadii, setDeconflictionRadii] = useState<Record<string, number>>({
@@ -526,6 +530,18 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         if (typeof serverSettings.mob_climb_speed_ms === "number") {
           setMobClimbSpeedMs(serverSettings.mob_climb_speed_ms);
         }
+        if (typeof serverSettings.rtk_source_type === "string") {
+          setRtkSourceType(serverSettings.rtk_source_type as any);
+        }
+        if (typeof serverSettings.rtk_host_or_port === "string") {
+          setRtkHostOrPort(serverSettings.rtk_host_or_port);
+        }
+        if (typeof serverSettings.rtk_network_port === "number") {
+          setRtkNetworkPort(serverSettings.rtk_network_port);
+        }
+        if (typeof serverSettings.rtk_baudrate === "number") {
+          setRtkBaudrate(serverSettings.rtk_baudrate);
+        }
         setSettingsLoaded(true);
       })
       .catch(() => setSettingsLoaded(true));
@@ -550,10 +566,14 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         mob_takeoff_altitude_m: mobTakeoffAltitudeM,
         mob_climb_speed_ms: mobClimbSpeedMs,
         yp_role_vehicle_id: ypRoleVehicleId,
+        rtk_source_type: rtkSourceType,
+        rtk_host_or_port: rtkHostOrPort,
+        rtk_network_port: rtkNetworkPort,
+        rtk_baudrate: rtkBaudrate,
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -1095,6 +1115,12 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
             >
               Vessel
             </button>
+            <button
+              className={settingsTab === "rtk" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("rtk")}
+            >
+              RTK Correction
+            </button>
           </div>          {settingsTab === "display" && (
             <>
               <label>
@@ -1119,6 +1145,72 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 disabled={DEMO_MODE}
                 onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
               />
+            </>
+          )}
+          {settingsTab === "rtk" && (
+            <>
+              <label>
+                Source Mode
+                <select
+                  value={rtkSourceType}
+                  disabled={DEMO_MODE}
+                  onChange={(e) => setRtkSourceType(e.target.value as any)}
+                >
+                  <option value="disabled">Disabled</option>
+                  <option value="serial">USB / Serial Port</option>
+                  <option value="tcp">TCP Base Station / Caster</option>
+                  <option value="udp">UDP Listener</option>
+                </select>
+              </label>
+              {rtkSourceType !== "disabled" && (
+                <>
+                  <label>
+                    {rtkSourceType === "serial" ? "Serial Port Device" : "Host IP / Interface Address"}
+                    <input
+                      type="text"
+                      value={rtkHostOrPort}
+                      disabled={DEMO_MODE}
+                      placeholder={rtkSourceType === "serial" ? "/dev/ttyACM0" : "192.168.1.100"}
+                      onChange={(e) => setRtkHostOrPort(e.target.value)}
+                    />
+                  </label>
+                  {rtkSourceType === "serial" && (
+                    <label>
+                      Baud Rate
+                      <select
+                        value={rtkBaudrate}
+                        disabled={DEMO_MODE}
+                        onChange={(e) => setRtkBaudrate(Number(e.target.value))}
+                      >
+                        <option value={9600}>9600</option>
+                        <option value={19200}>19200</option>
+                        <option value={38400}>38400</option>
+                        <option value={57600}>57600</option>
+                        <option value={115200}>115200</option>
+                        <option value={230400}>230400</option>
+                        <option value={460800}>460800</option>
+                        <option value={921600}>921600</option>
+                      </select>
+                    </label>
+                  )}
+                  {(rtkSourceType === "tcp" || rtkSourceType === "udp") && (
+                    <label>
+                      Network Port
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={rtkNetworkPort}
+                        disabled={DEMO_MODE}
+                        onChange={(e) => setRtkNetworkPort(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                </>
+              )}
+              <p className="settings-hint">
+                Streams raw RTCM3 correction frames to all connected MAVLink vehicles for RTK precision navigation.
+              </p>
             </>
           )}
           {settingsTab === "deconfliction" && (

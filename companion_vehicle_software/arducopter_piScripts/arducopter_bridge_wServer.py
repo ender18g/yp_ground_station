@@ -563,6 +563,16 @@ async def telemetry_loop(current_config: dict) -> None:
                                 threading.Thread(target=_run_mob_search, args=(master, command_data["track_points"], float(command_data.get("corridor_half_width_m", 50.0)), float(command_data.get("swath_m", 20.0)), float(command_data.get("altitude_m", 30.0)), float(command_data.get("takeoff_altitude_m", SAR_TAKEOFF_ALT_M)), float(command_data.get("climb_speed_ms", SAR_CLIMB_SPEED_MS))), daemon=True).start()
                             elif cmd_type == "cancel_sar":
                                 _sar_stop_event.set()
+                            elif cmd_type == "rtcm_data":
+                                flags = command_data.get("flags", 0)
+                                data_len = command_data.get("len", 0)
+                                raw_data = command_data.get("data", [])
+                                if master and data_len > 0:
+                                    padded_payload = bytearray(raw_data + [0] * (180 - len(raw_data)))
+                                    try:
+                                        master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
+                                    except Exception as e:
+                                        print(f"[RTCM] MAVLink send error: {e}")
                             elif cmd_type == "ship_relative_trajectory":
                                 _launch_ship_relative_mission(master, command_data)
                             elif cmd_type == "mission_plan" and isinstance(command_data.get("waypoints", []), list):

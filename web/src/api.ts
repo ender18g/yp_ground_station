@@ -16,6 +16,10 @@ export interface ServerSettings {
   mob_corridor_half_width_m?: number;
   mob_takeoff_altitude_m?: number;
   mob_climb_speed_ms?: number;
+  rtk_source_type?: "serial" | "tcp" | "udp" | "disabled";
+  rtk_host_or_port?: string;
+  rtk_network_port?: number;
+  rtk_baudrate?: number;
 }
 
 // ===== Authentication helpers =====
