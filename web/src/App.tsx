@@ -7,7 +7,6 @@ import {
   CheckCircle2,
   CircleDashed,
   Crosshair,
-  Download,
   EthernetPort,
   Grid3X3,
   Layers,
@@ -19,6 +18,7 @@ import {
   Radio,
   RotateCcw,
   Route,
+  Save,
   Settings,
   Ship,
   Trash2,
@@ -175,6 +175,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [trailSeconds, setTrailSeconds] = useState(45);
   const [showSettings, setShowSettings] = useState(false);
+  const [showFlightLogOptions, setShowFlightLogOptions] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [messagePanelWidth, setMessagePanelWidth] = useState(500);
   const [topicFilters, setTopicFilters] = useState<string[]>([]);
@@ -233,6 +234,8 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const demoSimsRef = useRef<DemoVehicle[]>([]);
   const localVehicleColorsRef = useRef<Record<string, string>>({});
   const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const flightLogPanelRef = useRef<HTMLDivElement | null>(null);
+  const flightLogButtonRef = useRef<HTMLButtonElement | null>(null);
   const sitlPanelRef = useRef<HTMLDivElement | null>(null);
   const messageDrawerRef = useRef<HTMLDivElement | null>(null);
   const mapMenuRef = useRef<HTMLDivElement | null>(null);
@@ -601,6 +604,14 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         }
       }
 
+      if (showFlightLogOptions) {
+        const insideFlightLogPanel = flightLogPanelRef.current?.contains(target) ?? false;
+        const onFlightLogButton = flightLogButtonRef.current?.contains(target) ?? false;
+        if (!insideFlightLogPanel && !onFlightLogButton) {
+          setShowFlightLogOptions(false);
+        }
+      }
+
       if (showSITL) {
         const insideSITLPanel = sitlPanelRef.current?.contains(target) ?? false;
         const onSITLButton = sitlButtonRef.current?.contains(target) ?? false;
@@ -628,7 +639,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
 
     window.addEventListener("pointerdown", onPointerDown);
     return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [showSettings, showSITL, showMessages, mapMenuExpanded]);
+  }, [showSettings, showFlightLogOptions, showSITL, showMessages, mapMenuExpanded]);
 
   const vehicleList = useMemo(() => Object.values(vehicles).filter((vehicle) => vehicle.position), [vehicles]);
   const yp = vehicleList.find((vehicle) => vehicle.vehicle_type === "yp");
@@ -740,7 +751,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       const response = await exportFlightLog(flightLogHours);
       const blob = await response.blob();
       const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]
-        ?? `yp-flight-log-last-${flightLogHours}h.jsonl`;
+        ?? `yp-flight-log-last-${flightLogHours}h.jsonl.gz`;
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -749,6 +760,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+      setShowFlightLogOptions(false);
     } catch (error) {
       setFlightLogError(error instanceof Error ? error.message : "Flight log export failed");
     } finally {
@@ -925,27 +937,41 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         <div className="topbar-actions">
           {currentUser?.permissions.includes("manage_settings") && !VIEW_MODE && (
             <div className="flight-log-control">
-              <select
-                aria-label="Flight log time range"
-                value={flightLogHours}
-                disabled={flightLogExporting}
-                onChange={(event) => setFlightLogHours(Number(event.target.value))}
-              >
-                <option value={1}>1h</option>
-                <option value={4}>4h</option>
-                <option value={8}>8h</option>
-                <option value={24}>24h</option>
-              </select>
               <button
-                className="icon-button flight-log-button"
+                ref={flightLogButtonRef}
+                className={showFlightLogOptions ? "icon-button active" : "icon-button"}
                 title="Save Flight Log"
                 aria-label="Save Flight Log"
-                disabled={flightLogExporting}
-                onClick={() => void saveFlightLog()}
+                onClick={() => { setShowFlightLogOptions((value) => !value); setShowSettings(false); setShowSITL(false); }}
               >
-                {flightLogExporting ? <Loader2 className="spin" size={19} /> : <Download size={19} />}
-                <span>Save Flight Log</span>
+                <Save size={19} />
               </button>
+              {showFlightLogOptions && (
+                <div className="flight-log-panel" ref={flightLogPanelRef}>
+                  <div className="panel-title">
+                    <Save size={17} />
+                    <strong>Save Flight Log</strong>
+                  </div>
+                  <label>
+                    Include previous
+                    <span>{flightLogHours} {flightLogHours === 1 ? "hour" : "hours"}</span>
+                  </label>
+                  <input
+                    aria-label="Flight log duration"
+                    min={1}
+                    max={24}
+                    step={1}
+                    type="range"
+                    value={flightLogHours}
+                    disabled={flightLogExporting}
+                    onChange={(event) => setFlightLogHours(Number(event.target.value))}
+                  />
+                  <button className="flight-log-save-action" disabled={flightLogExporting} onClick={() => void saveFlightLog()}>
+                    {flightLogExporting ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                    {flightLogExporting ? "Saving..." : "Save log file"}
+                  </button>
+                </div>
+              )}
             </div>
           )}
           <button
@@ -985,7 +1011,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
             ref={settingsButtonRef}
             className={showSettings ? "icon-button active" : "icon-button"}
             title="Settings"
-            onClick={() => { setShowSettings((value) => !value); setShowSITL(false); }}
+            onClick={() => { setShowSettings((value) => !value); setShowFlightLogOptions(false); setShowSITL(false); }}
           >
             <Settings size={19} />
           </button>
@@ -1005,6 +1031,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
             <LogOut size={19} />
           </button>
         </div>
+        {flightLogError && <div className="flight-log-error" role="alert">{flightLogError}</div>}
       </div>
 
       {showSITL && !DEMO_MODE && (
@@ -3657,7 +3684,6 @@ function MapActionMenu({
           </div>
         )}
       </div>
-        {flightLogError && <div className="flight-log-error" role="alert">{flightLogError}</div>}
     </div>
   );
 }

@@ -114,6 +114,14 @@ The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, and
 
 Settings persist in SQLite and are available through `GET` and `PUT /api/settings`. Deconfliction settings use `GET` and `PUT /api/deconfliction/settings`.
 
+### Flight log export
+
+Users with the `manage_settings` permission can open the disk icon in the top toolbar, choose a duration, and download retained `yp_messages` data. Exports are gzip-compressed JSON Lines (`.jsonl.gz`) files that can be opened with standard tools on Windows, macOS, and Linux. The first decompressed line contains metadata, followed by records with `timestamp`, `vehicle_id`, `vehicle_type`, and `fields`; heartbeat messages are excluded.
+
+On Linux or macOS, this is a gzip-compressed text file rather than a tar archive. Use `gzip -t flight-log.jsonl.gz` to validate it, then `gzip -dk flight-log.jsonl.gz` to create `flight-log.jsonl` while keeping the compressed file. Do not use `tar -xzf`, which expects a `.tar.gz` archive and can report `missing type keyword in mtree specification` for this file. On Windows, 7-Zip can extract the `.gz` file directly.
+
+Exports do not modify InfluxDB and include only data still retained there. The `message_retention_seconds` setting may remove older records before they can be exported.
+
 ### Demo and view-only modes
 
 Static demo mode renders local vehicles without a live server. Use `/demo`, `?demo=true`, or build with `VITE_STATIC_DEMO=true`.

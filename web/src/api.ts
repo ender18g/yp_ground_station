@@ -189,6 +189,23 @@ export async function updateSettings(settings: Partial<ServerSettings>): Promise
   return response.json();
 }
 
+export async function exportFlightLog(lastHours: number): Promise<Response> {
+  const response = await fetch(`/api/logs/export?last_hours=${encodeURIComponent(lastHours)}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    let message = `flight log export failed: ${response.status}`;
+    try {
+      const body = await response.json() as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      // Keep the HTTP status message when the server did not return JSON.
+    }
+    throw new Error(message);
+  }
+  return response;
+}
+
 // ===== Deconfliction API =====
 
 export interface DeconflictionSettings {

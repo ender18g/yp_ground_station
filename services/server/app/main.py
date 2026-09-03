@@ -11,8 +11,9 @@ import queue as _stdlib_queue
 import re
 import threading
 import time
+import zlib
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -28,7 +29,7 @@ except ImportError:  # pragma: no cover
 
 from fastapi import Body, FastAPI, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -157,6 +158,7 @@ influx_client: Optional[InfluxDBClient] = None
 tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
 delete_api = None
+query_api = None
 cleanup_task: Optional[asyncio.Task[None]] = None
 
 # YP role assignment: any vehicle whose vehicle_id matches this value will be
@@ -377,7 +379,7 @@ async def root() -> dict[str, Any]:
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize the tile cache dir, HTTP/InfluxDB clients, auth database, and background tasks."""
-    global cleanup_task, delete_api, influx_client, tile_http_client, write_api
+    global cleanup_task, delete_api, influx_client, tile_http_client, write_api, query_api
     # Initialize authentication database
     init_database()
 
@@ -410,6 +412,7 @@ async def startup() -> None:
         influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
         delete_api = influx_client.delete_api()
+        query_api = influx_client.query_api()
     except Exception as exc:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
@@ -1295,6 +1298,133 @@ async def delete_video_stream(vehicle_id: str, authorization: Optional[str] = He
 async def get_settings() -> dict[str, Any]:
     """Return the current server-wide runtime settings."""
     return {**settings, "yp_role_vehicle_id": _yp_role_vehicle_id}
+
+
+def _parse_log_time(value: str, name: str) -> datetime:
+    """Parse an ISO-8601 timestamp and normalize it to UTC."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _log_range(start: Optional[str], end: Optional[str], last_hours: Optional[float]) -> tuple[datetime, datetime]:
+    """Validate an explicit or relative export time range."""
+    if last_hours is not None:
+        if start or end:
+            raise ValueError("use either last_hours or start/end, not both")
+        if not math.isfinite(last_hours) or last_hours <= 0 or last_hours > 30 * 24:
+            raise ValueError("last_hours must be greater than zero and no more than 30 days")
+        end_time = datetime.now(timezone.utc)
+        return end_time - timedelta(hours=last_hours), end_time
+    if not start or not end:
+        raise ValueError("start and end timestamps are required")
+    start_time = _parse_log_time(start, "start")
+    end_time = _parse_log_time(end, "end")
+    if start_time >= end_time:
+        raise ValueError("start must be before end")
+    if end_time > datetime.now(timezone.utc) + timedelta(minutes=1):
+        raise ValueError("end cannot be in the future")
+    if end_time - start_time > timedelta(days=30):
+        raise ValueError("the export range cannot exceed 30 days")
+    return start_time, end_time
+
+
+def _format_log_time(value: datetime) -> str:
+    """Format a timestamp consistently for exported log records."""
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _influx_log_record(record: Any) -> dict[str, Any]:
+    """Convert a pivoted Influx record to the public JSONL record shape."""
+    values = record.values
+    fields = {
+        key: value
+        for key, value in values.items()
+        if key not in {"result", "table", "_start", "_stop", "_time", "_measurement", "vehicle_id", "vehicle_type", "topic", "msg_type"}
+    }
+    return {
+        "timestamp": _format_log_time(record.get_time()),
+        "vehicle_id": values.get("vehicle_id", "unknown"),
+        "vehicle_type": values.get("vehicle_type", "unknown"),
+        "fields": fields,
+    }
+
+
+def _is_heartbeat_record(record: Any) -> bool:
+    """Return whether an Influx record represents a heartbeat message."""
+    message_type = str(record.values.get("msg_type", ""))
+    topic = str(record.values.get("topic", ""))
+    return message_type.lower().endswith("heartbeat") or topic.lower().rstrip("/").endswith("/heartbeat")
+
+
+def _query_log_records(start: datetime, end: datetime) -> Any:
+    """Create a streaming query for the retained yp_messages measurement."""
+    if not query_api:
+        raise RuntimeError("InfluxDB is unavailable")
+    start_value = _format_log_time(start)
+    end_value = _format_log_time(end)
+    flux = f'''from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: time(v: "{start_value}"), stop: time(v: "{end_value}"))
+  |> filter(fn: (r) => r._measurement == "yp_messages")
+  |> pivot(rowKey: ["_time", "vehicle_id", "vehicle_type", "topic", "msg_type"], columnKey: ["_field"], valueColumn: "_value")'''
+    return query_api.query_stream(query=flux, org=INFLUX_ORG)
+
+
+@app.get("/api/logs/export")
+async def export_log(
+    start: Optional[str] = Query(default=None),
+    end: Optional[str] = Query(default=None),
+    last_hours: Optional[float] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Response:
+    """Stream retained yp_messages data as a JSON Lines flight log."""
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
+    try:
+        start_time, end_time = _log_range(start, end, last_hours)
+        records = (record for record in _query_log_records(start_time, end_time) if not _is_heartbeat_record(record))
+        first_record = next(records)
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    except StopIteration:
+        return JSONResponse({"error": "No retained log data exists in the requested range"}, status_code=404)
+    except Exception as error:
+        print(f"Flight log export failed: {error}")
+        return JSONResponse({"error": "Unable to query retained flight log data"}, status_code=503)
+
+    metadata = {
+        "format": "yp-ground-station-log",
+        "schema_version": 1,
+        "exported_at": _format_log_time(datetime.now(timezone.utc)),
+        "start": _format_log_time(start_time),
+        "end": _format_log_time(end_time),
+        "bucket": INFLUX_BUCKET,
+        "measurement": "yp_messages",
+    }
+
+    def lines() -> Any:
+        compressor = zlib.compressobj(wbits=31)
+
+        def compress(line: str) -> bytes:
+            return compressor.compress(line.encode("utf-8"))
+
+        yield compress(json.dumps(metadata, separators=(",", ":")) + "\n")
+        yield compress(json.dumps(_influx_log_record(first_record), separators=(",", ":"), default=str) + "\n")
+        for record in records:
+            yield compress(json.dumps(_influx_log_record(record), separators=(",", ":"), default=str) + "\n")
+        yield compressor.flush()
+
+    filename = f"yp-flight-log-{start_time.strftime('%Y%m%dT%H%M%SZ')}-{end_time.strftime('%Y%m%dT%H%M%SZ')}.jsonl.gz"
+    return StreamingResponse(
+        lines(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.put("/api/settings")
@@ -2744,6 +2874,8 @@ def write_influx(payload: dict[str, Any]) -> None:
     """Build an InfluxDB point from a message payload and enqueue it for writing."""
     if not write_api:
         return
+    if _is_heartbeat_payload(payload):
+        return
     if not should_write_influx(payload):
         return
     try:
@@ -2764,6 +2896,13 @@ def write_influx(payload: dict[str, Any]) -> None:
         _influx_write_queue.put_nowait(point)
     except _stdlib_queue.Full:
         pass  # drop under back-pressure rather than stall
+
+
+def _is_heartbeat_payload(payload: dict[str, Any]) -> bool:
+    """Return whether an incoming payload is a heartbeat message."""
+    message_type = str(payload.get("type", ""))
+    topic = str(payload.get("topic", ""))
+    return message_type.lower().endswith("heartbeat") or topic.lower().rstrip("/").endswith("/heartbeat")
 
 
 def should_write_influx(payload: dict[str, Any]) -> bool:

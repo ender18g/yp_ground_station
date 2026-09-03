@@ -65,6 +65,7 @@ input {
 .map-menu,
 .map-menu-toggle,
 .settings-panel,
+.flight-log-panel,
 .target-banner,
 .fit-control {
   border: 1px solid rgba(21, 32, 43, 0.16);
@@ -141,25 +142,10 @@ input {
 }
 
 .flight-log-control {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.flight-log-control select {
-  height: 38px;
-  border: 1px solid rgba(21, 32, 43, 0.2);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.94);
-  color: #10243f;
-  font-weight: 700;
-}
-
-.flight-log-button {
-  width: auto;
-  gap: 6px;
-  padding: 0 10px;
-  white-space: nowrap;
 }
 
 .flight-log-error {
@@ -409,6 +395,49 @@ input {
   overscroll-behavior: contain;
   padding: 14px;
   border-radius: 8px;
+}
+
+.flight-log-panel {
+  position: absolute;
+  z-index: 900;
+  top: 48px;
+  right: 0;
+  width: min(280px, calc(100vw - 32px));
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.flight-log-panel label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #334155;
+  font-size: 14px;
+}
+
+.flight-log-panel input[type="range"] {
+  width: 100%;
+  margin: 4px 0 14px;
+}
+
+.flight-log-save-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #1d4ed8;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.flight-log-save-action:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .user-management-panel {
