@@ -175,6 +175,70 @@ input {
   pointer-events: auto;
 }
 
+.wind-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 420;
+  pointer-events: none;
+}
+
+.wind-arrow-line,
+.wind-arrow-head {
+  fill: none;
+  stroke: rgba(56, 189, 248, 0.62);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+  filter: drop-shadow(0 1px 2px rgba(8, 47, 73, 0.22));
+}
+
+.wind-arrow-head { stroke-width: 2.5; }
+
+.wind-arrow-dot {
+  fill: rgba(56, 189, 248, 0.16);
+  stroke: rgba(56, 189, 248, 0.54);
+  stroke-width: 1.5;
+}
+
+.wind-readout {
+  position: absolute;
+  left: 50%;
+  bottom: 38px;
+  transform: translateX(-50%);
+  z-index: 860;
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  padding: 5px 9px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.58);
+  color: rgba(240, 249, 255, 0.94);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: auto;
+}
+
+.wind-readout span { white-space: nowrap; }
+
+.readout-row {
+  display: grid;
+  grid-template-columns: 34px 3ch 10px 6ch;
+  column-gap: 5px;
+  align-items: baseline;
+}
+
+.readout-label { text-align: left; }
+.readout-heading, .readout-speed { text-align: right; }
+.readout-at { text-align: center; }
+
+.wind-readout:hover {
+  background: rgba(15, 23, 42, 0.72);
+  border-color: rgba(56, 189, 248, 0.54);
+}
+
 .map-menu fieldset {
   display: grid;
   gap: 7px;

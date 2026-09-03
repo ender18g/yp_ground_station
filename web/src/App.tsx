@@ -30,7 +30,8 @@ import {
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, Suspense, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
+import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, WMSTileLayer, useMap, useMapEvents } from "react-leaflet";
+import { createPortal } from "react-dom";
 
 import { connectSITL, disconnectSITL, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, websocketUrl, isAuthenticated, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
 import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
@@ -55,6 +56,17 @@ const YP_DEMO_HEADING = 330;
 const DEMO_KEEP_IN_RANGE_M = 200;
 const LOW_BATTERY_THRESHOLD = 0.25;
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
+const WEATHER_RADAR_WMS_URL = "https://mapservices.weather.noaa.gov/eventdriven/services/radar/radar_base_reflectivity/MapServer/WMSServer";
+const WEATHER_RADAR_REFRESH_MS = 10 * 60 * 1000;
+const WEATHER_RADAR_OPACITY = 0.48;
+const TRANSPARENT_TILE_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const WIND_OVERLAY_REFRESH_MS = 15 * 60 * 1000;
+const WIND_OVERLAY_SOURCE = "Open-Meteo";
+const WIND_OVERLAY_ATTRIBUTION = `Wind &copy; ${WIND_OVERLAY_SOURCE}`;
+const WIND_SAMPLE_COLUMNS = 4;
+const WIND_SAMPLE_ROWS = 3;
+const WIND_FETCH_TIMEOUT_MS = 7000;
 
 /** Mode availability by vehicle type (ArduPilot-based vehicles and PX4) */
 const VEHICLE_MODES: Record<string, string[]> = {
@@ -68,6 +80,26 @@ const VEHICLE_MODES: Record<string, string[]> = {
 
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
+
+interface WindSample {
+  id: string;
+  latitude: number;
+  longitude: number;
+  speedKmh: number;
+  directionDeg: number;
+}
+
+type ProjectedWindSample = WindSample & { x: number; y: number };
+
+interface WindState {
+  samples: WindSample[];
+  projectedSamples: ProjectedWindSample[];
+}
+
+interface YpReadout {
+  headingDeg?: number;
+  speedKts?: number;
+}
 
 interface LocalWaypoint {
   id: string;
@@ -147,6 +179,8 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [topicFilters, setTopicFilters] = useState<string[]>([]);
   const [messageLog, setMessageLog] = useState<StreamMessage[]>([]);
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
+  const [showWeatherRadar, setShowWeatherRadar] = useState(false);
+  const [showWindOverlay, setShowWindOverlay] = useState(false);
   const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
   const [mapMenuExpanded, setMapMenuExpanded] = useState(false);
   const [mapZoom, setMapZoom] = useState(17);
@@ -701,6 +735,8 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       {activeTab === "map" ? (
         <MapContainer center={mapCenter} zoom={mapZoom} minZoom={3} maxZoom={20} zoomControl className="map">
           <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} maxNativeZoom={mapLayer.maxNativeZoom} maxZoom={20} />
+                    {showWeatherRadar && <WeatherRadarLayer />}
+                    <WindLayer yp={yp} showVectors={showWindOverlay} onToggleVectors={() => setShowWindOverlay((value) => !value)} />
           <MapZoomTracker onZoom={setMapZoom} />
           <MapCommander
             onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
@@ -823,6 +859,10 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
           onExpandedChange={setMapMenuExpanded}
           onMapBaseChange={setMapBase}
           onMapSourceChange={setMapSource}
+          showWeatherRadar={showWeatherRadar}
+          showWindOverlay={showWindOverlay}
+          onWeatherRadarChange={setShowWeatherRadar}
+          onWindOverlayChange={setShowWindOverlay}
         />
       )}
 
@@ -2807,6 +2847,191 @@ function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribut
   }[source];
 }
 
+function WeatherRadarLayer() {
+  const [radarCacheBucket, setRadarCacheBucket] = useState(() => Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS));
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setRadarCacheBucket(Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS)), WEATHER_RADAR_REFRESH_MS);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return (
+    <WMSTileLayer
+      key={`weather-radar-${radarCacheBucket}`}
+      url={`${WEATHER_RADAR_WMS_URL}?radar_cache=${radarCacheBucket}`}
+      layers="1"
+      format="image/png"
+      transparent
+      opacity={WEATHER_RADAR_OPACITY}
+      attribution="Radar &copy; NOAA/NWS"
+      errorTileUrl={TRANSPARENT_TILE_DATA_URL}
+      eventHandlers={{
+        tileerror: (event) => {
+          const tile = (event as unknown as { tile?: HTMLImageElement }).tile;
+          if (tile) tile.src = TRANSPARENT_TILE_DATA_URL;
+        },
+      }}
+    />
+  );
+}
+
+function WindLayer({ yp, showVectors, onToggleVectors }: { yp?: Vehicle; showVectors: boolean; onToggleVectors: () => void }) {
+  const map = useMap();
+  const [windState, setWindState] = useState<WindState>({ samples: [], projectedSamples: [] });
+  const sampleKeyRef = useRef("");
+  const samplesRef = useRef<WindSample[]>([]);
+
+  useEffect(() => {
+    if (!showVectors) return;
+    map.attributionControl.addAttribution(WIND_OVERLAY_ATTRIBUTION);
+    return () => {
+      map.attributionControl.removeAttribution(WIND_OVERLAY_ATTRIBUTION);
+    };
+  }, [map, showVectors]);
+
+  useEffect(() => { samplesRef.current = windState.samples; }, [windState.samples]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let controller: AbortController | null = null;
+    const refreshSamples = () => {
+      const points = windSamplePoints(map);
+      const bucket = Math.floor(Date.now() / WIND_OVERLAY_REFRESH_MS);
+      const nextKey = `${bucket}:${points.map((point) => `${point.latitude.toFixed(2)},${point.longitude.toFixed(2)}`).join("|")}`;
+      if (nextKey === sampleKeyRef.current) {
+        setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
+        return;
+      }
+      sampleKeyRef.current = nextKey;
+      controller?.abort();
+      controller = new AbortController();
+      fetchWindSamples(points, controller.signal).then((nextSamples) => {
+        if (!cancelled) {
+          samplesRef.current = nextSamples;
+          setWindState({ samples: nextSamples, projectedSamples: projectWindSamples(map, nextSamples) });
+        }
+      });
+    };
+    const updateProjection = () => setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
+    refreshSamples();
+    map.on("moveend zoomend resize", refreshSamples);
+    map.on("move zoom", updateProjection);
+    const interval = window.setInterval(refreshSamples, WIND_OVERLAY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      window.clearInterval(interval);
+      map.off("moveend zoomend resize", refreshSamples);
+      map.off("move zoom", updateProjection);
+    };
+  }, [map]);
+
+  const windReadout = windState.samples.length > 0 ? representativeWindSample(windState.samples) : null;
+  const ypReadout = readoutForYp(yp);
+  if (!windReadout && !ypReadout) return null;
+
+  return createPortal(
+    <>
+      {showVectors && windState.projectedSamples.length > 0 && (
+        <div className="wind-overlay" aria-hidden="true">
+          <svg width="100%" height="100%" focusable="false">
+            {windState.projectedSamples.map((sample) => (
+              <g key={sample.id} transform={`translate(${sample.x.toFixed(1)} ${sample.y.toFixed(1)}) rotate(${windFlowDirection(sample.directionDeg)})`}>
+                <line className="wind-arrow-line" x1="0" y1="13" x2="0" y2={windArrowTipY(sample.speedKmh)} />
+                <path className="wind-arrow-head" d={`M -5 ${windArrowTipY(sample.speedKmh) + 7} L 0 ${windArrowTipY(sample.speedKmh)} L 5 ${windArrowTipY(sample.speedKmh) + 7}`} />
+                <circle className="wind-arrow-dot" cx="0" cy="13" r="2.4" />
+              </g>
+            ))}
+          </svg>
+        </div>
+      )}
+      <button className="wind-readout" type="button" title="Toggle wind vectors" onClick={onToggleVectors}>
+        {ypReadout && <ReadoutRow label="YP" heading={formatHeading(ypReadout.headingDeg)} speed={formatKnots(ypReadout.speedKts)} />}
+        {windReadout && <ReadoutRow label="Wind" heading={formatHeading(windReadout.directionDeg)} speed={formatKnots(kmhToKnots(windReadout.speedKmh))} />}
+      </button>
+    </>,
+    map.getContainer(),
+  );
+}
+
+function ReadoutRow({ label, heading, speed }: { label: string; heading: string; speed: string }) {
+  return <span className="readout-row"><span className="readout-label">{label}:</span><span className="readout-heading">{heading}</span><span className="readout-at">@</span><span className="readout-speed">{speed} kts</span></span>;
+}
+
+function windSamplePoints(map: L.Map): Array<{ latitude: number; longitude: number }> {
+  const size = map.getSize();
+  const points: Array<{ latitude: number; longitude: number }> = [];
+  for (let row = 0; row < WIND_SAMPLE_ROWS; row += 1) {
+    for (let column = 0; column < WIND_SAMPLE_COLUMNS; column += 1) {
+      const latLng = map.containerPointToLatLng([(column + 0.5) / WIND_SAMPLE_COLUMNS * size.x, (row + 0.5) / WIND_SAMPLE_ROWS * size.y]);
+      points.push({ latitude: latLng.lat, longitude: latLng.lng });
+    }
+  }
+  return points;
+}
+
+function projectWindSamples(map: L.Map, samples: WindSample[]): ProjectedWindSample[] {
+  return samples.map((sample) => {
+    const point = map.latLngToContainerPoint([sample.latitude, sample.longitude]);
+    return { ...sample, x: point.x, y: point.y };
+  });
+}
+
+async function fetchWindSamples(points: Array<{ latitude: number; longitude: number }>, signal: AbortSignal): Promise<WindSample[]> {
+  const results = await Promise.allSettled(points.map((point, index) => fetchWindSample(point.latitude, point.longitude, index, signal)));
+  return results.flatMap((result) => (result.status === "fulfilled" && result.value ? [result.value] : []));
+}
+
+async function fetchWindSample(latitude: number, longitude: number, index: number, signal: AbortSignal): Promise<WindSample | null> {
+  const timeoutController = new AbortController();
+  const timeout = window.setTimeout(() => timeoutController.abort(), WIND_FETCH_TIMEOUT_MS);
+  const abortListener = () => timeoutController.abort();
+  signal.addEventListener("abort", abortListener, { once: true });
+  try {
+    const params = new URLSearchParams({ latitude: latitude.toFixed(4), longitude: longitude.toFixed(4), current: "wind_speed_10m,wind_direction_10m", wind_speed_unit: "kmh", timezone: "UTC" });
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, { signal: timeoutController.signal });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as { current?: { wind_speed_10m?: number; wind_direction_10m?: number } };
+    const speedKmh = Number(payload.current?.wind_speed_10m);
+    const directionDeg = Number(payload.current?.wind_direction_10m);
+    if (!Number.isFinite(speedKmh) || !Number.isFinite(directionDeg)) return null;
+    return { id: `${index}-${latitude.toFixed(3)}-${longitude.toFixed(3)}`, latitude, longitude, speedKmh, directionDeg };
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+    signal.removeEventListener("abort", abortListener);
+  }
+}
+
+function windArrowTipY(speedKmh: number): number { return -Math.min(30, Math.max(14, 11 + speedKmh * 0.55)); }
+function windFlowDirection(directionDeg: number): number { return (directionDeg + 180) % 360; }
+function representativeWindSample(samples: WindSample[]): WindSample { return samples[Math.floor(samples.length / 2)] ?? samples[0]; }
+function kmhToKnots(speedKmh: number): number { return speedKmh * 0.539957; }
+function readoutForYp(yp?: Vehicle): YpReadout | null {
+  if (!yp) return null;
+  const headingDeg = Number.isFinite(yp.heading) ? yp.heading : undefined;
+  const speedKts = speedKnotsFromHistory(yp.history);
+  if (headingDeg == null && speedKts == null) return null;
+  return { headingDeg, speedKts };
+}
+function speedKnotsFromHistory(history?: Vehicle["history"]): number | undefined {
+  if (!history || history.length < 2) return undefined;
+  const recent = [...history].reverse();
+  const latest = recent.find((point) => point.stamp != null);
+  const previous = latest ? recent.find((point) => point !== latest && point.stamp != null && latest.stamp! - point.stamp! > 0.1) : undefined;
+  if (!latest || !previous || latest.stamp == null || previous.stamp == null) return undefined;
+  const elapsedSeconds = latest.stamp - previous.stamp;
+  if (elapsedSeconds <= 0) return undefined;
+  return metersPerSecondToKnots(haversineMeters(previous.latitude, previous.longitude, latest.latitude, latest.longitude) / elapsedSeconds);
+}
+function metersPerSecondToKnots(speedMps: number): number { return speedMps * 1.943844; }
+function formatHeading(directionDeg?: number): string {
+  if (typeof directionDeg !== "number" || !Number.isFinite(directionDeg)) return "---";
+  return String(((Math.round(directionDeg) % 360) + 360) % 360).padStart(3, "0");
+}
+function formatKnots(speedKts?: number): string { return typeof speedKts === "number" && Number.isFinite(speedKts) ? String(Math.round(speedKts)) : "--"; }
+
 function useIsPhoneViewer(): boolean {
   const query = "(pointer: coarse)";
   const getMatches = () => (typeof window === "undefined" ? false : isPhoneBrowser() && window.matchMedia(query).matches);
@@ -3158,21 +3383,29 @@ function SITLPanel({
 function MapMenu({
   mapBase,
   mapSource,
+  showWeatherRadar,
+  showWindOverlay,
   expanded,
   setMenuRef,
   setToggleRef,
   onExpandedChange,
   onMapBaseChange,
   onMapSourceChange,
+  onWeatherRadarChange,
+  onWindOverlayChange,
 }: {
   mapBase: MapBase;
   mapSource: MapSource;
+  showWeatherRadar: boolean;
+  showWindOverlay: boolean;
   expanded: boolean;
   setMenuRef: (node: HTMLDivElement | null) => void;
   setToggleRef: (node: HTMLButtonElement | null) => void;
   onExpandedChange: (expanded: boolean) => void;
   onMapBaseChange: (base: MapBase) => void;
   onMapSourceChange: (source: MapSource) => void;
+  onWeatherRadarChange: (show: boolean) => void;
+  onWindOverlayChange: (show: boolean) => void;
 }) {
   return (
     <div className="map-menu-shell" aria-label="Map options">
@@ -3205,6 +3438,17 @@ function MapMenu({
             <label>
               <input type="radio" name="map-source" value="online" checked={mapSource === "online"} onChange={() => onMapSourceChange("online")} />
               Online only
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>Overlay</legend>
+            <label>
+              <input type="checkbox" checked={showWeatherRadar} onChange={(event) => onWeatherRadarChange(event.target.checked)} />
+              Weather radar
+            </label>
+            <label>
+              <input type="checkbox" checked={showWindOverlay} onChange={(event) => onWindOverlayChange(event.target.checked)} />
+              Winds
             </label>
           </fieldset>
         </div>
