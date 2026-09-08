@@ -24,45 +24,27 @@ export interface ServerSettings {
 
 // ===== Authentication helpers =====
 
-export function getAuthToken(): string | null {
-  return localStorage.getItem("auth_token");
-}
-
-export function getUsername(): string | null {
-  return localStorage.getItem("username");
-}
-
-export function isAuthenticated(): boolean {
-  return !!getAuthToken();
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  return fetch(input, { credentials: "include", ...init });
 }
 
 export function logout(): void {
-  localStorage.removeItem("auth_token");
-  localStorage.removeItem("username");
+  void apiFetch("/api/auth/logout", { method: "POST" });
 }
 
 export function getAuthHeaders(): HeadersInit {
-  const token = getAuthToken();
-  return token
-    ? {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      }
-    : { "Content-Type": "application/json" };
+  return { "Content-Type": "application/json" };
 }
 
 export function websocketUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const token = getAuthToken();
-  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-  return `${protocol}//${window.location.host}${path}${tokenParam}`;
+  return `${protocol}//${window.location.host}${path}`;
 }
 
 // ===== Authentication API =====
 
 export interface LoginResult {
   ok: boolean;
-  access_token?: string;
   token_type?: string;
   user?: {
     username: string;
@@ -72,7 +54,7 @@ export interface LoginResult {
 }
 
 export async function login(username: string, password: string): Promise<LoginResult> {
-  const response = await fetch("/api/auth/login", {
+  const response = await apiFetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -90,7 +72,7 @@ export interface CurrentUser {
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {
   try {
-    const response = await fetch("/api/auth/me", {
+    const response = await apiFetch("/api/auth/me", {
       headers: getAuthHeaders(),
     });
     if (!response.ok) return null;
@@ -119,14 +101,14 @@ async function authApiResponse(response: Response): Promise<void> {
 }
 
 export async function listUsers(): Promise<ManagedUser[]> {
-  const response = await fetch("/api/auth/users", { headers: getAuthHeaders() });
+  const response = await apiFetch("/api/auth/users", { headers: getAuthHeaders() });
   await authApiResponse(response);
   const payload = await response.json();
   return payload.users ?? [];
 }
 
 export async function createUser(username: string, password: string, permissionLevel: PermissionLevel): Promise<void> {
-  const response = await fetch("/api/auth/users", {
+  const response = await apiFetch("/api/auth/users", {
     method: "POST",
     headers: getAuthHeaders(),
     body: JSON.stringify({ username, password, permission_level: permissionLevel }),
@@ -135,7 +117,7 @@ export async function createUser(username: string, password: string, permissionL
 }
 
 export async function updateUserPermission(username: string, permissionLevel: PermissionLevel): Promise<void> {
-  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
+  const response = await apiFetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
     method: "PUT",
     headers: getAuthHeaders(),
     body: JSON.stringify({ permission_level: permissionLevel }),
@@ -144,7 +126,7 @@ export async function updateUserPermission(username: string, permissionLevel: Pe
 }
 
 export async function updateUserPermissions(username: string, permissions: string[]): Promise<void> {
-  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
+  const response = await apiFetch(`/api/auth/users/${encodeURIComponent(username)}/permissions`, {
     method: "PUT",
     headers: getAuthHeaders(),
     body: JSON.stringify({ permissions }),
@@ -153,7 +135,7 @@ export async function updateUserPermissions(username: string, permissions: strin
 }
 
 export async function updateUserPassword(username: string, password: string): Promise<void> {
-  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/password`, {
+  const response = await apiFetch(`/api/auth/users/${encodeURIComponent(username)}/password`, {
     method: "PUT",
     headers: getAuthHeaders(),
     body: JSON.stringify({ password }),
@@ -162,7 +144,7 @@ export async function updateUserPassword(username: string, password: string): Pr
 }
 
 export async function deleteUser(username: string): Promise<void> {
-  const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}`, {
+  const response = await apiFetch(`/api/auth/users/${encodeURIComponent(username)}`, {
     method: "DELETE",
     headers: getAuthHeaders(),
   });
@@ -172,7 +154,7 @@ export async function deleteUser(username: string): Promise<void> {
 // ===== Settings and configuration =====
 
 export async function fetchSettings(): Promise<ServerSettings> {
-  const response = await fetch("/api/settings", {
+  const response = await apiFetch("/api/settings", {
     headers: getAuthHeaders(),
   });
   if (!response.ok) {
@@ -182,7 +164,7 @@ export async function fetchSettings(): Promise<ServerSettings> {
 }
 
 export async function updateSettings(settings: Partial<ServerSettings>): Promise<ServerSettings> {
-  const response = await fetch("/api/settings", {
+  const response = await apiFetch("/api/settings", {
     method: "PUT",
     headers: getAuthHeaders(),
     body: JSON.stringify(settings),
@@ -194,7 +176,7 @@ export async function updateSettings(settings: Partial<ServerSettings>): Promise
 }
 
 export async function exportFlightLog(lastHours: number): Promise<Response> {
-  const response = await fetch(`/api/logs/export?last_hours=${encodeURIComponent(lastHours)}`, {
+  const response = await apiFetch(`/api/logs/export?last_hours=${encodeURIComponent(lastHours)}`, {
     headers: getAuthHeaders(),
   });
   if (!response.ok) {
@@ -222,7 +204,7 @@ export interface DeconflictionSettings {
 }
 
 export async function fetchDeconflictionSettings(): Promise<DeconflictionSettings> {
-  const response = await fetch("/api/deconfliction/settings", {
+  const response = await apiFetch("/api/deconfliction/settings", {
     headers: getAuthHeaders(),
   });
   if (!response.ok) {
@@ -232,7 +214,7 @@ export async function fetchDeconflictionSettings(): Promise<DeconflictionSetting
 }
 
 export async function updateDeconflictionSettings(settings: Partial<DeconflictionSettings>): Promise<DeconflictionSettings> {
-  const response = await fetch("/api/deconfliction/settings", {
+  const response = await apiFetch("/api/deconfliction/settings", {
     method: "PUT",
     headers: getAuthHeaders(),
     body: JSON.stringify(settings),
@@ -244,7 +226,7 @@ export async function updateDeconflictionSettings(settings: Partial<Deconflictio
 }
 
 export async function fetchDeconflictionConflicts(): Promise<{ enabled: boolean; conflicts: Array<{ low_priority_vehicle: string; high_priority_vehicle: string }> }> {
-  const response = await fetch("/api/deconfliction/conflicts", {
+  const response = await apiFetch("/api/deconfliction/conflicts", {
     headers: getAuthHeaders(),
   });
   if (!response.ok) {
@@ -255,7 +237,7 @@ export async function fetchDeconflictionConflicts(): Promise<{ enabled: boolean;
 
 /** Designate a vehicle as the YP (mother vessel), or pass null to clear. */
 export async function setYpRole(vehicleId: string | null): Promise<{ ok: boolean; vehicle_id: string | null }> {
-  const response = await fetch("/api/yp/role", {
+  const response = await apiFetch("/api/yp/role", {
     method: "POST",
     headers: getAuthHeaders(),
     body: JSON.stringify({ vehicle_id: vehicleId }),
@@ -295,7 +277,7 @@ export async function triggerMOB(vehicleId?: string, trackSeconds?: number, swat
   if (corridorHalfWidthM !== undefined) body.corridor_half_width_m = corridorHalfWidthM;
   if (takeoffAltitudeM !== undefined) body.takeoff_altitude_m = takeoffAltitudeM;
   if (climbSpeedMs !== undefined) body.climb_speed_ms = climbSpeedMs;
-  const response = await fetch("/api/sar/mob", {
+  const response = await apiFetch("/api/sar/mob", {
     method: "POST",
     headers: getAuthHeaders(),
     body: JSON.stringify(body),
@@ -331,7 +313,7 @@ export interface ConnectSITLResult {
 }
 
 export async function listSITLBridges(): Promise<SITLBridge[]> {
-  const response = await fetch("/api/sitl", {
+  const response = await apiFetch("/api/sitl", {
     headers: getAuthHeaders(),
   });
   if (!response.ok) return [];
@@ -343,7 +325,7 @@ export async function connectSITL(url: string, vehicleId?: string, cameraHost?: 
   const body: Record<string, string> = { url };
   if (vehicleId) body.vehicle_id = vehicleId;
   if (cameraHost) body.camera_host = cameraHost;
-  const response = await fetch("/api/sitl", {
+  const response = await apiFetch("/api/sitl", {
     method: "POST",
     headers: getAuthHeaders(),
     body: JSON.stringify(body),
@@ -354,7 +336,7 @@ export async function connectSITL(url: string, vehicleId?: string, cameraHost?: 
 }
 
 export async function disconnectSITL(vehicleId: string): Promise<void> {
-  await fetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, {
+  await apiFetch(`/api/sitl/${encodeURIComponent(vehicleId)}`, {
     method: "DELETE",
     headers: getAuthHeaders(),
   });
@@ -371,7 +353,7 @@ export interface SerialPortInfo {
 }
 
 export async function listSerialPorts(): Promise<SerialPortInfo[]> {
-  const response = await fetch("/api/serial-ports", {
+  const response = await apiFetch("/api/serial-ports", {
     headers: getAuthHeaders(),
   });
   if (!response.ok) return [];

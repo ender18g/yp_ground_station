@@ -105,14 +105,17 @@ Click a vehicle marker to open its draggable modal. It provides real-time positi
 <img src="screenshots/settings.png" alt="Settings" height="300">
 </p>
 
-The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, and Vessel.
+The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, Vessel, and RTK Correction.
 
 - **Display:** trail window, YP range rings, and database message retention.
 - **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate and stern distance.
 - **Deconfliction:** enable the feature, configure global and per-type safety radii, avoidance orbit radius, and maximum pause duration.
 - **Man Overboard:** configure track length, swath width, search altitude, corridor width, takeoff altitude, and climb speed.
+- **RTK Correction:** select a serial, TCP, UDP, or disabled RTCM3 source and configure its device or host, network port, and serial baud rate. Raw correction frames are fragmented into MAVLink `GPS_RTCM_DATA` messages and distributed to connected vehicles.
 
 Settings persist in SQLite and are available through `GET` and `PUT /api/settings`. Deconfliction settings use `GET` and `PUT /api/deconfliction/settings`.
+
+The RTK source fields are `rtk_source_type`, `rtk_host_or_port`, `rtk_network_port`, and `rtk_baudrate`. Serial sources default to `/dev/ttyACM0` at `115200` baud; TCP and UDP sources use the configured host or interface and port `9000`. The server retries unavailable sources and stops the background RTCM task on shutdown. To use a serial source in Docker, pass the device through under `yp-server` in `docker-compose.yml`.
 
 ### Flight log export
 
@@ -141,7 +144,7 @@ Live telemetry remains available, but commands are blocked for real hardware veh
 <img src="screenshots/users.png" alt="User Management" height="300">
 </p>
 
-The web UI requires a username and password. On first server startup, the default development account is created:
+The web UI requires a username and password. The browser authenticates with an HttpOnly `auth_token` cookie, so API and WebSocket requests remain authenticated without exposing a bearer token to frontend storage. On first server startup, the default development account is created:
 
 ```text
 Username: admin

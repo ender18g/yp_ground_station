@@ -1,9 +1,10 @@
 import { useState } from "react";
 import type { FC } from "react";
 import { AlertTriangle, LogIn } from "lucide-react";
+import { login } from "./api";
 
 interface LoginProps {
-  onLogin: (token: string, username: string) => void;
+  onLogin: () => void;
 }
 
 const Login: FC<LoginProps> = ({ onLogin }) => {
@@ -18,22 +19,9 @@ const Login: FC<LoginProps> = ({ onLogin }) => {
     setIsLoading(true);
 
     try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Login failed: HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.ok && data.access_token) {
-        localStorage.setItem("auth_token", data.access_token);
-        localStorage.setItem("username", username);
-        onLogin(data.access_token, username);
+      const data = await login(username, password);
+      if (data.ok) {
+        onLogin();
       } else {
         throw new Error(data.error || "Login failed");
       }

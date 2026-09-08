@@ -73,6 +73,7 @@ VIDEO_STREAMS_JSON = os.getenv("VIDEO_STREAMS_JSON", "{}")
 CAMERA_DISCOVERY_PORT = int(os.getenv("CAMERA_DISCOVERY_PORT", "8889"))
 CAMERA_PROBE_INTERVAL_SECONDS = float(os.getenv("CAMERA_PROBE_INTERVAL_SECONDS", "60.0"))
 CAMERA_PROBE_TIMEOUT_SECONDS = float(os.getenv("CAMERA_PROBE_TIMEOUT_SECONDS", "2.0"))
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
 KNOWN_BLOCKED_TILE_SHA1 = {
     "0cfb5f443183efc5921f61005aaa7f341fcfd143",
 }
@@ -95,6 +96,18 @@ _rtcm_seq_id = 0
 
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
+
+
+@app.middleware("http")
+async def authenticate_cookie_requests(request, call_next):
+    """Expose the HttpOnly auth cookie to existing bearer-auth route handlers."""
+    if not any(key.lower() == b"authorization" for key, _ in request.scope["headers"]):
+        token = request.cookies.get("auth_token")
+        if token:
+            request.scope["headers"] = list(request.scope["headers"]) + [(b"authorization", f"Bearer {token}".encode())]
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -500,19 +513,27 @@ async def login(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
         # Record login time
         record_login(username)
         
-        # Create and return JWT token
+        # Create the token only in an HttpOnly cookie; it must not be exposed to JavaScript or URLs.
         token = create_access_token(username)
-        return JSONResponse({
+        response = JSONResponse({
             "ok": True,
-            "access_token": token,
             "token_type": "bearer",
             "user": {
                 "username": user.username,
                 "permissions": sorted([p.permission for p in user.permissions])
             }
         })
+        response.set_cookie("auth_token", token, httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", max_age=60 * 60 * 24)
+        return response
     finally:
         session.close()
+
+
+@app.post("/api/auth/logout")
+async def logout() -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("auth_token", httponly=True, samesite="lax")
+    return response
 
 
 @app.get("/api/auth/me")
@@ -2168,7 +2189,8 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
     await websocket.accept()
     
     # Validate JWT token
-    user = get_current_user(token) if token else None
+    cookie_token = websocket.cookies.get("auth_token")
+    user = get_current_user(token or cookie_token)
     if not user:
         await websocket.send_json({"error": "Authentication required. Please login."})
         await websocket.close(code=4001, reason="Unauthorized")

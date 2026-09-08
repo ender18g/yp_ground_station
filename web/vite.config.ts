@@ -4,6 +4,17 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   base: process.env.GITHUB_PAGES === "true" ? "/yp_ground_station/" : "/",
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom"],
+          leaflet: ["leaflet", "react-leaflet"],
+          three: ["three", "@react-three/fiber", "@react-three/drei"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

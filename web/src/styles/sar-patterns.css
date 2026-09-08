@@ -1,0 +1,112 @@
+/* SAR pattern label tooltip */
+.sar-label-tooltip {
+  background: rgba(15, 23, 42, 0.88) !important;
+  border: none !important;
+  border-radius: 4px !important;
+  color: #f1f5f9 !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+  padding: 3px 7px !important;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+}
+.sar-label-tooltip::before {
+  display: none !important;
+}
+
+/* SAR pattern clear popup */
+.sar-clear-popup .leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.sar-clear-popup .leaflet-popup-content {
+  margin: 0;
+}
+.sar-clear-popup .leaflet-popup-tip-container {
+  display: none;
+}
+.sar-clear-popup-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px 12px;
+  min-width: 160px;
+}
+.sar-clear-popup-inner span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.3;
+}
+.sar-clear-popup-vehicle {
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  color: #64748b !important;
+  margin-bottom: 4px;
+}
+.sar-clear-btn {
+  margin-top: 2px;
+  padding: 5px 10px;
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.sar-clear-btn:hover {
+  background: #dc2626;
+}
+
+.mob-modal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.mob-confirm-btn {
+  height: 48px;
+  border: none;
+  border-radius: 8px;
+  background: #dc2626;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+  transition: background 0.15s;
+}
+
+.mob-confirm-btn:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.mob-confirm-btn:disabled {
+  background: #fca5a5;
+  cursor: default;
+}
+
+.mob-cancel-btn {
+  height: 48px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  transition: background 0.15s;
+}
+
+.mob-cancel-btn:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.mob-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
