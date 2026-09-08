@@ -108,7 +108,7 @@ Click a vehicle marker to open its draggable modal. It provides real-time positi
 The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, Vessel, and RTK Correction.
 
 - **Display:** trail window, YP range rings, and database message retention.
-- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate and stern distance.
+- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate, stern distance, and altitude.
 - **Deconfliction:** enable the feature, configure global and per-type safety radii, avoidance orbit radius, and maximum pause duration.
 - **Man Overboard:** configure track length, swath width, search altitude, corridor width, takeoff altitude, and climb speed.
 - **RTK Correction:** select a serial, TCP, UDP, or disabled RTCM3 source and configure its device or host, network port, and serial baud rate. Raw correction frames are fragmented into MAVLink `GPS_RTCM_DATA` messages and distributed to connected vehicles.
@@ -243,7 +243,7 @@ Click a vehicle, choose **Waypoint**, and click the map. The browser sends a com
 }
 ```
 
-`latitude` and `longitude` are WGS84 decimal degrees; altitude is metres. RTB sends `{ "type": "rtb" }` and starts persistent stern-follow mode. The server targets the configured distance aft of the YP heading and updates it at `rtb_update_hz` until canceled or retasked. Vehicles approaching from the bow or beam are routed around an aft quarter rather than across the YP safety envelope.
+`latitude` and `longitude` are WGS84 decimal degrees; altitude is metres. RTB sends `{ "type": "rtb" }` and starts persistent stern-follow mode. The server targets the configured distance aft of the YP heading, holds the configured `rtb_altitude_m` transit altitude, and updates at `rtb_update_hz` until canceled or retasked. Vehicles approaching from the bow or beam are routed around an aft quarter rather than across the YP safety envelope.
 
 For PX4, waypoint commands are translated to `/mavros/setpoint_raw/global` using `mavros_msgs/GlobalPositionTarget`, frame `6` (`MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`), and a default stream rate of 5 Hz. `AUTO_ARM_OFFBOARD=true` also requests `/mavros/cmd/arming true` and `/mavros/set_mode OFFBOARD`. PX4 may reject commands when sensors, EKF, preflight, or failsafe state are not ready; inspect the PX4, MAVROS, and bridge logs.
 
@@ -475,7 +475,7 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 | `yp-server` | `MESSAGE_RETENTION_SECONDS` | `600` | Message retention |
 | `yp-server` | `MESSAGE_CLEANUP_INTERVAL_SECONDS` | `600` | Message cleanup interval |
 | `yp-server` | `INFLUX_MAX_WRITE_HZ` | `5` | Influx write limit |
-| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` | `35.0` / `2.0` | RTB target and update rate |
+| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` | `35.0` / `2.0` / `30.0` | RTB target, update rate, and transit altitude |
 | `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Stable vehicle ID |

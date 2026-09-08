@@ -87,6 +87,7 @@ SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
+RTB_ALTITUDE_M = float(os.getenv("RTB_ALTITUDE_M", "30.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
@@ -194,6 +195,7 @@ settings = {
     "influx_max_write_hz": INFLUX_MAX_WRITE_HZ,
     "tile_max_cache_age_seconds": TILE_MAX_CACHE_AGE_SECONDS,
     "rtb_update_hz": RTB_UPDATE_HZ,
+    "rtb_altitude_m": RTB_ALTITUDE_M,
     # RTK Injection defaults
     "rtk_source_type": "serial",      # "serial", "tcp", "udp", or "disabled"
     "rtk_host_or_port": "/dev/ttyACM0",
@@ -415,6 +417,7 @@ async def startup() -> None:
         "message_retention_seconds": persisted_settings["message_retention_seconds"],
         "rtb_update_hz": persisted_settings["rtb_update_hz"],
         "rtb_stern_distance_m": persisted_settings["rtb_stern_distance_m"],
+        "rtb_altitude_m": persisted_settings["rtb_altitude_m"],
         "mob_track_seconds": persisted_settings["mob_track_seconds"],
         "mob_swath_m": persisted_settings["mob_swath_m"],
         "mob_altitude_m": persisted_settings["mob_altitude_m"],
@@ -1523,7 +1526,7 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
     
     supported = {
         "trail_seconds", "show_yp_range_rings", "message_retention_seconds",
-        "rtb_update_hz", "rtb_stern_distance_m",
+        "rtb_update_hz", "rtb_stern_distance_m", "rtb_altitude_m",
         "mob_track_seconds", "mob_swath_m", "mob_altitude_m",
         "mob_corridor_half_width_m", "mob_takeoff_altitude_m", "mob_climb_speed_ms",
         "yp_role_vehicle_id",
@@ -2750,7 +2753,10 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                                 float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
                             ) <= approach_tolerance:
                                 approach_side = None
-                    target_alt = float(target_pos.get("altitude") or 0.0)
+                    # Use the configured RTB transit altitude rather than the vehicle's
+                    # live altitude; re-sampling live altitude each cycle would let any
+                    # small descent become the new setpoint, causing drift.
+                    target_alt = float(settings.get("rtb_altitude_m", RTB_ALTITUDE_M))
                     yp_speed_mps = 0.0
                     yp_history = (yp_vehicle or {}).get("history") or []
                     if len(yp_history) >= 2:

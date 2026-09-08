@@ -7,6 +7,7 @@ export interface ServerSettings {
   tile_max_cache_age_seconds: number;
   rtb_update_hz?: number;
   rtb_stern_distance_m?: number;
+  rtb_altitude_m?: number;
   yp_role_vehicle_id?: string | null;
   trail_seconds?: number;
   show_yp_range_rings?: boolean;

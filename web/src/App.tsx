@@ -195,6 +195,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [flightLogError, setFlightLogError] = useState<string | null>(null);
   const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
   const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
+  const [rtbAltitudeM, setRtbAltitudeM] = useState(30);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -432,6 +433,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         if (typeof serverSettings.rtb_stern_distance_m === "number") {
           setRtbSternDistanceM(serverSettings.rtb_stern_distance_m);
         }
+        if (typeof serverSettings.rtb_altitude_m === "number") {
+          setRtbAltitudeM(serverSettings.rtb_altitude_m);
+        }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         if (typeof serverSettings.mob_track_seconds === "number") {
           setMobTrackSeconds(serverSettings.mob_track_seconds);
@@ -480,6 +484,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         message_retention_seconds: messageRetentionMinutes * 60,
         rtb_update_hz: rtbUpdateHz,
         rtb_stern_distance_m: rtbSternDistanceM,
+        rtb_altitude_m: rtbAltitudeM,
         mob_track_seconds: mobTrackSeconds,
         mob_swath_m: mobSwathM,
         mob_altitude_m: mobAltM,
@@ -494,7 +499,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -1277,6 +1282,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 <span>{rtbSternDistanceM} m</span>
               </label>
               <input min={5} max={200} step={5} type="range" value={rtbSternDistanceM} disabled={DEMO_MODE} onChange={(event) => setRtbSternDistanceM(Number(event.target.value))} />
+              <label>
+                RTB altitude
+                <span>{rtbAltitudeM} m</span>
+              </label>
+              <input min={5} max={150} step={5} type="range" value={rtbAltitudeM} disabled={DEMO_MODE} onChange={(event) => setRtbAltitudeM(Number(event.target.value))} />
             </>
           )}
           {settingsTab === "mob" && (

@@ -47,6 +47,7 @@ APPLICATION_SETTING_DEFAULTS: dict[str, Any] = {
     "message_retention_seconds": 600.0,
     "rtb_update_hz": 2.0,
     "rtb_stern_distance_m": 35.0,
+    "rtb_altitude_m": 30.0,
     "mob_track_seconds": 120.0,
     "mob_swath_m": 20.0,
     "mob_altitude_m": 30.0,
