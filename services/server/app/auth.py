@@ -5,7 +5,6 @@ via SQLite backend.
 """
 import hashlib
 import hmac
-import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Set
 
 import jwt
+from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Integer, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, selectinload, Session
@@ -24,59 +24,19 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))  # 24 hours
 
 # Permission definitions: hierarchy and what each level includes
-PERMISSION_LEVELS = {
-    "view_only": [
-        "read_telemetry",
-        "read_vehicle_status",
-    ],
-    "waypoint_command": [
-        "read_telemetry",
-        "read_vehicle_status",
-        "send_waypoint",
-        "send_rtb",
-        "set_vehicle_mode",
-        "cancel_sar",
-    ],
-    "mission_planning": [
-        "read_telemetry",
-        "read_vehicle_status",
-        "send_waypoint",
-        "send_rtb",
-        "set_vehicle_mode",
-        "cancel_sar",
-        "create_mission",
-        "upload_mission",
-        "search_grid",
-    ],
-    "man_overboard": [
-        "read_telemetry",
-        "read_vehicle_status",
-        "send_waypoint",
-        "send_rtb",
-        "set_vehicle_mode",
-        "cancel_sar",
-        "create_mission",
-        "upload_mission",
-        "search_grid",
-        "trigger_mob",
-    ],
-    "admin": [
-        "read_telemetry",
-        "read_vehicle_status",
-        "send_waypoint",
-        "send_rtb",
-        "set_vehicle_mode",
-        "cancel_sar",
-        "create_mission",
-        "upload_mission",
-        "search_grid",
-        "trigger_mob",
-        "manage_sitl",
-        "manage_users",
-        "manage_settings",
-        "manage_video_streams",
-    ],
+# Each successive level includes the permissions granted to the previous one.
+_PERMISSION_ADDITIONS = {
+    "view_only": ["read_telemetry", "read_vehicle_status"],
+    "waypoint_command": ["send_waypoint", "send_rtb", "set_vehicle_mode", "cancel_sar"],
+    "mission_planning": ["create_mission", "upload_mission", "search_grid"],
+    "man_overboard": ["trigger_mob"],
+    "admin": ["manage_sitl", "manage_users", "manage_settings", "manage_video_streams"],
 }
+PERMISSION_LEVELS: dict[str, list[str]] = {}
+_granted_permissions: list[str] = []
+for _level, _permissions in _PERMISSION_ADDITIONS.items():
+    _granted_permissions.extend(_permissions)
+    PERMISSION_LEVELS[_level] = _granted_permissions.copy()
 VALID_PERMISSIONS = frozenset(permission for level in PERMISSION_LEVELS.values() for permission in level)
 
 # Database setup
@@ -310,28 +270,10 @@ def update_user_permissions(username: str, permission_level: str) -> tuple[bool,
     if permission_level not in PERMISSION_LEVELS:
         return False, f"Invalid permission level: {permission_level}"
     
-    session = get_db_session()
-    try:
-        user = session.query(User).filter_by(username=username).first()
-        if not user:
-            return False, f"User '{username}' not found"
-        
-        # Remove all existing permissions
-        session.query(UserPermission).filter_by(user_id=user.id).delete()
-        session.flush()
-        
-        # Assign new permissions
-        for permission in PERMISSION_LEVELS[permission_level]:
-            perm = UserPermission(user_id=user.id, permission=permission)
-            session.add(perm)
-        
-        session.commit()
-        return True, f"Permissions updated for '{username}' to '{permission_level}'"
-    except Exception as e:
-        session.rollback()
-        return False, f"Error updating permissions: {str(e)}"
-    finally:
-        session.close()
+    success, message = set_user_permissions(username, set(PERMISSION_LEVELS[permission_level]))
+    if success:
+        message = f"Permissions updated for '{username}' to '{permission_level}'"
+    return success, message
 
 
 def set_user_permissions(username: str, permissions: Set[str]) -> tuple[bool, str]:
@@ -363,7 +305,7 @@ def list_users() -> list[dict]:
     """List all users with their permissions."""
     session = get_db_session()
     try:
-        users = session.query(User).all()
+        users = session.query(User).options(selectinload(User.permissions)).all()
         result = []
         for user in users:
             permissions = sorted([p.permission for p in user.permissions])
@@ -391,3 +333,16 @@ def record_login(username: str) -> None:
         pass  # Non-critical, don't fail login on this
     finally:
         session.close()
+
+
+def require_permission(authorization: Optional[str], permission: str) -> Optional[JSONResponse]:
+    """Return an authorization error response, or None when permission is granted."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return JSONResponse({"error": "missing or invalid authorization header"}, status_code=401)
+
+    user = get_current_user(authorization[7:])
+    if not user:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+    if not user.has_permission(permission):
+        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
+    return None

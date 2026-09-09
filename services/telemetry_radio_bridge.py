@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import sys
 import time
 from typing import Optional
@@ -30,10 +31,16 @@ except ImportError as exc:
         "pymavlink is required. Install with `pip install pymavlink`."
     ) from exc
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
-    import sar_missions
-except ImportError:
-    sar_missions = None
+    from yp_common import sar_missions
+except ModuleNotFoundError as exc:
+    if exc.name != "yp_common":
+        raise
+    try:
+        import sar_missions  # Support existing standalone radio directories.
+    except ImportError:
+        sar_missions = None
 
 try:
     import websockets
@@ -317,59 +324,13 @@ def send_radio_command(
             print("[COMMAND] mission_plan missing waypoints")
             return
 
-        item_type_to_cmd = {
-            "waypoint": int(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
-            "takeoff": int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
-            "loiter_time": int(mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME),
-            "land": int(mavutil.mavlink.MAV_CMD_NAV_LAND),
-            "rtl": int(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH),
-            "do_jump": int(mavutil.mavlink.MAV_CMD_DO_JUMP),
-        }
-        mission_items = []
-        for wp in waypoints:
-            if not isinstance(wp, dict):
-                continue
-            lat = wp.get("latitude")
-            lon = wp.get("longitude")
-            if lat is None or lon is None:
-                continue
-            item_type = str(wp.get("item_type") or "waypoint").lower()
-            command_id = int(wp.get("command_id") or item_type_to_cmd.get(item_type, item_type_to_cmd["waypoint"]))
-            default_p1 = float(wp.get("hold_time_s", 0.0))
-            default_p2 = float(wp.get("acceptance_radius_m", 8.0))
-            default_p3 = 0.0
-            default_p4 = float(wp.get("yaw_deg", 0.0) or 0.0)
-            mission_items.append(
-                (
-                    float(lat),
-                    float(lon),
-                    float(wp.get("altitude", 30.0)),
-                    command_id,
-                    float(wp.get("param1", default_p1)),
-                    float(wp.get("param2", default_p2)),
-                    float(wp.get("param3", default_p3)),
-                    float(wp.get("param4", default_p4)),
-                )
-            )
-
+        mission_items = sar_missions.build_mission_items(
+            waypoints,
+            force_guided_on_complete=bool(command.get("force_guided_on_complete", False)),
+        )
         if not mission_items:
             print("[COMMAND] mission_plan has no valid waypoint entries")
             return
-
-        if bool(command.get("force_guided_on_complete", False)):
-            last_lat, last_lon, last_alt = mission_items[-1][0], mission_items[-1][1], mission_items[-1][2]
-            mission_items.append(
-                (
-                    float(last_lat),
-                    float(last_lon),
-                    float(last_alt),
-                    int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE),
-                    1.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                )
-            )
 
         if not sar_missions.upload_mission(master, mission_items):
             print("[COMMAND] mission_plan upload failed")

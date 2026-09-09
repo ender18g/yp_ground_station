@@ -1,3 +1,6 @@
+For a standalone bridge directory, first create the deployment bundle described
+in companion_vehicle_software/README.md; it includes the shared mission helpers.
+
 1. Check that rpicam is connected correctly:
 
 rpicam-hello --list-cameras (should list imx chip)

@@ -1,0 +1,51 @@
+name: Validate Ground Station
+
+on:
+  push:
+    branches: [main, decentralized_bridges]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/server/requirements.txt
+      - run: pip install -r services/server/requirements.txt
+      - run: python -m unittest discover -s services/server/tests -v
+        env:
+          PYTHONPATH: services/server
+          AUTH_DB_PATH: /tmp/yp-validation-auth.db
+      - run: python -m unittest discover -s tests -v
+      - run: docker compose --profile px4 --profile arducopter --profile umaa-real config --quiet
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:demo
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: demo-browser-traces
+          path: web/test-results

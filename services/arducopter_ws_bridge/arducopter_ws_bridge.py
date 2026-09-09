@@ -10,6 +10,12 @@ from pymavlink import mavutil
 import websockets
 
 import sar_missions
+from yp_common.geometry import (
+    destination_point as _destination_point,
+    relative_waypoint_to_global as _relative_waypoint_to_global,
+    distance_m as _distance_m,
+    north_east_delta_m as _north_east_delta_m,
+)
 
 VEHICLE_ID = os.getenv("VEHICLE_ID", "arducopter-uav")
 VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "uav")
@@ -45,7 +51,6 @@ _sar_latest_nav = {
 SHIP_STATE_TIMEOUT_S = float(os.getenv("SHIP_STATE_TIMEOUT_S", "2.0"))
 SHIP_RELATIVE_DEFAULT_UPDATE_HZ = float(os.getenv("SHIP_RELATIVE_UPDATE_HZ", "10.0"))
 SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M = float(os.getenv("SHIP_RELATIVE_ARRIVAL_RADIUS_M", "6.0"))
-EARTH_RADIUS_M = 6_378_137.0
 
 _vehicle_state_lock = threading.Lock()
 _vehicle_state = {
@@ -108,51 +113,6 @@ def _ui_ws_url() -> str:
     if marker in base:
         return f"{base.split(marker, 1)[0]}/ws/ui"
     return base
-
-
-def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
-    lat_rad = math.radians(lat)
-    lon_rad = math.radians(lon)
-    bearing_rad = math.radians(bearing_deg)
-    angular = distance_m / EARTH_RADIUS_M
-    lat2 = math.asin(
-        math.sin(lat_rad) * math.cos(angular)
-        + math.cos(lat_rad) * math.sin(angular) * math.cos(bearing_rad)
-    )
-    lon2 = lon_rad + math.atan2(
-        math.sin(bearing_rad) * math.sin(angular) * math.cos(lat_rad),
-        math.cos(angular) - math.sin(lat_rad) * math.sin(lat2),
-    )
-    return math.degrees(lat2), math.degrees(lon2)
-
-
-def _relative_waypoint_to_global(ship_lat: float, ship_lon: float, ship_heading: float, ship_alt: float, waypoint: dict) -> tuple[float, float, float]:
-    local_x = float(waypoint.get("x", 0.0))
-    local_y = float(waypoint.get("y", 0.0))
-    local_z = float(waypoint.get("z", 0.0))
-    distance_m = math.hypot(local_x, local_y)
-    relative_bearing_deg = math.degrees(math.atan2(local_x, local_y))
-    bearing_deg = (ship_heading + relative_bearing_deg + 360.0) % 360.0
-    target_lat, target_lon = _destination_point(ship_lat, ship_lon, bearing_deg, distance_m)
-    return target_lat, target_lon, ship_alt + local_z
-
-
-def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-    dlat = lat2_rad - lat1_rad
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2.0) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2.0) ** 2
-    return EARTH_RADIUS_M * 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
-
-
-def _north_east_delta_m(lat_ref: float, lon_ref: float, lat: float, lon: float) -> tuple[float, float]:
-    dlat = math.radians(lat - lat_ref)
-    dlon = math.radians(lon - lon_ref)
-    lat_avg = math.radians((lat_ref + lat) / 2.0)
-    north_m = dlat * EARTH_RADIUS_M
-    east_m = dlon * EARTH_RADIUS_M * math.cos(lat_avg)
-    return north_m, east_m
 
 
 def _update_vehicle_state(lat: float, lon: float, alt: float, heading: float | None) -> None:
@@ -600,7 +560,6 @@ async def telemetry_loop() -> None:
                             
 
 
-
                     except json.JSONDecodeError:
                         print("[WARNING] Server response was not valid JSON.")
 
@@ -730,59 +689,13 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
     """Blocking: upload a mission plan and optionally arm/start it."""
     with _sar_mission_lock:
         try:
-            item_type_to_cmd = {
-                "waypoint": int(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
-                "takeoff": int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
-                "loiter_time": int(mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME),
-                "land": int(mavutil.mavlink.MAV_CMD_NAV_LAND),
-                "rtl": int(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH),
-                "do_jump": int(mavutil.mavlink.MAV_CMD_DO_JUMP),
-            }
-            mission_items = []
-            for wp in waypoints:
-                if not isinstance(wp, dict):
-                    continue
-                lat = wp.get("latitude")
-                lon = wp.get("longitude")
-                if lat is None or lon is None:
-                    continue
-                item_type = str(wp.get("item_type") or "waypoint").lower()
-                command_id = int(wp.get("command_id") or item_type_to_cmd.get(item_type, item_type_to_cmd["waypoint"]))
-                default_p1 = float(wp.get("hold_time_s", 0.0))
-                default_p2 = float(wp.get("acceptance_radius_m", 8.0))
-                default_p3 = 0.0
-                default_p4 = float(wp.get("yaw_deg", 0.0) or 0.0)
-                mission_items.append(
-                    (
-                        float(lat),
-                        float(lon),
-                        float(wp.get("altitude", 30.0)),
-                        command_id,
-                        float(wp.get("param1", default_p1)),
-                        float(wp.get("param2", default_p2)),
-                        float(wp.get("param3", default_p3)),
-                        float(wp.get("param4", default_p4)),
-                    )
-                )
-
+            mission_items = sar_missions.build_mission_items(
+                waypoints,
+                force_guided_on_complete=force_guided_on_complete,
+            )
             if not mission_items:
                 print("[MISSION] mission_plan has no valid waypoints.")
                 return
-
-            if force_guided_on_complete:
-                last_lat, last_lon, last_alt = mission_items[-1][0], mission_items[-1][1], mission_items[-1][2]
-                mission_items.append(
-                    (
-                        float(last_lat),
-                        float(last_lon),
-                        float(last_alt),
-                        int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE),
-                        1.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                    )
-                )
 
             print(f"[MISSION] Uploading mission with {len(mission_items)} waypoints")
             if not sar_missions.upload_mission(master, mission_items):
