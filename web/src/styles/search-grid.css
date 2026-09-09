@@ -1,0 +1,51 @@
+/* -------------------------------------------------------------------------
+   Search Grid section inside MapActionMenu
+   ------------------------------------------------------------------------- */
+
+.map-action-section {
+  padding-top: 4px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.search-grid-form {
+  display: grid;
+  gap: 5px;
+  padding: 6px 4px 2px;
+}
+
+.search-grid-form label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.search-grid-form input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #2563eb;
+}
+
+.search-grid-launch-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  justify-content: center;
+  width: 100%;
+  min-height: 32px;
+  margin-top: 2px;
+  border: none;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  transition: background 0.15s;
+}
+
+.search-grid-launch-btn:hover {
+  background: #1d4ed8;
+}

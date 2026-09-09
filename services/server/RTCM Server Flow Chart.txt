@@ -1,0 +1,7 @@
+flowchart TD
+    Base[Base Station: Serial / TCP / UDP] -->|RTCM3 Stream| Ingest[rtcm_ingest_loop in FastAPI]
+    Ingest -->|0xD3 Frame Parser| Dist[distribute_rtcm_frame]
+    Dist -->|180-byte Fragments| Q[vehicle_queues]
+    Q -->|SITL Bridge| MAV1[master.mav.gps_rtcm_data_send]
+    Q -->|WebSocket Bridge| Companion[Companion piScript]
+    Companion -->|MAVLink Serial| MAV2[master.mav.gps_rtcm_data_send]

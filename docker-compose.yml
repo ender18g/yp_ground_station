@@ -15,14 +15,20 @@ services:
 
   yp-server:
     build:
-      context: ./services/server
+      context: .
+      dockerfile: services/server/Dockerfile
+      network: host
     ports:
       - "8000:8000"
+      # MAVLink UDP ingress from external radios / BlueOS endpoints
+      - "14550:14550/udp"
+      - "14551:14551/udp"
     environment:
       INFLUX_URL: http://influxdb:8086
       INFLUX_ORG: yp
       INFLUX_BUCKET: telemetry
       INFLUX_TOKEN: yp-dev-token
+      AUTH_DB_PATH: /data/auth/auth.db
       TILE_DIR: /data/tiles
       TILE_CACHE_DIR: /data/tile-cache
       OSM_TILE_URL: https://tile.openstreetmap.org/{z}/{x}/{y}.png
@@ -37,14 +43,21 @@ services:
       INFLUX_MAX_WRITE_HZ: "5"
       TILE_MAX_CACHE_AGE_SECONDS: "31536000"
     volumes:
+      - ./data/auth:/data/auth
       - ./data/tiles:/data/tiles:ro
       - ./data/tile-cache:/data/tile-cache
     depends_on:
       - influxdb
+    # To connect an RFD-900 (or any serial telemetry radio) via the browser UI,
+    # pass the USB device through to the server container. Adjust the device path
+    # to match what appears on your host (check with: python -m serial.tools.list_ports)
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
 
   web:
     build:
       context: ./web
+      network: host
     ports:
       - "8080:80"
     depends_on:
@@ -53,16 +66,20 @@ services:
   yp-gps:
     build:
       context: ./services/yp_gps
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       GPS_MODE: sim
-      VEHICLE_ID: yp
-      HOME_LAT: "38.984764"
+      VEHICLE_ID: YP689
+      HOME_LAT: "38.989639"
       HOME_LON: "-76.478643"
       HOME_ALT: "2.0"
       HEADING_DEG: "330"
       SPEED_KNOTS: "3"
       SEND_HZ: "5"
+      CIRCLE_LEFT_LON: "-76.487031"
+      CIRCLE_RIGHT_LON: "-76.479393"
+      CIRCLE_CW: "true"
       SERIAL_PORT: /dev/ttyUSB0
       BAUD_RATE: "9600"
     depends_on:
@@ -71,15 +88,33 @@ services:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
 
-  sim-uav:
+  sim-uav1:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
-      VEHICLE_ID: sim-uav
-      HOME_LAT: "38.98490"
-      HOME_LON: "-76.47880"
+      VEHICLE_ID: sim-uav1
+      HOME_LAT: "38.984250"
+      HOME_LON: "-76.508618"
+      HOME_ALT: "45.0"
+      SPAWN_JITTER_DEG: "0.0002"
+      TARGET_JITTER_DEG: "0.0011"
+      SEND_HZ: "5"
+    depends_on:
+      - yp-server
+
+  sim-uav2:
+    build:
+      context: ./services/sim_vehicle
+      network: host
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_TYPE: uav
+      VEHICLE_ID: sim-uav2
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "45.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"
@@ -90,12 +125,13 @@ services:
   sim-usv:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: usv
       VEHICLE_ID: sim-usv
-      HOME_LAT: "38.98465"
-      HOME_LON: "-76.47845"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "0.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"
@@ -106,12 +142,13 @@ services:
   sim-uuv:
     build:
       context: ./services/sim_vehicle
+      network: host
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uuv
       VEHICLE_ID: sim-uuv
-      HOME_LAT: "38.98455"
-      HOME_LON: "-76.47875"
+      HOME_LAT: "38.989639"
+      HOME_LON: "-76.483322"
       HOME_ALT: "-6.0"
       SPAWN_JITTER_DEG: "0.0003"
       TARGET_JITTER_DEG: "0.0010"
@@ -119,23 +156,36 @@ services:
     depends_on:
       - yp-server
 
-  # px4-sitl-uav:
-  #   profiles: ["px4"]
-  #   build:
-  #     context: ./services/px4_sitl
-  #   environment:
-  #     PX4_HOME_LAT: "38.98490"
-  #     PX4_HOME_LON: "-76.47880"
-  #     PX4_HOME_ALT: "45.0"
-  #     PX4_SYS_AUTOSTART: "4001"
-  #     PX4_SIM_MODEL: gz_x500
-  #     PX4_GZ_MODEL: gz_x500
-  #     HEADLESS: "1"
-  #   ports:
-  #     - "14580:14580/udp"
-  #     - "18570:18570/udp"
-  #   depends_on:
-      # - yp-server
+  sim-umaa:
+    build:
+      context: ./services/umaa_bridge
+      network: host
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      VEHICLE_ID: sim-umaa
+      VEHICLE_TYPE: usv
+      SEND_HZ: "5"
+      UMAA_BACKEND: loopback
+    depends_on:
+      - yp-server
+
+  px4-sitl-uav:
+    profiles: ["px4"]
+    build:
+      context: ./services/px4_sitl
+    environment:
+      PX4_HOME_LAT: "38.98490"
+      PX4_HOME_LON: "-76.47880"
+      PX4_HOME_ALT: "45.0"
+      PX4_SYS_AUTOSTART: "4001"
+      PX4_SIM_MODEL: gz_x500
+      PX4_GZ_MODEL: gz_x500
+      HEADLESS: "1"
+    ports:
+      - "14580:14580/udp"
+      - "18570:18570/udp"
+    depends_on:
+      - yp-server
 
   ros-master:
     profiles: ["px4"]
@@ -194,6 +244,45 @@ services:
     depends_on:
       - yp-server
       - rosbridge
+
+  arducopter-bridge:
+    profiles: ["arducopter"]
+    build:
+      context: .
+      dockerfile: services/arducopter_ws_bridge/Dockerfile
+    environment:
+      VEHICLE_ID: arducopter-uav
+      VEHICLE_TYPE: uav
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      MAVLINK_URL: udpin:0.0.0.0:14600
+      SEND_HZ: "5"
+    # Connect external ArduPilot SITL or hardware MAVLink output to this port.
+    ports:
+      - "14600:14600/udp"
+    depends_on:
+      - yp-server
+
+  umaa-bridge:
+    profiles: ["umaa-real"]
+    build:
+      context: ./services/umaa_bridge
+    environment:
+      VEHICLE_ID: umaa-01
+      VEHICLE_TYPE: usv
+      SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
+      SEND_HZ: "5"
+      UMAA_BACKEND: rti
+      RTI_DOMAIN_ID: "1"
+      RTI_QOS_FILE: ""
+      RTI_SOURCE_GUID: ""
+      RTI_COMMAND_TOPIC: ""
+      RTI_ACK_TOPIC: ""
+      RTI_STATUS_TOPIC: ""
+      RTI_NAVSATFIX_TOPIC: ""
+      RTI_BATTERY_TOPIC: ""
+      RTI_HEARTBEAT_TOPIC: ""
+    depends_on:
+      - yp-server
 
 volumes:
   influx-data:

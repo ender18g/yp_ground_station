@@ -1,0 +1,8 @@
+{
+  "server_ws_url": "ws://10.24.5.220:8000/ws/vehicle",
+  "vehicle_id": "ypHunter",
+  "serial_port": "/dev/ttyACM0",
+  "baud_rate": 115200,
+  "send_hz": 5.0,
+  "web_port": 8080
+}

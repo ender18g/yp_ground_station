@@ -1,86 +1,59 @@
 import L from "leaflet";
 import {
-  Battery,
-  Brush,
+  AlertTriangle,
+  Cable,
   Crosshair,
   EthernetPort,
+  Grid3X3,
   Layers,
-  LocateFixed,
-  Maximize2,
+  Loader2,
   MessageSquare,
-  RotateCcw,
+  Radio,
   Route,
+  Save,
   Settings,
   Ship,
-  Video,
   Wifi,
   WifiOff,
-  X,
+  Map as MapIcon,
+  LogOut,
+  Users,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { createPortal } from "react-dom";
-import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, WMSTileLayer, useMap, useMapEvents } from "react-leaflet";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
-import { fetchSettings, sendCommand, updateSettings, websocketUrl } from "./api";
-import type { Command, Vehicle, VehicleType } from "./types";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { CurrentUser, SITLBridge } from "./api";
+import type { Command, Position, Vehicle, VehicleType } from "./types";
+import Login from "./Login";
+const UserManagement = lazy(() => import("./UserManagement"));
+import { destinationPoint } from "./utils/geo";
+import { useTelemetrySocket } from "./hooks/useTelemetrySocket";
+import { MessageDrawer, type StreamMessage } from "./components/MessageDrawer";
+import { SITLPanel } from "./components/SITLPanel";
+import { VehicleModal } from "./components/VehicleModal";
+import { VideoViewer } from "./components/VideoViewer";
+import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, WaypointCrosshair, YpRangeRings, type WaypointMarker } from "./components/map/VehicleLayers";
+import { vehicleMarkerColor } from "./utils/vehicleStyle";
+import { WeatherRadarLayer, WindLayer } from "./components/map/OverlayLayers";
+import { createDemoVehicles, demoVehicleSnapshot, handleDemoCommand, stepDemoVehicle, updateDemoVehicleColor, type DemoMessagePayload, type DemoVehicle } from "./services/demo";
+
+const MissionPlannerMode = lazy(() => import("./components/MissionPlannerMode").then((module) => ({ default: module.MissionPlannerMode })));
+const WaypointPlanner = lazy(() => import("./components/WaypointPlanner").then((module) => ({ default: module.WaypointPlanner })));
+
 
 const USNA_CENTER: [number, number] = [38.9822, -76.4819];
 const MAX_MESSAGE_LOG = 700;
 const DEMO_MODE = import.meta.env.VITE_STATIC_DEMO === "true" || window.location.pathname.startsWith("/demo") || window.location.search.includes("demo=true");
-const YP_DEMO_SPEED_MPS = 5 * 0.514444;
-const YP_DEMO_HEADING = 330;
-const DEMO_KEEP_IN_RANGE_M = 200;
-const LOW_BATTERY_THRESHOLD = 0.25;
+/** View-only mode: live data but commands blocked for real (non-sim) vehicles. */
+const VIEW_MODE = !DEMO_MODE && (window.location.pathname.startsWith("/view") || window.location.search.includes("view=true"));
+/** Returns true if a vehicle ID belongs to a docker-spawned sim vehicle. */
+function isSimVehicle(vehicleId: string): boolean {
+  return vehicleId.startsWith("sim-");
+}
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
-const USV_STREAM_URL = `${import.meta.env.BASE_URL}media/usv-stream.mp4`;
-const DEFAULT_VEHICLE_ICON_SCALE = 85;
-const VEHICLE_ICON_SCALE_STORAGE_KEY = "yp-vehicle-icon-scale";
-const VEHICLE_ICON_REFERENCE_ZOOM = 17;
-const WEATHER_RADAR_WMS_URL = "https://mapservices.weather.noaa.gov/eventdriven/services/radar/radar_base_reflectivity/MapServer/WMSServer";
-const WEATHER_RADAR_REFRESH_MS = 10 * 60 * 1000;
-const WEATHER_RADAR_OPACITY = 0.48;
-const TRANSPARENT_TILE_DATA_URL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
-const WIND_OVERLAY_REFRESH_MS = 15 * 60 * 1000;
-const WIND_OVERLAY_SOURCE = "Open-Meteo";
-const WIND_OVERLAY_ATTRIBUTION = `Wind &copy; ${WIND_OVERLAY_SOURCE}`;
-const WIND_SAMPLE_COLUMNS = 4;
-const WIND_SAMPLE_ROWS = 3;
-const WIND_FETCH_TIMEOUT_MS = 7000;
-
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
-
-interface WindSample {
-  id: string;
-  latitude: number;
-  longitude: number;
-  speedKmh: number;
-  directionDeg: number;
-}
-
-type ProjectedWindSample = WindSample & { x: number; y: number };
-
-interface WindState {
-  samples: WindSample[];
-  projectedSamples: ProjectedWindSample[];
-}
-
-interface YpReadout {
-  headingDeg?: number;
-  speedKts?: number;
-}
-
-interface StreamMessage {
-  id: string;
-  receivedAt: number;
-  vehicle_id: string;
-  vehicle_type: VehicleType;
-  topic: string;
-  type: string;
-  stamp: number;
-  msg: Record<string, unknown>;
-}
 
 interface MapActionMenuState {
   lat: number;
@@ -89,61 +62,229 @@ interface MapActionMenuState {
   y: number;
 }
 
-type DemoVehicleWithStyle = Vehicle & { marker_color?: string };
-
-interface WaypointMarker {
-  vehicle_id: string;
-  latitude: number;
-  longitude: number;
-}
-
-const VEHICLE_COLOR_PALETTE = [
-  "#dc2626",
-  "#ef4444",
-  "#f97316",
-  "#f59e0b",
-  "#eab308",
-  "#84cc16",
-  "#16a34a",
-  "#14b8a6",
-  "#06b6d4",
-  "#0ea5e9",
-  "#2563eb",
-  "#4f46e5",
-  "#7c3aed",
-  "#c026d3",
-  "#db2777",
-  "#6b7280",
-];
+const DEMO_USER: CurrentUser = {
+  username: "demo",
+  active: true,
+  permissions: [],
+  created_at: null,
+  last_login: null,
+};
 
 export function App() {
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(DEMO_MODE ? DEMO_USER : undefined);
+  const [sessionVersion, setSessionVersion] = useState(0);
+
+  useViewportLayoutSync();
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    void getCurrentUser().then((user) => {
+      if (!cancelled) setCurrentUser(user);
+    });
+    return () => { cancelled = true; };
+  }, [sessionVersion]);
+
+  const onLogout = useCallback(() => {
+    logoutUser();
+    setCurrentUser(null);
+  }, []);
+
+  if (currentUser === undefined) {
+    return <div className="loading-state">Checking session...</div>;
+  }
+  if (!currentUser) {
+    return <Login onLogin={() => { setCurrentUser(undefined); setSessionVersion((value) => value + 1); }} />;
+  }
+
+  return <GroundStation currentUser={currentUser} onLogout={onLogout} />;
+}
+
+function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: () => void }) {
   const isPhoneViewer = useIsPhoneViewer();
   const [vehicles, setVehicles] = useState<Record<string, Vehicle>>({});
-  const [connected, setConnected] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [trailSeconds, setTrailSeconds] = useState(45);
   const [showSettings, setShowSettings] = useState(false);
+  const [showFlightLogOptions, setShowFlightLogOptions] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
   const [messagePanelWidth, setMessagePanelWidth] = useState(500);
   const [topicFilters, setTopicFilters] = useState<string[]>([]);
   const [messageLog, setMessageLog] = useState<StreamMessage[]>([]);
   const [mapBase, setMapBase] = useState<MapBase>("satellite");
-  const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
   const [showWeatherRadar, setShowWeatherRadar] = useState(false);
   const [showWindOverlay, setShowWindOverlay] = useState(false);
+  const [mapSource, setMapSource] = useState<MapSource>(DEMO_MODE ? "online" : "auto");
+  const [mapMenuExpanded, setMapMenuExpanded] = useState(false);
+  const [mapZoom, setMapZoom] = useState(17);
+  const [mapCenter, setMapCenter] = useState<[number, number]>(USNA_CENTER);
   const [followYp, setFollowYp] = useState(true);
   const [showYpRangeRings, setShowYpRangeRings] = useState(true);
-  const [vehicleIconScale, setVehicleIconScale] = useState(() => storedVehicleIconScale());
   const [messageRetentionMinutes, setMessageRetentionMinutes] = useState(10);
+  const [flightLogHours, setFlightLogHours] = useState(8);
+  const [flightLogExporting, setFlightLogExporting] = useState(false);
+  const [flightLogError, setFlightLogError] = useState<string | null>(null);
+  const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
+  const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
+  const [rtbAltitudeM, setRtbAltitudeM] = useState(30);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
   const [preferredWaypointVehicleId, setPreferredWaypointVehicleId] = useState<string | null>(null);
   const [waypointMarkers, setWaypointMarkers] = useState<Record<string, WaypointMarker>>({});
+  const [mobModalOpen, setMobModalOpen] = useState(false);
+  const [mobSending, setMobSending] = useState(false);
+  const [mobError, setMobError] = useState<string | null>(null);
+  const [mobVehicleId, setMobVehicleId] = useState<string>("");
+  const [mobTrackSeconds, setMobTrackSeconds] = useState(120);
+  const [mobSwathM, setMobSwathM] = useState(20);
+  const [mobAltM, setMobAltM] = useState(30);
+  const [mobCorridorHalfWidthM, setMobCorridorHalfWidthM] = useState(50);
+  const [mobTakeoffAltitudeM, setMobTakeoffAltitudeM] = useState(30);
+  const [mobClimbSpeedMs, setMobClimbSpeedMs] = useState(8);
+  const [settingsTab, setSettingsTab] = useState<"display" | "mob" | "vessel" | "deconfliction" | "rtk">("display");
+  const [rtkSourceType, setRtkSourceType] = useState<"serial" | "tcp" | "udp" | "disabled">("serial");
+  const [rtkHostOrPort, setRtkHostOrPort] = useState("/dev/ttyACM0");
+  const [rtkNetworkPort, setRtkNetworkPort] = useState(9000);
+  const [rtkBaudrate, setRtkBaudrate] = useState(115200);
+  const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
+  const [deconflictionSettingsLoaded, setDeconflictionSettingsLoaded] = useState(DEMO_MODE);
+  const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
+  const [deconflictionRadii, setDeconflictionRadii] = useState<Record<string, number>>({
+    uav: 10.0,
+    usv: 15.0,
+    ugv: 15.0,
+    uuv: 15.0,
+    yp: 20.0,
+  });
+  const [deconflictionOrbitRadius, setDeconflictionOrbitRadius] = useState(50.0);
+  const [deconflictionMaxPause, setDeconflictionMaxPause] = useState(300.0);
+  const [showSITL, setShowSITL] = useState(false);
+  const [showUserManagement, setShowUserManagement] = useState(false);
+  const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
+  const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
+  const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
+  const [missionPlans, setMissionPlans] = useState<Record<string, [number, number][]>>({});
+  const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  const { connected: socketConnected, socketRef: wsRef } = useTelemetrySocket({
+    enabled: !DEMO_MODE,
+    onAuthenticationExpired: onLogout,
+    onPayload: (payload) => {
+      if (payload.op === "snapshot") {
+        const snapshotVehicles = payload.vehicles as Vehicle[];
+        setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
+        setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
+        setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
+        setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
+        setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
+      }
+      if (payload.op === "vehicle_update") {
+        const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
+        setVehicles((current) => {
+          const prev = current[incoming.vehicle_id];
+          const prevHistory: Position[] = prev?.history ?? [];
+          const msgType: string = (payload.message as { type?: string } | undefined)?.type ?? "";
+          const pos = incoming.position;
+          const stamp: number | undefined = (payload.message as { stamp?: number } | undefined)?.stamp;
+          const newHistory: Position[] = msgType.includes("NavSatFix") && pos
+            ? [...prevHistory, { latitude: pos.latitude, longitude: pos.longitude, altitude: pos.altitude, stamp }].slice(-500)
+            : prevHistory;
+          return { ...current, [incoming.vehicle_id]: { ...incoming, history: newHistory } };
+        });
+        if (payload.message) setMessageLog((current) => [streamMessageFromPayload(payload.message as Parameters<typeof streamMessageFromPayload>[0]), ...current].slice(0, MAX_MESSAGE_LOG));
+      }
+      if (payload.op === "command_ack") {
+        setMessageLog((current) => [streamMessageFromCommandAck(payload), ...current].slice(0, MAX_MESSAGE_LOG));
+        const ackVehicleId = payload.vehicle_id as string | undefined;
+        const ackCommandType = (payload.command as { type?: string } | undefined)?.type;
+        if (ackVehicleId && ackCommandType) updateSarMissionState(ackVehicleId, ackCommandType);
+      }
+      if (payload.op === "sitl_bridge_update") {
+        const bridge = payload.bridge as SITLBridge;
+        setSitlBridges((current) => ({ ...current, [bridge.vehicle_id]: bridge }));
+      }
+      if (payload.op === "sitl_bridge_removed") {
+        setSitlBridges((current) => {
+          const next = { ...current };
+          delete next[payload.vehicle_id as string];
+          return next;
+        });
+      }
+      if (payload.op === "vehicle_removed") {
+        const removedId = payload.vehicle_id as string;
+        setVehicles((current) => { const next = { ...current }; delete next[removedId]; return next; });
+        setSarMissionActiveByVehicle((current) => { const next = { ...current }; delete next[removedId]; return next; });
+        setSitlBridges((current) => { const next = { ...current }; delete next[removedId]; return next; });
+      }
+      if (payload.op === "sar_pattern") {
+        setSarPatterns((current) => ({ ...current, [payload.vehicle_id as string]: { patternType: payload.pattern_type as string, waypoints: payload.waypoints as [number, number][] } }));
+      }
+      if (payload.op === "waypoint_overlay") {
+        const waypoint = payload.waypoint as WaypointMarker;
+        setWaypointMarkers((current) => ({ ...current, [waypoint.vehicle_id]: waypoint }));
+      }
+      if (payload.op === "mission_plan_overlay") {
+        setMissionPlans((current) => ({ ...current, [payload.vehicle_id as string]: payload.waypoints as [number, number][] }));
+      }
+      if (payload.op === "mission_plan_cleared") {
+        setMissionPlans((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
+      }
+      if (payload.op === "sar_pattern_cleared") {
+        setSarPatterns((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
+      }
+      if (payload.op === "vehicle_disconnected") {
+        setVehicles((current) => ({ ...current, [payload.vehicle_id as string]: { ...current[payload.vehicle_id as string], connected: false } }));
+      }
+      if (payload.op === "video_stream_update") {
+        const incoming = payload.video as Vehicle["video"] & { vehicle_id?: string };
+        const vehicleId = incoming?.vehicle_id;
+        if (!vehicleId) return;
+        setVehicles((current) => {
+          const currentVehicle = current[vehicleId];
+          if (!currentVehicle) return current;
+          return { ...current, [vehicleId]: { ...currentVehicle, video: incoming } };
+        });
+      }
+      if (payload.op === "video_stream_removed") {
+        const vehicleId = payload.vehicle_id as string;
+        setVehicles((current) => {
+          const currentVehicle = current[vehicleId];
+          if (!currentVehicle || !currentVehicle.video) return current;
+          const nextVehicle = { ...currentVehicle };
+          delete nextVehicle.video;
+          return { ...current, [vehicleId]: nextVehicle };
+        });
+      }
+    },
+  });
+  const connected = DEMO_MODE || socketConnected;
   const demoSimsRef = useRef<DemoVehicle[]>([]);
   const localVehicleColorsRef = useRef<Record<string, string>>({});
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const flightLogPanelRef = useRef<HTMLDivElement | null>(null);
+  const flightLogButtonRef = useRef<HTMLButtonElement | null>(null);
+  const sitlPanelRef = useRef<HTMLDivElement | null>(null);
+  const messageDrawerRef = useRef<HTMLDivElement | null>(null);
+  const mapMenuRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const sitlButtonRef = useRef<HTMLButtonElement | null>(null);
+  const messagesButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
+  
+  const [activeTab, setActiveTab] = useState<"map" | "mission" | "planner">("map");
+
+  const updateSarMissionState = (vehicleId: string, commandType: string) => {
+    setSarMissionActiveByVehicle((current) => {
+      const next = { ...current };
+      if (commandType === "search_grid" || commandType === "mob") {
+        next[vehicleId] = true;
+      } else if (commandType === "cancel_sar" || commandType === "rtb" || commandType === "waypoint") {
+        next[vehicleId] = false;
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!DEMO_MODE || !("serviceWorker" in navigator)) {
@@ -153,59 +294,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE) {
-      return;
-    }
-    let retry: number | undefined;
-
-    const connect = () => {
-      const ws = new WebSocket(websocketUrl("/ws/ui"));
-      wsRef.current = ws;
-      ws.onopen = () => setConnected(true);
-      ws.onclose = () => {
-        setConnected(false);
-        retry = window.setTimeout(connect, 1500);
-      };
-      ws.onmessage = (event) => {
-        const payload = JSON.parse(event.data);
-        if (payload.op === "snapshot") {
-          const snapshotVehicles = payload.vehicles as Vehicle[];
-          setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
-          setMessageLog(snapshotMessages(snapshotVehicles).slice(0, MAX_MESSAGE_LOG));
-        }
-        if (payload.op === "vehicle_update") {
-          const vehicle = withLocalVehicleColor(payload.vehicle, localVehicleColorsRef.current);
-          setVehicles((current) => ({ ...current, [vehicle.vehicle_id]: vehicle }));
-          if (payload.message) {
-            setMessageLog((current) => [streamMessageFromPayload(payload.message), ...current].slice(0, MAX_MESSAGE_LOG));
-          }
-        }
-        if (payload.op === "command_ack") {
-          setMessageLog((current) => [streamMessageFromCommandAck(payload), ...current].slice(0, MAX_MESSAGE_LOG));
-        }
-        if (payload.op === "vehicle_disconnected") {
-          setVehicles((current) => ({
-            ...current,
-            [payload.vehicle_id]: {
-              ...current[payload.vehicle_id],
-              connected: false,
-            },
-          }));
-        }
-      };
-    };
-
-    connect();
-    return () => {
-      window.clearTimeout(retry);
-      wsRef.current?.close();
-    };
+    if (DEMO_MODE) return;
+    listSITLBridges()
+      .then((bridges) =>
+        setSitlBridges(Object.fromEntries(bridges.map((b) => [b.vehicle_id, b])))
+      )
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (!DEMO_MODE) {
-      return;
-    }
+    if (!DEMO_MODE) return;
     demoSimsRef.current = createDemoVehicles();
     setWaypointMarkers(
       Object.fromEntries(
@@ -221,7 +319,6 @@ export function App() {
       lastStep = now;
       const messages = demoSimsRef.current.flatMap((vehicle) => stepDemoVehicle(vehicle, dt, now, demoSimsRef.current));
       const demoVehicles = demoSimsRef.current.map(demoVehicleSnapshot);
-      setConnected(true);
       setVehicles(Object.fromEntries(demoVehicles.map((vehicle) => [vehicle.vehicle_id, vehicle])));
       setMessageLog((current) => [...messages.map(streamMessageFromPayload).reverse(), ...current].slice(0, MAX_MESSAGE_LOG));
     };
@@ -231,16 +328,58 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE) {
-      return;
-    }
+    if (DEMO_MODE) return;
     let cancelled = false;
     fetchSettings()
       .then((serverSettings) => {
-        if (cancelled) {
-          return;
+        if (cancelled) return;
+        if (typeof serverSettings.trail_seconds === "number") {
+          setTrailSeconds(serverSettings.trail_seconds);
+        }
+        if (typeof serverSettings.show_yp_range_rings === "boolean") {
+          setShowYpRangeRings(serverSettings.show_yp_range_rings);
         }
         setMessageRetentionMinutes(Math.round(serverSettings.message_retention_seconds / 60));
+        if (typeof serverSettings.rtb_update_hz === "number") {
+          setRtbUpdateHz(serverSettings.rtb_update_hz);
+        }
+        if (typeof serverSettings.rtb_stern_distance_m === "number") {
+          setRtbSternDistanceM(serverSettings.rtb_stern_distance_m);
+        }
+        if (typeof serverSettings.rtb_altitude_m === "number") {
+          setRtbAltitudeM(serverSettings.rtb_altitude_m);
+        }
+        setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
+        if (typeof serverSettings.mob_track_seconds === "number") {
+          setMobTrackSeconds(serverSettings.mob_track_seconds);
+        }
+        if (typeof serverSettings.mob_swath_m === "number") {
+          setMobSwathM(serverSettings.mob_swath_m);
+        }
+        if (typeof serverSettings.mob_altitude_m === "number") {
+          setMobAltM(serverSettings.mob_altitude_m);
+        }
+        if (typeof serverSettings.mob_corridor_half_width_m === "number") {
+          setMobCorridorHalfWidthM(serverSettings.mob_corridor_half_width_m);
+        }
+        if (typeof serverSettings.mob_takeoff_altitude_m === "number") {
+          setMobTakeoffAltitudeM(serverSettings.mob_takeoff_altitude_m);
+        }
+        if (typeof serverSettings.mob_climb_speed_ms === "number") {
+          setMobClimbSpeedMs(serverSettings.mob_climb_speed_ms);
+        }
+        if (typeof serverSettings.rtk_source_type === "string") {
+          setRtkSourceType(serverSettings.rtk_source_type as any);
+        }
+        if (typeof serverSettings.rtk_host_or_port === "string") {
+          setRtkHostOrPort(serverSettings.rtk_host_or_port);
+        }
+        if (typeof serverSettings.rtk_network_port === "number") {
+          setRtkNetworkPort(serverSettings.rtk_network_port);
+        }
+        if (typeof serverSettings.rtk_baudrate === "number") {
+          setRtkBaudrate(serverSettings.rtk_baudrate);
+        }
         setSettingsLoaded(true);
       })
       .catch(() => setSettingsLoaded(true));
@@ -250,48 +389,205 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (DEMO_MODE || !settingsLoaded) {
-      return;
-    }
+    if (DEMO_MODE || !settingsLoaded) return;
     const timeout = window.setTimeout(() => {
-      updateSettings({ message_retention_seconds: messageRetentionMinutes * 60 }).catch(() => undefined);
+      updateSettings({
+        trail_seconds: trailSeconds,
+        show_yp_range_rings: showYpRangeRings,
+        message_retention_seconds: messageRetentionMinutes * 60,
+        rtb_update_hz: rtbUpdateHz,
+        rtb_stern_distance_m: rtbSternDistanceM,
+        rtb_altitude_m: rtbAltitudeM,
+        mob_track_seconds: mobTrackSeconds,
+        mob_swath_m: mobSwathM,
+        mob_altitude_m: mobAltM,
+        mob_corridor_half_width_m: mobCorridorHalfWidthM,
+        mob_takeoff_altitude_m: mobTakeoffAltitudeM,
+        mob_climb_speed_ms: mobClimbSpeedMs,
+        yp_role_vehicle_id: ypRoleVehicleId,
+        rtk_source_type: rtkSourceType,
+        rtk_host_or_port: rtkHostOrPort,
+        rtk_network_port: rtkNetworkPort,
+        rtk_baudrate: rtkBaudrate,
+      }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [messageRetentionMinutes, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
-    localStorage.setItem(VEHICLE_ICON_SCALE_STORAGE_KEY, String(vehicleIconScale));
-  }, [vehicleIconScale]);
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    fetchDeconflictionSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setDeconflictionEnabled(settings.enabled);
+        setDeconflictionGlobalRadius(settings.global_radius_m);
+        if (settings.radius_per_type && Object.keys(settings.radius_per_type).length > 0) {
+          setDeconflictionRadii((current) => ({ ...current, ...settings.radius_per_type }));
+        }
+        setDeconflictionOrbitRadius(settings.orbit_radius_m);
+        setDeconflictionMaxPause(settings.max_pause_duration_s);
+        setDeconflictionSettingsLoaded(true);
+      })
+      .catch(() => setDeconflictionSettingsLoaded(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE || !deconflictionSettingsLoaded) return;
+    const timeout = window.setTimeout(() => {
+      updateDeconflictionSettings({
+        enabled: deconflictionEnabled,
+        global_radius_m: deconflictionGlobalRadius,
+        radius_per_type: deconflictionRadii,
+        orbit_radius_m: deconflictionOrbitRadius,
+        max_pause_duration_s: deconflictionMaxPause,
+      }).catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [deconflictionEnabled, deconflictionGlobalRadius, deconflictionRadii, deconflictionOrbitRadius, deconflictionMaxPause, deconflictionSettingsLoaded]);
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      if (showSettings) {
+        const insideSettingsPanel = settingsPanelRef.current?.contains(target) ?? false;
+        const onSettingsButton = settingsButtonRef.current?.contains(target) ?? false;
+        if (!insideSettingsPanel && !onSettingsButton) {
+          setShowSettings(false);
+        }
+      }
+
+      if (showFlightLogOptions) {
+        const insideFlightLogPanel = flightLogPanelRef.current?.contains(target) ?? false;
+        const onFlightLogButton = flightLogButtonRef.current?.contains(target) ?? false;
+        if (!insideFlightLogPanel && !onFlightLogButton) {
+          setShowFlightLogOptions(false);
+        }
+      }
+
+      if (showSITL) {
+        const insideSITLPanel = sitlPanelRef.current?.contains(target) ?? false;
+        const onSITLButton = sitlButtonRef.current?.contains(target) ?? false;
+        if (!insideSITLPanel && !onSITLButton) {
+          setShowSITL(false);
+        }
+      }
+
+      if (showMessages) {
+        const insideMessageDrawer = messageDrawerRef.current?.contains(target) ?? false;
+        const onMessagesButton = messagesButtonRef.current?.contains(target) ?? false;
+        if (!insideMessageDrawer && !onMessagesButton) {
+          setShowMessages(false);
+        }
+      }
+
+      if (mapMenuExpanded) {
+        const insideMapMenu = mapMenuRef.current?.contains(target) ?? false;
+        const onMapMenuToggle = mapMenuToggleRef.current?.contains(target) ?? false;
+        if (!insideMapMenu && !onMapMenuToggle) {
+          setMapMenuExpanded(false);
+        }
+      }
+    };
+
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [showSettings, showFlightLogOptions, showSITL, showMessages, mapMenuExpanded]);
 
   const vehicleList = useMemo(() => Object.values(vehicles).filter((vehicle) => vehicle.position), [vehicles]);
   const yp = vehicleList.find((vehicle) => vehicle.vehicle_type === "yp");
   const ypGpsLinked = Boolean(yp?.connected);
-  const center: [number, number] = yp?.position ? [yp.position.latitude, yp.position.longitude] : USNA_CENTER;
   const filteredMessages = useMemo(() => filterMessages(messageLog, topicFilters), [messageLog, topicFilters]);
   const renderedMapSource = DEMO_MODE ? "online" : mapSource;
   const mapLayer = useMemo(() => tileLayerFor(mapBase, renderedMapSource), [mapBase, renderedMapSource]);
 
-  const command = (vehicleId: string, body: Command) => {
+  const command = (vehicleId: string, body: Command): boolean => {
+    if (VIEW_MODE && !isSimVehicle(vehicleId)) {
+      return false;
+    }
+    updateSarMissionState(vehicleId, body.type);
     if (DEMO_MODE) {
       handleDemoCommand(demoSimsRef.current, vehicleId, body);
-      return;
+      return true;
     }
     sendCommand(wsRef.current, vehicleId, body);
+    return true;
   };
 
   const sendWaypoint = (vehicleId: string, lat: number, lon: number, altitude?: number) => {
-    command(vehicleId, { type: "waypoint", target: { latitude: lat, longitude: lon, altitude: altitude ?? vehicles[vehicleId]?.position?.altitude ?? 0 } });
+    // Right-click "Send Vehicle" should interrupt any active SAR mission first.
+    command(vehicleId, { type: "cancel_sar" });
+    if (!command(vehicleId, { type: "waypoint", target: { latitude: lat, longitude: lon, altitude: altitude ?? vehicles[vehicleId]?.position?.altitude ?? 0 } })) return;
     setWaypointMarkers((current) => ({
       ...current,
       [vehicleId]: { vehicle_id: vehicleId, latitude: lat, longitude: lon },
     }));
   };
 
+  const sendSearchGrid = (vehicleId: string, lat: number, lon: number, gridSizeM: number, swathM: number, altM: number) => {
+    command(vehicleId, { type: "search_grid", lat, lon, grid_size_m: gridSizeM, swath_m: swathM, altitude_m: altM });
+    setMapActionMenu(null);
+  };
+
+  const handleMobConfirm = async () => {
+    if (DEMO_MODE) {
+      setMobError("MOB dispatch requires the live ground station and vehicle connections.");
+      return;
+    }
+    if (VIEW_MODE && !isSimVehicle(mobVehicleId)) {
+      setMobError("View-only mode can dispatch only a simulated vehicle.");
+      return;
+    }
+    setMobSending(true);
+    setMobError(null);
+    try {
+      const result = await triggerMOB(mobVehicleId || undefined, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs);
+      const vehicleId = result.vehicle_id ?? "unknown";
+
+      const mobMessage: StreamMessage = {
+        id: `mob-${Date.now()}`,
+        receivedAt: Date.now(),
+        vehicle_id: vehicleId,
+        vehicle_type: "uav",
+        topic: `/vehicles/${vehicleId}/commands`,
+        type: "yp_ground_station/MOBTriggered",
+        stamp: Date.now() / 1000,
+        msg: result.ok
+          ? { status: "dispatched", vehicle_id: vehicleId }
+          : { status: "failed", error: result.error },
+      };
+
+      setMessageLog((current) => [mobMessage, ...current].slice(0, MAX_MESSAGE_LOG));
+
+      if (result.ok) {
+        updateSarMissionState(vehicleId, "mob");
+        setMobModalOpen(false);
+      } else {
+        setMobError(result.error ?? "Dispatch failed");
+      }
+    } catch (err) {
+      setMobError(err instanceof Error ? err.message : "Network error");
+    }
+    setMobSending(false);
+  };
+
   const sendAllToMapPoint = (lat: number, lon: number) => {
-    const commandableVehicles = vehicleList.filter((candidate) => candidate.vehicle_type !== "yp");
+    const commandableVehicles = vehicleList.filter((candidate) => {
+      if (candidate.vehicle_type === "yp") return false;
+      if (VIEW_MODE && !isSimVehicle(candidate.vehicle_id)) return false;
+      return true;
+    });
     const nextMarkers: Record<string, WaypointMarker> = {};
     commandableVehicles.forEach((vehicle, index) => {
       const offset = waypointOffset(lat, lon, index, commandableVehicles.length);
+      command(vehicle.vehicle_id, { type: "cancel_sar" });
       command(vehicle.vehicle_id, { type: "waypoint", target: { latitude: offset.latitude, longitude: offset.longitude, altitude: vehicle.position?.altitude ?? 0 } });
       nextMarkers[vehicle.vehicle_id] = { vehicle_id: vehicle.vehicle_id, latitude: offset.latitude, longitude: offset.longitude };
     });
@@ -311,95 +607,191 @@ export function App() {
       [vehicleId]: {
         ...current[vehicleId],
         marker_color: color,
-      } as DemoVehicleWithStyle,
+      },
     }));
-    setSelected((current) => (current?.vehicle_id === vehicleId ? ({ ...current, marker_color: color } as DemoVehicleWithStyle) : current));
+    setSelected((current) => (current?.vehicle_id === vehicleId ? ({ ...current, marker_color: color } ) : current));
+  };
+
+  const saveFlightLog = async () => {
+    setFlightLogExporting(true);
+    setFlightLogError(null);
+    try {
+      const response = await exportFlightLog(flightLogHours);
+      const blob = await response.blob();
+      const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]
+        ?? `yp-flight-log-last-${flightLogHours}h.jsonl.gz`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setShowFlightLogOptions(false);
+    } catch (error) {
+      setFlightLogError(error instanceof Error ? error.message : "Flight log export failed");
+    } finally {
+      setFlightLogExporting(false);
+    }
   };
 
   return (
     <div className="app" onClick={() => mapActionMenu && setMapActionMenu(null)}>
-      <MapContainer center={center} zoom={17} minZoom={3} maxZoom={19} zoomControl className="map">
-        <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} />
-        {showWeatherRadar && <WeatherRadarLayer />}
-        <WindLayer yp={yp} showVectors={showWindOverlay} onToggleVectors={() => setShowWindOverlay((value) => !value)} />
-        <MapCommander
-          onMapAction={(lat, lon, point) => {
-            setMapActionMenu({ lat, lon, x: point.x, y: point.y });
-          }}
-        />
-        <MapPanTracker onManualPan={() => setFollowYp(false)} />
-        <FollowYpCenter yp={yp} enabled={followYp} />
-        <FitAllControl vehicles={vehicleList} />
-        {showYpRangeRings && <YpRangeRings yp={yp} />}
-        {Object.values(waypointMarkers).map((waypoint) => (
-          <WaypointCrosshair
-            key={waypoint.vehicle_id}
-            waypoint={waypoint}
-            vehicle={vehicles[waypoint.vehicle_id]}
-            onDragStart={() => {
-              followBeforeWaypointDragRef.current = followYp;
-              setFollowYp(false);
-            }}
-            onMove={(lat, lon) => sendWaypoint(waypoint.vehicle_id, lat, lon)}
-            onDragEnd={() => {
-              if (followBeforeWaypointDragRef.current) {
-                window.setTimeout(() => setFollowYp(true), 250);
-              }
-            }}
+      
+      {activeTab === "map" ? (
+        <MapContainer center={mapCenter} zoom={mapZoom} minZoom={3} maxZoom={20} zoomControl className="map">
+          <TileLayer key={`${mapBase}-${renderedMapSource}`} url={mapLayer.url} attribution={mapLayer.attribution} maxNativeZoom={mapLayer.maxNativeZoom} maxZoom={20} />
+                    {showWeatherRadar && <WeatherRadarLayer />}
+                    <WindLayer yp={yp} showVectors={showWindOverlay} onToggleVectors={() => setShowWindOverlay((value) => !value)} />
+          <MapZoomTracker onZoom={setMapZoom} />
+          <MapCommander
+            onMapAction={(lat, lon, point) => setMapActionMenu({ lat, lon, x: point.x, y: point.y })}
           />
-        ))}
-        {vehicleList.map((vehicle) => (
-          <VehicleLayer
-            key={vehicle.vehicle_id}
-            vehicle={vehicle}
-            trailSeconds={trailSeconds}
-            isPhoneViewer={isPhoneViewer}
-            iconScalePercent={vehicleIconScale}
-            onClick={() => {
-              setMapActionMenu(null);
-              if (vehicle.vehicle_type === "yp") {
-                setFollowYp(true);
-              }
-              setSelected(vehicle);
-            }}
+          <MapPanTracker onManualPan={() => setFollowYp(false)} onPan={setMapCenter} />
+          <FollowYpCenter yp={yp} enabled={followYp} onCenterChange={setMapCenter} />
+          <FitAllControl vehicles={vehicleList} />
+          {showYpRangeRings && <YpRangeRings yp={yp} />}
+          {(Object.entries(sarPatterns) as Array<[string, { patternType: string; waypoints: [number, number][] }]>).map(([vehicleId, pattern]) => (
+            <SarPatternOverlay
+              key={vehicleId}
+              vehicleId={vehicleId}
+              patternType={pattern.patternType}
+              waypoints={pattern.waypoints}
+              color={(vehicles[vehicleId] as Vehicle | undefined)?.marker_color ?? "#f97316"}
+              onClear={() => command(vehicleId, { type: "clear_sar_pattern" })}
+            />
+          ))}
+          {Object.entries(missionPlans).map(([vehicleId, waypoints]) => (
+            waypoints.length > 1 && <Polyline key={`mission-${vehicleId}`} positions={waypoints} pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }} />
+          ))}
+          {Object.values(waypointMarkers)
+            .filter((waypoint) => !VIEW_MODE || isSimVehicle(waypoint.vehicle_id))
+            .map((waypoint) => (
+            <WaypointCrosshair
+              key={waypoint.vehicle_id}
+              waypoint={waypoint}
+              vehicle={vehicles[waypoint.vehicle_id]}
+              yp={yp}
+              onClick={() => {
+                const selectedVehicle = vehicles[waypoint.vehicle_id];
+                if (!selectedVehicle) return;
+                setMapActionMenu(null);
+                if (selectedVehicle.vehicle_type === "yp") {
+                  setFollowYp(true);
+                }
+                setSelected(selectedVehicle);
+              }}
+              onDragStart={() => {
+                followBeforeWaypointDragRef.current = followYp;
+                setFollowYp(false);
+              }}
+              onMove={(lat, lon) => sendWaypoint(waypoint.vehicle_id, lat, lon)}
+              onDragEnd={() => {
+                if (followBeforeWaypointDragRef.current) {
+                  window.setTimeout(() => setFollowYp(true), 250);
+                }
+              }}
+            />
+          ))}
+          {vehicleList.map((vehicle) => (
+            <VehicleLayer
+              key={vehicle.vehicle_id}
+              vehicle={vehicle}
+              trailSeconds={trailSeconds}
+              isPhoneViewer={isPhoneViewer}
+              mapZoom={mapZoom}
+              onClick={() => {
+                setMapActionMenu(null);
+                if (vehicle.vehicle_type === "yp") {
+                  setFollowYp(true);
+                }
+                setSelected(vehicle);
+              }}
+            />
+          ))}
+        </MapContainer>
+      ) : activeTab === "mission" ? (
+        <Suspense fallback={<div className="loading-state">Loading mission planner...</div>}>
+          <MissionPlannerMode
+          center={mapCenter}
+          zoom={mapZoom}
+          onZoomChange={setMapZoom}
+          onCenterChange={setMapCenter}
+          mapLayer={mapLayer}
+          vehicles={vehicleList}
+          missionPlans={missionPlans}
+          yp={yp}
+          showWeatherRadar={showWeatherRadar}
+          showWindOverlay={showWindOverlay}
+          onToggleWind={() => setShowWindOverlay((value) => !value)}
+          showYpRangeRings={showYpRangeRings}
+          sarPatterns={sarPatterns}
+          waypointMarkers={waypointMarkers}
+          trailSeconds={trailSeconds}
+          canCommandVehicle={(vehicleId) => !VIEW_MODE || isSimVehicle(vehicleId)}
+          onCommand={command}
           />
-        ))}
-      </MapContainer>
+        </Suspense>
+      ) : (
+        <Suspense fallback={<div className="loading-state">Loading waypoint planner...</div>}>
+          <WaypointPlanner 
+           yp={yp} 
+           vehicles={vehicleList.filter(v => v.vehicle_type !== "yp")} 
+           onCommand={command} 
+          />
+        </Suspense>
+      )}
 
-      {mapActionMenu && (
+      {activeTab === "map" && mapActionMenu && (
         <MapActionMenu
           menu={mapActionMenu}
-          vehicles={vehicleList}
+          vehicles={VIEW_MODE ? vehicleList.filter((v) => v.vehicle_type === "yp" || isSimVehicle(v.vehicle_id)) : vehicleList}
           preferredVehicleId={preferredWaypointVehicleId}
-          onSend={(vehicleId, lat, lon) => {
-            sendWaypoint(vehicleId, lat, lon);
+          onSend={(vehicleId) => {
+            sendWaypoint(vehicleId, mapActionMenu.lat, mapActionMenu.lon);
             setPreferredWaypointVehicleId(null);
             setMapActionMenu(null);
           }}
-          onSendAll={(lat, lon) => {
-            sendAllToMapPoint(lat, lon);
+          onSendAll={() => {
+            sendAllToMapPoint(mapActionMenu.lat, mapActionMenu.lon);
             setPreferredWaypointVehicleId(null);
             setMapActionMenu(null);
           }}
+          onSearchGrid={(vehicleId, gridSizeM, swathM, altM) =>
+            sendSearchGrid(vehicleId, mapActionMenu.lat, mapActionMenu.lon, gridSizeM, swathM, altM)
+          }
         />
       )}
 
-      <MapMenu
-        mapBase={mapBase}
-        mapSource={mapSource}
-        showWeatherRadar={showWeatherRadar}
-        showWindOverlay={showWindOverlay}
-        onMapBaseChange={setMapBase}
-        onMapSourceChange={setMapSource}
-        onWeatherRadarChange={setShowWeatherRadar}
-        onWindOverlayChange={setShowWindOverlay}
-      />
+      {activeTab !== "planner" && (
+        <MapMenu
+          mapBase={mapBase}
+          mapSource={mapSource}
+          expanded={mapMenuExpanded}
+          setMenuRef={(node) => {
+            mapMenuRef.current = node;
+          }}
+          setToggleRef={(node) => {
+            mapMenuToggleRef.current = node;
+          }}
+          onExpandedChange={setMapMenuExpanded}
+          onMapBaseChange={setMapBase}
+          onMapSourceChange={setMapSource}
+          showWeatherRadar={showWeatherRadar}
+          showWindOverlay={showWindOverlay}
+          onWeatherRadarChange={setShowWeatherRadar}
+          onWindOverlayChange={setShowWindOverlay}
+        />
+      )}
+
+      <div className="trident-tagline">Telemetry, Remote Intelligence, Data, Electronic Navigation, and Tasking - Yard Patrol</div>
 
       <div className="topbar">
         <div className="brand">
           <img className="brand-logo" src={BRAND_LOGO_URL} alt="USNA crest" />
           <div className="brand-copy">
-            <strong>YP Vehicle View</strong>
+            <strong>TRIDENT YP Vehicle View</strong>
             <div className="brand-statuses">
               <span className={connected ? "brand-status online" : "brand-status offline"}>
                 <EthernetPort size={15} />
@@ -413,73 +805,490 @@ export function App() {
                 <Ship size={15} />
                 {vehicleList.length} tracked
               </span>
+              {VIEW_MODE && (
+                <span className="brand-status view-only">
+                  <Radio size={15} />
+                  View only
+                </span>
+              )}
             </div>
           </div>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button" title="Settings" onClick={() => setShowSettings((value) => !value)}>
+          {currentUser?.permissions.includes("manage_settings") && !VIEW_MODE && (
+            <div className="flight-log-control">
+              <button
+                ref={flightLogButtonRef}
+                className={showFlightLogOptions ? "icon-button active" : "icon-button"}
+                title="Save Flight Log"
+                aria-label="Save Flight Log"
+                onClick={() => { setShowFlightLogOptions((value) => !value); setShowSettings(false); setShowSITL(false); }}
+              >
+                <Save size={19} />
+              </button>
+              {showFlightLogOptions && (
+                <div className="flight-log-panel" ref={flightLogPanelRef}>
+                  <div className="panel-title">
+                    <Save size={17} />
+                    <strong>Save Flight Log</strong>
+                  </div>
+                  <label>
+                    Include previous
+                    <span>{flightLogHours} {flightLogHours === 1 ? "hour" : "hours"}</span>
+                  </label>
+                  <input
+                    aria-label="Flight log duration"
+                    min={1}
+                    max={24}
+                    step={1}
+                    type="range"
+                    value={flightLogHours}
+                    disabled={flightLogExporting}
+                    onChange={(event) => setFlightLogHours(Number(event.target.value))}
+                  />
+                  <button className="flight-log-save-action" disabled={flightLogExporting} onClick={() => void saveFlightLog()}>
+                    {flightLogExporting ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                    {flightLogExporting ? "Saving..." : "Save log file"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          <button
+            className={activeTab === "map" ? "icon-button active" : "icon-button"}
+            title="Global Map"
+            onClick={() => setActiveTab("map")}
+          >
+            <MapIcon size={19} />
+          </button>
+
+          <button
+            className={activeTab === "mission" ? "icon-button active" : "icon-button"}
+            title="Mission Planner"
+            onClick={() => { setActiveTab("mission"); setShowSettings(false); setShowSITL(false); }}
+          >
+            <Route size={19} />
+          </button>
+          
+          <button
+            className={activeTab === "planner" ? "icon-button active" : "icon-button"}
+            title="Local Waypoint Planner"
+            onClick={() => { setActiveTab("planner"); setShowSettings(false); setShowSITL(false); }}
+            >
+            <Crosshair size={19} />
+          </button>
+          {!VIEW_MODE && !DEMO_MODE && (
+            <button
+              ref={sitlButtonRef}
+              className={showSITL ? "icon-button active" : "icon-button"}
+              title="Vehicle Connections"
+              onClick={() => { setShowSITL((v) => !v); setShowSettings(false); }}
+            >
+              <Cable size={19} />
+            </button>
+          )}
+          <button
+            ref={settingsButtonRef}
+            className={showSettings ? "icon-button active" : "icon-button"}
+            title="Settings"
+            onClick={() => { setShowSettings((value) => !value); setShowFlightLogOptions(false); setShowSITL(false); }}
+          >
             <Settings size={19} />
           </button>
-          <button className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
+          <button ref={messagesButtonRef} className="icon-button" title="Messages" onClick={() => setShowMessages((value) => !value)}>
             <MessageSquare size={19} />
           </button>
+          {currentUser?.permissions.includes("manage_users") && (
+            <button
+              className={showUserManagement ? "icon-button active" : "icon-button"}
+              title="User Management"
+              onClick={() => setShowUserManagement((value) => !value)}
+            >
+              <Users size={19} />
+            </button>
+          )}
+          {!DEMO_MODE && <button className="icon-button" title="Logout" onClick={onLogout}>
+            <LogOut size={19} />
+          </button>}
         </div>
+        {flightLogError && <div className="flight-log-error" role="alert">{flightLogError}</div>}
       </div>
 
-      {showSettings && (
-        <div className="settings-panel">
-          <div className="panel-title">
-            <Settings size={17} />
-            <strong>Settings</strong>
-          </div>
-          <label>
-            Trail window
-            <span>{trailSeconds}s</span>
-          </label>
-          <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
-          <label>
-            Vehicle icons
-            <span>{vehicleIconScale}%</span>
-          </label>
-          <input min={50} max={140} step={5} type="range" value={vehicleIconScale} onChange={(event) => setVehicleIconScale(Number(event.target.value))} />
-          <label className="setting-toggle">
-            <span>YP range rings</span>
-            <input type="checkbox" checked={showYpRangeRings} onChange={(event) => setShowYpRangeRings(event.target.checked)} />
-          </label>
-          <label>
-            DB retention
-            <span>{messageRetentionMinutes} min</span>
-          </label>
-          <input
-            min={1}
-            max={1440}
-            step={1}
-            type="range"
-            value={messageRetentionMinutes}
-            disabled={DEMO_MODE}
-            onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
+      {showSITL && !DEMO_MODE && (
+        <div ref={sitlPanelRef}>
+          <SITLPanel
+            bridges={sitlBridges}
+            onConnect={(url, vehicleId) =>
+              connectSITL(url, vehicleId || undefined)
+                .then((result) => {
+                  if (!result.ok) return;
+                })
+                .catch(() => undefined)
+            }
+            onDisconnect={(vehicleId) =>
+              disconnectSITL(vehicleId)
+                .then(() =>
+                  setSitlBridges((current) => {
+                    const next = { ...current };
+                    delete next[vehicleId];
+                    return next;
+                  })
+                )
+                .catch(() => undefined)
+            }
           />
         </div>
       )}
 
+      {showUserManagement && currentUser?.permissions.includes("manage_users") && (
+        <Suspense fallback={null}>
+          <UserManagement onClose={() => setShowUserManagement(false)} />
+        </Suspense>
+      )}
+
+      {showSettings && (
+        <div className="settings-panel" ref={settingsPanelRef}>
+          <div className="panel-title">
+            <Settings size={17} />
+            <strong>Settings</strong>
+          </div>
+          <div className="settings-tabs">
+            <button
+              className={settingsTab === "display" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("display")}
+            >
+              Display
+            </button>
+            <button
+              className={settingsTab === "deconfliction" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("deconfliction")}
+            >
+              Deconfliction
+            </button>
+            <button
+              className={settingsTab === "mob" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("mob")}
+            >
+              Man Overboard
+            </button>
+            <button
+              className={settingsTab === "vessel" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("vessel")}
+            >
+              Vessel
+            </button>
+            <button
+              className={settingsTab === "rtk" ? "settings-tab active" : "settings-tab"}
+              onClick={() => setSettingsTab("rtk")}
+            >
+              RTK Correction
+            </button>
+          </div>          {settingsTab === "display" && (
+            <>
+              <label>
+                Trail window
+                <span>{trailSeconds}s</span>
+              </label>
+              <input min={5} max={300} step={5} type="range" value={trailSeconds} onChange={(event) => setTrailSeconds(Number(event.target.value))} />
+              <label className="setting-toggle">
+                <span>YP range rings</span>
+                <input type="checkbox" checked={showYpRangeRings} onChange={(event) => setShowYpRangeRings(event.target.checked)} />
+              </label>
+              <label>
+                DB retention
+                <span>{messageRetentionMinutes} min</span>
+              </label>
+              <input
+                min={1}
+                max={1440}
+                step={1}
+                type="range"
+                value={messageRetentionMinutes}
+                disabled={DEMO_MODE}
+                onChange={(event) => setMessageRetentionMinutes(Number(event.target.value))}
+              />
+            </>
+          )}
+          {settingsTab === "rtk" && (
+            <>
+              <label>
+                Source Mode
+                <select
+                  value={rtkSourceType}
+                  disabled={DEMO_MODE}
+                  onChange={(e) => setRtkSourceType(e.target.value as any)}
+                >
+                  <option value="disabled">Disabled</option>
+                  <option value="serial">USB / Serial Port</option>
+                  <option value="tcp">TCP Base Station / Caster</option>
+                  <option value="udp">UDP Listener</option>
+                </select>
+              </label>
+              {rtkSourceType !== "disabled" && (
+                <>
+                  <label>
+                    {rtkSourceType === "serial" ? "Serial Port Device" : "Host IP / Interface Address"}
+                    <input
+                      type="text"
+                      value={rtkHostOrPort}
+                      disabled={DEMO_MODE}
+                      placeholder={rtkSourceType === "serial" ? "/dev/ttyACM0" : "192.168.1.100"}
+                      onChange={(e) => setRtkHostOrPort(e.target.value)}
+                    />
+                  </label>
+                  {rtkSourceType === "serial" && (
+                    <label>
+                      Baud Rate
+                      <select
+                        value={rtkBaudrate}
+                        disabled={DEMO_MODE}
+                        onChange={(e) => setRtkBaudrate(Number(e.target.value))}
+                      >
+                        <option value={9600}>9600</option>
+                        <option value={19200}>19200</option>
+                        <option value={38400}>38400</option>
+                        <option value={57600}>57600</option>
+                        <option value={115200}>115200</option>
+                        <option value={230400}>230400</option>
+                        <option value={460800}>460800</option>
+                        <option value={921600}>921600</option>
+                      </select>
+                    </label>
+                  )}
+                  {(rtkSourceType === "tcp" || rtkSourceType === "udp") && (
+                    <label>
+                      Network Port
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={rtkNetworkPort}
+                        disabled={DEMO_MODE}
+                        onChange={(e) => setRtkNetworkPort(Number(e.target.value))}
+                      />
+                    </label>
+                  )}
+                </>
+              )}
+              <p className="settings-hint">
+                Streams raw RTCM3 correction frames to all connected MAVLink vehicles for RTK precision navigation.
+              </p>
+            </>
+          )}
+          {settingsTab === "deconfliction" && (
+            <>
+              <label className="setting-toggle">
+                <span>Enable vehicle deconfliction</span>
+                <input 
+                  type="checkbox" 
+                  checked={deconflictionEnabled} 
+                  onChange={(event) => setDeconflictionEnabled(event.target.checked)} 
+                />
+              </label>
+              <p className="settings-hint">
+                Automatically detect and resolve collisions between vehicles using mission priority hierarchy.
+                MOB missions have highest priority, followed by Search Grid, Mission Planner, and Waypoints.
+              </p>
+              
+              <label>
+                Global safety radius
+                <span>{deconflictionGlobalRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={1} 
+                max={50} 
+                step={0.5} 
+                type="range" 
+                value={deconflictionGlobalRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionGlobalRadius(Number(event.target.value))}
+              />
+              
+              <label>Radius per vehicle type</label>
+              {Object.entries(deconflictionRadii).map(([vehicleType, radius]) => (
+                <div key={vehicleType} className="deconfliction-radius-row">
+                  <label>
+                    <span>{vehicleType}</span>
+                    <input 
+                      min={1} 
+                      max={50} 
+                      step={0.5} 
+                      type="range" 
+                      value={radius}
+                      disabled={!deconflictionEnabled}
+                      onChange={(event) => setDeconflictionRadii((current) => ({ 
+                        ...current, 
+                        [vehicleType]: Number(event.target.value)
+                      }))}
+                    />
+                    <span>{radius.toFixed(1)}m</span>
+                  </label>
+                </div>
+              ))}
+              
+              <label>
+                Orbit radius for avoidance
+                <span>{deconflictionOrbitRadius.toFixed(1)} m</span>
+              </label>
+              <input 
+                min={10} 
+                max={200} 
+                step={5} 
+                type="range" 
+                value={deconflictionOrbitRadius}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionOrbitRadius(Number(event.target.value))}
+              />
+              
+              <label>
+                Max pause duration before warning
+                <span>{deconflictionMaxPause.toFixed(0)} s</span>
+              </label>
+              <input 
+                min={10} 
+                max={600} 
+                step={10} 
+                type="range" 
+                value={deconflictionMaxPause}
+                disabled={!deconflictionEnabled}
+                onChange={(event) => setDeconflictionMaxPause(Number(event.target.value))}
+              />
+            </>
+          )}
+          {settingsTab === "vessel" && (
+            <>
+              <label>YP vessel role</label>
+              <p className="settings-hint">
+                Designate any connected vehicle (e.g. a BlueBoat) to act as the YP mother vessel.
+                Its type will be overridden to &ldquo;yp&rdquo;, enabling range rings, MOB track
+                recording, and ship-relative commands.
+              </p>
+              <select
+                value={ypRoleVehicleId ?? ""}
+                disabled={DEMO_MODE}
+                onChange={(e) => {
+                  const newId = e.target.value || null;
+                  setYpRoleVehicleId(newId);
+                  setYpRole(newId).catch(() => undefined);
+                }}
+              >
+                <option value="">- dedicated yp_gps service -</option>
+                {Object.values(vehicles)
+                  .filter((v) => v.connected && (v.vehicle_type !== "yp" || v.vehicle_id === ypRoleVehicleId))
+                  .map((v) => (
+                    <option key={v.vehicle_id} value={v.vehicle_id}>
+                      {v.vehicle_id} ({v.vehicle_type})
+                    </option>
+                  ))}
+              </select>
+              <label>
+                RTB update rate
+                <span>{rtbUpdateHz.toFixed(1)} Hz</span>
+              </label>
+              <input
+                min={0.2}
+                max={10}
+                step={0.1}
+                type="range"
+                value={rtbUpdateHz}
+                disabled={DEMO_MODE}
+                onChange={(event) => setRtbUpdateHz(Number(event.target.value))}
+              />
+              <label>
+                RTB stern distance
+                <span>{rtbSternDistanceM} m</span>
+              </label>
+              <input min={5} max={200} step={5} type="range" value={rtbSternDistanceM} disabled={DEMO_MODE} onChange={(event) => setRtbSternDistanceM(Number(event.target.value))} />
+              <label>
+                RTB altitude
+                <span>{rtbAltitudeM} m</span>
+              </label>
+              <input min={5} max={150} step={5} type="range" value={rtbAltitudeM} disabled={DEMO_MODE} onChange={(event) => setRtbAltitudeM(Number(event.target.value))} />
+            </>
+          )}
+          {settingsTab === "mob" && (
+            <>
+              <label>
+                Track length
+                <span>{mobTrackSeconds}s</span>
+              </label>
+              <input min={10} max={600} step={10} type="range" value={mobTrackSeconds} onChange={(e) => setMobTrackSeconds(Number(e.target.value))} />
+              <label>
+                Swath width
+                <span>{mobSwathM} m</span>
+              </label>
+              <input min={5} max={100} step={5} type="range" value={mobSwathM} onChange={(e) => setMobSwathM(Number(e.target.value))} />
+              <label>
+                Search altitude
+                <span>{mobAltM} m</span>
+              </label>
+              <input min={5} max={120} step={5} type="range" value={mobAltM} onChange={(e) => setMobAltM(Number(e.target.value))} />
+              <label>
+                Search corridor half-width
+                <span>{mobCorridorHalfWidthM} m</span>
+              </label>
+              <input min={10} max={200} step={5} type="range" value={mobCorridorHalfWidthM} onChange={(e) => setMobCorridorHalfWidthM(Number(e.target.value))} />
+              <label>
+                Takeoff altitude
+                <span>{mobTakeoffAltitudeM} m</span>
+              </label>
+              <input min={5} max={120} step={5} type="range" value={mobTakeoffAltitudeM} onChange={(e) => setMobTakeoffAltitudeM(Number(e.target.value))} />
+              <label>
+                Climb speed
+                <span>{mobClimbSpeedMs.toFixed(1)} m/s</span>
+              </label>
+              <input min={0.5} max={20} step={0.5} type="range" value={mobClimbSpeedMs} onChange={(e) => setMobClimbSpeedMs(Number(e.target.value))} />
+            </>
+          )}
+        </div>
+      )}
+
       {showMessages && (
-        <MessageDrawer
-          messages={messageLog}
-          filteredMessages={filteredMessages}
-          filters={topicFilters}
-          width={messagePanelWidth}
-          onClose={() => setShowMessages(false)}
-          onResize={setMessagePanelWidth}
-          onFiltersChange={setTopicFilters}
-        />
+        <div ref={messageDrawerRef}>
+          <MessageDrawer
+            messages={messageLog}
+            filteredMessages={filteredMessages}
+            filters={topicFilters}
+            width={messagePanelWidth}
+            onClose={() => setShowMessages(false)}
+            onResize={setMessagePanelWidth}
+            onFiltersChange={setTopicFilters}
+          />
+        </div>
       )}
 
       {selected && (
         <VehicleModal
-          vehicle={selected}
+          // Lookup the live vehicle data, fallback to the snapshot if it briefly disconnects
+          vehicle={vehicles[selected.vehicle_id] || selected}
+          shipVehicle={yp}
+          sarMissionActive={Boolean(sarMissionActiveByVehicle[selected.vehicle_id])}
+          canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
           onClose={() => setSelected(null)}
           onRtb={() => {
+            command(selected.vehicle_id, { type: "cancel_sar" });
             command(selected.vehicle_id, { type: "rtb" });
+            // Extract the coordinates into strictly typed local variables first
+            const ypLat = yp?.position?.latitude;
+            const ypLon = yp?.position?.longitude;
+
+            // Snap the waypoint marker to the YP and lock it
+            if (ypLat !== undefined && ypLon !== undefined) {
+              setWaypointMarkers((current) => ({
+                ...current,
+                [selected.vehicle_id]: {
+                  vehicle_id: selected.vehicle_id,
+                  latitude: ypLat,
+                  longitude: ypLon,
+                  trackingYP: true,
+                }
+              }));
+            }
+
+            setSelected(null);
+          }}
+          onEndSar={() => {
+            command(selected.vehicle_id, { type: "cancel_sar" });
             setSelected(null);
           }}
           onWaypoint={() => {
@@ -491,21 +1300,117 @@ export function App() {
             setSelected(null);
           }}
           onColorSave={(color) => setVehicleColor(selected.vehicle_id, color)}
+          onSetMode={(mode) => {
+            command(selected.vehicle_id, { type: "set_mode", mode });
+            setSelected(null);
+          }}
         />
       )}
 
       {streamVehicleId && (
-        <UsvVideoViewer
+        <VideoViewer
           vehicleId={streamVehicleId}
-          src={USV_STREAM_URL}
+          // Prefer the dynamic streams array; otherwise turn the canonical
+          // server-published playback_url into a single displayable stream.
+          streams={
+            vehicles[streamVehicleId]?.video?.streams ??
+            (vehicles[streamVehicleId]?.video?.playback_url
+              ? [{ label: "Camera", url: vehicles[streamVehicleId]!.video!.playback_url! }]
+              : [{
+                  label: "Default Stream",
+                  url: `http://192.168.0.126:8889/${streamVehicleId}/whep`,
+                }])
+          }
           onClose={() => setStreamVehicleId(null)}
         />
+      )}
+
+      {/* Fixed red MOB button, available from the map view. */}
+      {activeTab === "map" && <button
+        className="mob-button"
+        disabled={VIEW_MODE && !Object.values(vehicles).some((vehicle) => vehicle.vehicle_type !== "yp" && vehicle.vehicle_type !== "ugv" && vehicle.connected !== false && isSimVehicle(vehicle.vehicle_id))}
+        title="Man Overboard - dispatch SAR search"
+        onClick={(e) => {
+          e.stopPropagation();
+          const commandable = Object.values(vehicles).filter((v) => {
+            if (v.vehicle_type === "yp" || v.vehicle_type === "ugv") return false;
+            if (VIEW_MODE && !isSimVehicle(v.vehicle_id)) return false;
+            return v.connected !== false;
+          });
+          setMobVehicleId(commandable[0]?.vehicle_id ?? "");
+          setMobError(null);
+          setMobModalOpen(true);
+        }}
+      >
+        MAN<br />OVER<br />BOARD
+      </button>}
+
+      {/* MOB confirmation modal */}
+      {mobModalOpen && (
+        <div className="mob-modal-overlay" onClick={() => !mobSending && setMobModalOpen(false)}>
+          <div className="mob-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="mob-modal-title">
+              <AlertTriangle size={22} />
+              Man Overboard
+            </div>
+            <div className="mob-modal-body">
+              This will immediately dispatch the selected vehicle to search
+              the YP vessel&apos;s recent track. Confirm only if a person is overboard.
+            </div>
+            <div className="mob-modal-vehicle">
+              <label className="mob-vehicle-label">Dispatch vehicle</label>
+              {(() => {
+                const commandable = Object.values(vehicles).filter((v) => {
+                  if (v.vehicle_type === "yp" || v.vehicle_type === "ugv") return false;
+                  if (VIEW_MODE && !isSimVehicle(v.vehicle_id)) return false;
+                  return v.connected !== false;
+                });
+                return commandable.length > 0 ? (
+                  <select
+                    className="mob-vehicle-select"
+                    value={mobVehicleId}
+                    onChange={(e) => setMobVehicleId(e.target.value)}
+                    disabled={mobSending}
+                  >
+                    <option value="">- nearest available -</option>
+                    {commandable.map((v) => (
+                      <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="mob-no-vehicles">No connected vehicles - server will choose automatically</div>
+                );
+              })()}
+            </div>
+            {mobError && (
+              <div className="mob-modal-error">
+                <AlertTriangle size={14} /> {mobError}
+              </div>
+            )}
+            <div className="mob-modal-actions">
+              <button
+                className="mob-cancel-btn"
+                onClick={() => { setMobModalOpen(false); setMobError(null); }}
+                disabled={mobSending}
+              >
+                Cancel
+              </button>
+              <button
+                className="mob-confirm-btn"
+                onClick={handleMobConfirm}
+                disabled={mobSending}
+              >
+                {mobSending ? "Dispatching..." : "MAN OVERBOARD!"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-function streamMessageFromPayload(payload: {
+function streamMessageFromPayload(payload: DemoMessagePayload | {
   vehicle_id?: string;
   vehicle_type?: VehicleType;
   topic?: string;
@@ -582,317 +1487,46 @@ function filterMessages(messages: StreamMessage[], filters: string[]): StreamMes
   });
 }
 
-function topicOptions(messages: StreamMessage[], filters: string[], depth: number): string[] {
-  const values = new Set<string>();
-  for (const message of messages) {
-    const parts = topicParts(message.topic);
-    const matchesPrefix = filters.slice(0, depth).every((filter, index) => filter === "all" || parts[index] === filter);
-    if (matchesPrefix && parts[depth]) {
-      values.add(parts[depth]);
-    }
-  }
-  return Array.from(values).sort((a, b) => a.localeCompare(b));
-}
-
-function filterLabel(depth: number): string {
-  return ["Topic root", "Vehicle ID", "Message topic", "Subtopic"][depth] ?? `Level ${depth + 1}`;
-}
-
-function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribution: string } {
+function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribution: string; maxNativeZoom: number } {
   if (base === "street") {
     return {
       auto: {
         url: "/tiles/osm/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
       cache: {
         url: "/tiles/cache/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
       online: {
         url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         attribution: "&copy; OpenStreetMap contributors",
+        maxNativeZoom: 19,
       },
     }[source];
   }
 
+  // Satellite: cached tiles only go to z=19 so we overzoom from there;
+  // online Esri World Imagery natively serves z=20 in high-detail areas.
   return {
     auto: {
       url: "/tiles/earth/{z}/{x}/{y}.png",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 19,
     },
     cache: {
       url: "/tiles/earth-cache/{z}/{x}/{y}.png",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 19,
     },
     online: {
       url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       attribution: "Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      maxNativeZoom: 20,
     },
   }[source];
-}
-
-function WeatherRadarLayer() {
-  const [radarCacheBucket, setRadarCacheBucket] = useState(() => Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS));
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setRadarCacheBucket(Math.floor(Date.now() / WEATHER_RADAR_REFRESH_MS));
-    }, WEATHER_RADAR_REFRESH_MS);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  return (
-    <WMSTileLayer
-      key={`weather-radar-${radarCacheBucket}`}
-      url={`${WEATHER_RADAR_WMS_URL}?radar_cache=${radarCacheBucket}`}
-      layers="1"
-      format="image/png"
-      transparent
-      opacity={WEATHER_RADAR_OPACITY}
-      attribution="Radar &copy; NOAA/NWS"
-      errorTileUrl={TRANSPARENT_TILE_DATA_URL}
-      eventHandlers={{
-        tileerror: (event) => {
-          const tile = (event as unknown as { tile?: HTMLImageElement }).tile;
-          if (tile) {
-            tile.src = TRANSPARENT_TILE_DATA_URL;
-          }
-        },
-      }}
-    />
-  );
-}
-
-function WindLayer({ yp, showVectors, onToggleVectors }: { yp?: Vehicle; showVectors: boolean; onToggleVectors: () => void }) {
-  const map = useMap();
-  const [windState, setWindState] = useState<WindState>({ samples: [], projectedSamples: [] });
-  const sampleKeyRef = useRef("");
-  const samplesRef = useRef<WindSample[]>([]);
-
-  useEffect(() => {
-    if (!showVectors) {
-      return;
-    }
-    map.attributionControl.addAttribution(WIND_OVERLAY_ATTRIBUTION);
-    return () => {
-      map.attributionControl.removeAttribution(WIND_OVERLAY_ATTRIBUTION);
-    };
-  }, [map, showVectors]);
-
-  useEffect(() => {
-    samplesRef.current = windState.samples;
-  }, [windState.samples]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let controller: AbortController | null = null;
-
-    const refreshSamples = () => {
-      const points = windSamplePoints(map);
-      const bucket = Math.floor(Date.now() / WIND_OVERLAY_REFRESH_MS);
-      const nextKey = `${bucket}:${points.map((point) => `${point.latitude.toFixed(2)},${point.longitude.toFixed(2)}`).join("|")}`;
-      if (nextKey === sampleKeyRef.current) {
-        setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
-        return;
-      }
-      sampleKeyRef.current = nextKey;
-      controller?.abort();
-      controller = new AbortController();
-      fetchWindSamples(points, controller.signal).then((nextSamples) => {
-        if (!cancelled) {
-          samplesRef.current = nextSamples;
-          setWindState({ samples: nextSamples, projectedSamples: projectWindSamples(map, nextSamples) });
-        }
-      });
-    };
-
-    const updateProjection = () => setWindState((current) => ({ ...current, projectedSamples: projectWindSamples(map, samplesRef.current) }));
-
-    refreshSamples();
-    map.on("moveend zoomend resize", refreshSamples);
-    map.on("move zoom", updateProjection);
-    const interval = window.setInterval(refreshSamples, WIND_OVERLAY_REFRESH_MS);
-
-    return () => {
-      cancelled = true;
-      controller?.abort();
-      window.clearInterval(interval);
-      map.off("moveend zoomend resize", refreshSamples);
-      map.off("move zoom", updateProjection);
-    };
-  }, [map]);
-
-  const windReadout = windState.samples.length > 0 ? representativeWindSample(windState.samples) : null;
-  const ypReadout = readoutForYp(yp);
-
-  if (!windReadout && !ypReadout) {
-    return null;
-  }
-
-  return (
-    createPortal(
-      <>
-        {showVectors && windState.projectedSamples.length > 0 && (
-          <div className="wind-overlay" aria-hidden="true">
-            <svg width="100%" height="100%" focusable="false">
-              {windState.projectedSamples.map((sample) => (
-                <g key={sample.id} transform={`translate(${sample.x.toFixed(1)} ${sample.y.toFixed(1)}) rotate(${windFlowDirection(sample.directionDeg)})`}>
-                  <line className="wind-arrow-line" x1="0" y1="13" x2="0" y2={windArrowTipY(sample.speedKmh)} />
-                  <path className="wind-arrow-head" d={`M -5 ${windArrowTipY(sample.speedKmh) + 7} L 0 ${windArrowTipY(sample.speedKmh)} L 5 ${windArrowTipY(sample.speedKmh) + 7}`} />
-                  <circle className="wind-arrow-dot" cx="0" cy="13" r="2.4" />
-                </g>
-              ))}
-            </svg>
-          </div>
-        )}
-        <button className="wind-readout" type="button" title="Toggle wind vectors" onClick={onToggleVectors}>
-          {ypReadout && <ReadoutRow label="YP" heading={formatHeading(ypReadout.headingDeg)} speed={formatKnots(ypReadout.speedKts)} />}
-          {windReadout && <ReadoutRow label="Wind" heading={formatHeading(windReadout.directionDeg)} speed={formatKnots(kmhToKnots(windReadout.speedKmh))} />}
-        </button>
-      </>,
-      map.getContainer(),
-    )
-  );
-}
-
-function ReadoutRow({ label, heading, speed }: { label: string; heading: string; speed: string }) {
-  return (
-    <span className="readout-row">
-      <span className="readout-label">{label}:</span>
-      <span className="readout-heading">{heading}</span>
-      <span className="readout-at">@</span>
-      <span className="readout-speed">{speed} kts</span>
-    </span>
-  );
-}
-
-function windSamplePoints(map: L.Map): Array<{ latitude: number; longitude: number }> {
-  const size = map.getSize();
-  const points: Array<{ latitude: number; longitude: number }> = [];
-  for (let row = 0; row < WIND_SAMPLE_ROWS; row += 1) {
-    for (let column = 0; column < WIND_SAMPLE_COLUMNS; column += 1) {
-      const x = ((column + 0.5) / WIND_SAMPLE_COLUMNS) * size.x;
-      const y = ((row + 0.5) / WIND_SAMPLE_ROWS) * size.y;
-      const latLng = map.containerPointToLatLng([x, y]);
-      points.push({ latitude: latLng.lat, longitude: latLng.lng });
-    }
-  }
-  return points;
-}
-
-function projectWindSamples(map: L.Map, samples: WindSample[]): ProjectedWindSample[] {
-  return samples.map((sample) => {
-    const point = map.latLngToContainerPoint([sample.latitude, sample.longitude]);
-    return { ...sample, x: point.x, y: point.y };
-  });
-}
-
-async function fetchWindSamples(points: Array<{ latitude: number; longitude: number }>, signal: AbortSignal): Promise<WindSample[]> {
-  const results = await Promise.allSettled(points.map((point, index) => fetchWindSample(point.latitude, point.longitude, index, signal)));
-  return results.flatMap((result) => (result.status === "fulfilled" && result.value ? [result.value] : []));
-}
-
-async function fetchWindSample(latitude: number, longitude: number, index: number, signal: AbortSignal): Promise<WindSample | null> {
-  const timeoutController = new AbortController();
-  const timeout = window.setTimeout(() => timeoutController.abort(), WIND_FETCH_TIMEOUT_MS);
-  const abortListener = () => timeoutController.abort();
-  signal.addEventListener("abort", abortListener, { once: true });
-  try {
-    const params = new URLSearchParams({
-      latitude: latitude.toFixed(4),
-      longitude: longitude.toFixed(4),
-      current: "wind_speed_10m,wind_direction_10m",
-      wind_speed_unit: "kmh",
-      timezone: "UTC",
-    });
-    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, { signal: timeoutController.signal });
-    if (!response.ok) {
-      return null;
-    }
-    const payload = (await response.json()) as {
-      latitude?: number;
-      longitude?: number;
-      current?: { wind_speed_10m?: number; wind_direction_10m?: number };
-    };
-    const speedKmh = Number(payload.current?.wind_speed_10m);
-    const directionDeg = Number(payload.current?.wind_direction_10m);
-    if (!Number.isFinite(speedKmh) || !Number.isFinite(directionDeg)) {
-      return null;
-    }
-    return {
-      id: `${index}-${latitude.toFixed(3)}-${longitude.toFixed(3)}`,
-      latitude,
-      longitude,
-      speedKmh,
-      directionDeg,
-    };
-  } catch {
-    return null;
-  } finally {
-    window.clearTimeout(timeout);
-    signal.removeEventListener("abort", abortListener);
-  }
-}
-
-function windArrowTipY(speedKmh: number): number {
-  return -Math.min(30, Math.max(14, 11 + speedKmh * 0.55));
-}
-
-function windFlowDirection(directionDeg: number): number {
-  return (directionDeg + 180) % 360;
-}
-
-function representativeWindSample(samples: WindSample[]): WindSample {
-  return samples[Math.floor(samples.length / 2)] ?? samples[0];
-}
-
-function kmhToKnots(speedKmh: number): number {
-  return speedKmh * 0.539957;
-}
-
-function readoutForYp(yp?: Vehicle): YpReadout | null {
-  if (!yp) {
-    return null;
-  }
-  const headingDeg = Number.isFinite(yp.heading) ? yp.heading : undefined;
-  const speedKts = speedKnotsFromHistory(yp.history);
-  if (headingDeg == null && speedKts == null) {
-    return null;
-  }
-  return { headingDeg, speedKts };
-}
-
-function speedKnotsFromHistory(history?: Vehicle["history"]): number | undefined {
-  if (!history || history.length < 2) {
-    return undefined;
-  }
-  const recent = [...history].reverse();
-  const latest = recent.find((point) => point.stamp != null);
-  const previous = latest ? recent.find((point) => point !== latest && point.stamp != null && latest.stamp! - point.stamp! > 0.1) : undefined;
-  if (!latest || !previous || latest.stamp == null || previous.stamp == null) {
-    return undefined;
-  }
-  const elapsedSeconds = latest.stamp - previous.stamp;
-  if (elapsedSeconds <= 0) {
-    return undefined;
-  }
-  return metersPerSecondToKnots(haversineMeters(previous.latitude, previous.longitude, latest.latitude, latest.longitude) / elapsedSeconds);
-}
-
-function metersPerSecondToKnots(speedMps: number): number {
-  return speedMps * 1.943844;
-}
-
-function formatHeading(directionDeg?: number): string {
-  if (typeof directionDeg !== "number" || !Number.isFinite(directionDeg)) {
-    return "---";
-  }
-  return String(((Math.round(directionDeg) % 360) + 360) % 360).padStart(3, "0");
-}
-
-function formatKnots(speedKts?: number): string {
-  return typeof speedKts === "number" && Number.isFinite(speedKts) ? String(Math.round(speedKts)) : "--";
 }
 
 function useIsPhoneViewer(): boolean {
@@ -911,6 +1545,26 @@ function useIsPhoneViewer(): boolean {
   return isPhoneViewer;
 }
 
+function useViewportLayoutSync(): void {
+  useEffect(() => {
+    const updateViewport = () => {
+      const width = Math.round(window.visualViewport?.width ?? window.innerWidth);
+      document.documentElement.dataset.viewportWidth = String(width);
+      document.documentElement.style.setProperty("--viewport-width", `${width}px`);
+    };
+
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    window.visualViewport?.addEventListener("resize", updateViewport);
+    return () => {
+      window.removeEventListener("resize", updateViewport);
+      window.visualViewport?.removeEventListener("resize", updateViewport);
+      delete document.documentElement.dataset.viewportWidth;
+      document.documentElement.style.removeProperty("--viewport-width");
+    };
+  }, []);
+}
+
 function isPhoneBrowser(): boolean {
   if (typeof navigator === "undefined") {
     return false;
@@ -927,6 +1581,10 @@ function MapMenu({
   mapSource,
   showWeatherRadar,
   showWindOverlay,
+  expanded,
+  setMenuRef,
+  setToggleRef,
+  onExpandedChange,
   onMapBaseChange,
   onMapSourceChange,
   onWeatherRadarChange,
@@ -936,34 +1594,22 @@ function MapMenu({
   mapSource: MapSource;
   showWeatherRadar: boolean;
   showWindOverlay: boolean;
+  expanded: boolean;
+  setMenuRef: (node: HTMLDivElement | null) => void;
+  setToggleRef: (node: HTMLButtonElement | null) => void;
+  onExpandedChange: (expanded: boolean) => void;
   onMapBaseChange: (base: MapBase) => void;
   onMapSourceChange: (source: MapSource) => void;
   onWeatherRadarChange: (show: boolean) => void;
   onWindOverlayChange: (show: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const shellRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!expanded) {
-      return;
-    }
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!shellRef.current?.contains(event.target as Node)) {
-        setExpanded(false);
-      }
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [expanded]);
-
   return (
-    <div ref={shellRef} className="map-menu-shell" aria-label="Map options">
-      <button className="map-menu-toggle" title="Map layers" onClick={() => setExpanded((value) => !value)}>
+    <div className="map-menu-shell" aria-label="Map options">
+      <button ref={setToggleRef} className="map-menu-toggle" title="Map layers" onClick={() => onExpandedChange(!expanded)}>
         <Layers size={19} />
       </button>
       {expanded && (
-        <div className="map-menu">
+        <div className="map-menu" ref={setMenuRef}>
           <fieldset>
             <legend>Map</legend>
             <label>
@@ -1007,31 +1653,80 @@ function MapMenu({
   );
 }
 
+function gridSliderToMeters(v: number): number {
+  // Maps slider 0-100 to 5-500 m on a log scale for finer control near 5 m
+  const min = Math.log(5);
+  const max = Math.log(500);
+  return Math.round(Math.exp(min + (v / 100) * (max - min)));
+}
+
+function gridMetersToSlider(m: number): number {
+  const min = Math.log(5);
+  const max = Math.log(500);
+  return Math.round(((Math.log(m) - min) / (max - min)) * 100);
+}
+
 function MapActionMenu({
   menu,
   vehicles,
   preferredVehicleId,
   onSend,
   onSendAll,
+  onSearchGrid,
 }: {
   menu: MapActionMenuState;
   vehicles: Vehicle[];
   preferredVehicleId: string | null;
-  onSend: (vehicleId: string, lat: number, lon: number) => void;
-  onSendAll: (lat: number, lon: number) => void;
+  onSend: (vehicleId: string) => void;
+  onSendAll: () => void;
+  onSearchGrid: (vehicleId: string, gridSizeM: number, swathM: number, altM: number) => void;
 }) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [showVehicles, setShowVehicles] = useState(false);
+  const [showSearchGrid, setShowSearchGrid] = useState(false);
+  const [gridSlider, setGridSlider] = useState(() => gridMetersToSlider(200));
+  const gridSizeM = gridSliderToMeters(gridSlider);
+  const [swathM, setSwathM] = useState(20);
+  const [altM, setAltM] = useState(30);
+  const [position, setPosition] = useState<{ left: number; top: number }>({ left: menu.x + 8, top: menu.y + 8 });
   const commandableVehicles = vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp");
   const preferredVehicle = commandableVehicles.find((vehicle) => vehicle.vehicle_id === preferredVehicleId);
+
+  useEffect(() => {
+    const clampToViewport = () => {
+      const panel = menuRef.current;
+      if (!panel) {
+        return;
+      }
+      const padding = 8;
+      const offset = 8;
+      const width = panel.offsetWidth;
+      const height = panel.offsetHeight;
+      const desiredLeft = menu.x + offset;
+      const desiredTop = menu.y + offset;
+      const maxLeft = Math.max(padding, window.innerWidth - width - padding);
+      const maxTop = Math.max(padding, window.innerHeight - height - padding);
+
+      setPosition({
+        left: Math.min(Math.max(padding, desiredLeft), maxLeft),
+        top: Math.min(Math.max(padding, desiredTop), maxTop),
+      });
+    };
+
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, [menu.x, menu.y, showVehicles, showSearchGrid, gridSlider, swathM, altM, commandableVehicles.length, preferredVehicleId]);
+
   return (
-    <div className="map-action-menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
+    <div ref={menuRef} className="map-action-menu" style={{ left: position.left, top: position.top }} onClick={(event) => event.stopPropagation()}>
       <div className="map-action-title">Waypoint</div>
       <div className="map-coordinates">
         <span>Lat {menu.lat.toFixed(6)}</span>
         <span>Lon {menu.lon.toFixed(6)}</span>
       </div>
       {preferredVehicle && (
-        <button className="map-action-preferred" onClick={() => onSend(preferredVehicle.vehicle_id, menu.lat, menu.lon)}>
+        <button className="map-action-preferred" onClick={() => onSend(preferredVehicle.vehicle_id)}>
           <span className={`vehicle-dot ${preferredVehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(preferredVehicle) }} />
           Send {preferredVehicle.vehicle_id}
         </button>
@@ -1042,899 +1737,111 @@ function MapActionMenu({
       </button>
       {showVehicles &&
         commandableVehicles.map((vehicle) => (
-          <button key={vehicle.vehicle_id} className="map-action-child" onClick={() => onSend(vehicle.vehicle_id, menu.lat, menu.lon)}>
+          <button key={vehicle.vehicle_id} className="map-action-child" onClick={() => onSend(vehicle.vehicle_id)}>
             <span className={`vehicle-dot ${vehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(vehicle) }} />
             {vehicle.vehicle_id}
           </button>
         ))}
       {commandableVehicles.length > 1 && (
-        <button className="map-action-all" onClick={() => onSendAll(menu.lat, menu.lon)}>
+        <button className="map-action-all" onClick={onSendAll}>
           All vehicles
         </button>
       )}
-    </div>
-  );
-}
 
-function MessageDrawer({
-  messages,
-  filteredMessages,
-  filters,
-  width,
-  onClose,
-  onResize,
-  onFiltersChange,
-}: {
-  messages: StreamMessage[];
-  filteredMessages: StreamMessage[];
-  filters: string[];
-  width: number;
-  onClose: () => void;
-  onResize: (width: number) => void;
-  onFiltersChange: (filters: string[]) => void;
-}) {
-  const [selectedMessage, setSelectedMessage] = useState<StreamMessage | null>(null);
-  const messageListRef = useRef<HTMLDivElement | null>(null);
-  const clampedWidth = Math.max(360, Math.min(width, Math.floor(window.innerWidth * 0.82)));
-
-  const filterControls = useMemo(() => {
-    const controls: Array<{ depth: number; options: string[]; value: string }> = [];
-    for (let depth = 0; depth < 8; depth += 1) {
-      const options = topicOptions(messages, filters, depth);
-      const selected = filters[depth] ?? "all";
-      if (options.length === 0) {
-        break;
-      }
-      controls.push({ depth, options, value: selected });
-      if (selected === "all") {
-        break;
-      }
-    }
-    return controls;
-  }, [messages, filters]);
-
-  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const startX = event.clientX;
-    const startWidth = clampedWidth;
-
-    const move = (moveEvent: PointerEvent) => {
-      onResize(Math.max(360, Math.min(startWidth + startX - moveEvent.clientX, window.innerWidth - 96)));
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const updateFilter = (depth: number, value: string) => {
-    const next = filters.slice(0, depth);
-    next[depth] = value;
-    onFiltersChange(next);
-  };
-
-  const toggleMessage = (message: StreamMessage) => {
-    setSelectedMessage((current) => {
-      if (current?.id === message.id) {
-        window.setTimeout(() => messageListRef.current?.scrollTo({ top: 0, behavior: "smooth" }), 0);
-        return null;
-      }
-      return message;
-    });
-  };
-
-  return (
-    <aside className="message-drawer" style={{ width: clampedWidth }}>
-      <div className="resize-handle" onPointerDown={startResize} />
-      <div className="message-header">
-        <div className="panel-title">
-          <MessageSquare size={18} />
-          <strong>Messages</strong>
-        </div>
-        <div className="message-count">
-          {filteredMessages.length} / {messages.length}
-        </div>
-        <button className="icon-button" title="Close messages" onClick={onClose}>
-          <X size={19} />
+      {/* Search Grid section */}
+      <div className="map-action-section">
+        <button onClick={() => setShowSearchGrid((v) => !v)}>
+          <Grid3X3 size={15} />
+          Search Grid Here
         </button>
-      </div>
-
-      <div className="filter-stack">
-        {filterControls.map((control) => (
-          <label key={control.depth}>
-            <span>{filterLabel(control.depth)}</span>
-            <select value={control.value} onChange={(event) => updateFilter(control.depth, event.target.value)}>
-              <option value="all">All</option>
-              {control.options.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
-      </div>
-
-      <div className="message-list" ref={messageListRef}>
-        {selectedMessage && (
-          <article className="pinned-message">
-            <div className="pinned-message-header">
-              <div>
-                <strong>{selectedMessage.topic}</strong>
-                <span>{new Date(selectedMessage.receivedAt).toLocaleTimeString()}</span>
-              </div>
-              <button className="icon-button" title="Close message" onClick={() => setSelectedMessage(null)}>
-                <X size={17} />
+        {showSearchGrid && commandableVehicles.length > 0 && (
+          <div className="search-grid-form">
+            <label>
+              Grid size
+              <span>{gridSizeM} m</span>
+            </label>
+            <input
+              type="range" min={0} max={100} step={1}
+              value={gridSlider}
+              onChange={(e) => setGridSlider(Number(e.target.value))}
+            />
+            <label>
+              Swath width
+              <span>{swathM} m</span>
+            </label>
+            <input
+              type="range" min={5} max={50} step={5}
+              value={swathM}
+              onChange={(e) => setSwathM(Number(e.target.value))}
+            />
+            <label>
+              Altitude
+              <span>{altM} m</span>
+            </label>
+            <input
+              type="range" min={10} max={100} step={5}
+              value={altM}
+              onChange={(e) => setAltM(Number(e.target.value))}
+            />
+            {commandableVehicles.map((vehicle) => (
+              <button
+                key={vehicle.vehicle_id}
+                className="search-grid-launch-btn"
+                onClick={() => onSearchGrid(vehicle.vehicle_id, gridSizeM, swathM, altM)}
+              >
+                <span className={`vehicle-dot ${vehicle.vehicle_type}`} style={{ backgroundColor: vehicleMarkerColor(vehicle) }} />
+                Launch on {vehicle.vehicle_id}
               </button>
-            </div>
-            <div className="message-row-meta">
-              <span>{selectedMessage.type}</span>
-              <span>{selectedMessage.vehicle_id}</span>
-            </div>
-            <pre className="json-view">{jsonSyntaxHighlight(selectedMessage.msg)}</pre>
-          </article>
+            ))}
+          </div>
         )}
-        {filteredMessages.length === 0 ? (
-          <div className="empty-messages">No messages match the current filter.</div>
-        ) : (
-          filteredMessages.map((message) => (
-            <button
-              key={message.id}
-              className={selectedMessage?.id === message.id ? "message-row selected" : "message-row"}
-              onClick={() => toggleMessage(message)}
-            >
-              <div className="message-row-top">
-                <strong>{message.topic}</strong>
-                <span>{new Date(message.receivedAt).toLocaleTimeString()}</span>
-              </div>
-              <div className="message-row-meta">
-                <span>{message.type}</span>
-                <span>{message.vehicle_id}</span>
-              </div>
-            </button>
-          ))
+        {showSearchGrid && commandableVehicles.length === 0 && (
+          <div className="search-grid-form">
+            <span style={{ color: "#94a3b8", fontSize: 12 }}>No commandable vehicles connected</span>
+          </div>
         )}
       </div>
-    </aside>
-  );
-}
-
-function jsonSyntaxHighlight(value: unknown): ReactNode {
-  const json = JSON.stringify(value, null, 2);
-  const parts = json.split(/("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g);
-  return parts.map((part, index) => {
-    if (!part) {
-      return null;
-    }
-    let className = "json-punctuation";
-    if (/^"/.test(part)) {
-      className = /:$/.test(part) ? "json-key" : "json-string";
-    } else if (/true|false/.test(part)) {
-      className = "json-boolean";
-    } else if (/null/.test(part)) {
-      className = "json-null";
-    } else if (/^-?\d/.test(part)) {
-      className = "json-number";
-    }
-    return (
-      <span key={`${part}-${index}`} className={className}>
-        {part}
-      </span>
-    );
-  });
-}
-
-function VehicleLayer({
-  vehicle,
-  trailSeconds,
-  isPhoneViewer,
-  iconScalePercent,
-  onClick,
-}: {
-  vehicle: Vehicle;
-  trailSeconds: number;
-  isPhoneViewer: boolean;
-  iconScalePercent: number;
-  onClick: () => void;
-}) {
-  const map = useMap();
-  const [zoom, setZoom] = useState(map.getZoom());
-  useMapEvents({
-    zoomend() {
-      setZoom(map.getZoom());
-    },
-  });
-  const position = vehicle.position!;
-  const cutoff = Date.now() / 1000 - trailSeconds;
-  const trail = (vehicle.history ?? [])
-    .filter((point) => !point.stamp || point.stamp >= cutoff)
-    .map((point) => [point.latitude, point.longitude] as [number, number]);
-  const color = vehicleMarkerColor(vehicle);
-
-  return (
-    <>
-      {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color, weight: 3, opacity: 0.75 }} />}
-      <Marker
-        position={[position.latitude, position.longitude]}
-        icon={vehicleIcon(vehicle, isPhoneViewer, zoom, iconScalePercent)}
-        zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
-        eventHandlers={{
-          click: (event) => {
-            L.DomEvent.stopPropagation(event.originalEvent);
-            onClick();
-          },
-        }}
-      >
-        <Tooltip direction="top" offset={[0, -18]}>
-          <TelemetryTooltip vehicle={vehicle} />
-        </Tooltip>
-        <Popup>
-          <TelemetryTooltip vehicle={vehicle} />
-        </Popup>
-      </Marker>
-      {vehicle.vehicle_type === "yp" && (
-        <CircleMarker center={[position.latitude, position.longitude]} radius={18} pathOptions={{ color, weight: 2, fillOpacity: 0.05 }} interactive={false} />
-      )}
-    </>
+    </div>
   );
 }
 
 function MapCommander({
   onMapAction,
 }: {
-  onMapAction: (lat: number, lon: number, point: { x: number; y: number }) => void;
+  onMapAction: (lat: number, lon: number, point: L.Point) => void;
 }) {
   const map = useMap();
-  const lastDragAtRef = useRef(0);
-  const openMenu = (event: MouseEvent) => {
-    const latLng = map.mouseEventToLatLng(event);
-    onMapAction(latLng.lat, latLng.lng, {
-      x: event.clientX,
-      y: event.clientY,
-    });
-  };
-
-  useEffect(() => {
-    const container = map.getContainer();
-    const handleContextMenu = (event: MouseEvent) => {
-      if (isInteractiveOverlayTarget(event.target)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      openMenu(event);
-    };
-    container.addEventListener("contextmenu", handleContextMenu);
-    return () => container.removeEventListener("contextmenu", handleContextMenu);
-  }, [map]);
-
   useMapEvents({
-    dragend() {
-      lastDragAtRef.current = Date.now();
-    },
-    click(event) {
-      if (!isCoarsePointer() || Date.now() - lastDragAtRef.current < 250) {
-        return;
-      }
-      openMenu(event.originalEvent);
+    contextmenu(event) {
+      const point = map.latLngToContainerPoint(event.latlng);
+      onMapAction(event.latlng.lat, event.latlng.lng, point);
     },
   });
   return null;
 }
 
-function isInteractiveOverlayTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest("button, input, select, textarea, .leaflet-control"));
-}
-
-function isCoarsePointer(): boolean {
-  return typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
-}
-
-function MapPanTracker({ onManualPan }: { onManualPan: () => void }) {
+function MapPanTracker({ onManualPan, onPan }: { onManualPan: () => void; onPan: (center: [number, number]) => void }) {
   useMapEvents({
     dragstart() {
       onManualPan();
     },
+    dragend: (event) => {
+      const center = event.target.getCenter();
+      onPan([center.lat, center.lng]);
+    },
+    zoomend: (event) => {
+      const center = event.target.getCenter();
+      onPan([center.lat, center.lng]);
+    },
   });
   return null;
 }
 
-function FollowYpCenter({ yp, enabled }: { yp?: Vehicle; enabled: boolean }) {
-  const map = useMap();
-  const latitude = yp?.position?.latitude;
-  const longitude = yp?.position?.longitude;
-
-  useEffect(() => {
-    if (!enabled || latitude == null || longitude == null) {
-      return;
-    }
-    map.setView([latitude, longitude], map.getZoom(), { animate: false });
-  }, [enabled, latitude, longitude, map]);
-
-  return null;
-}
-
-function FitAllControl({ vehicles }: { vehicles: Vehicle[] }) {
-  const map = useMap();
-
-  return (
-    <button
-      className="fit-control"
-      title="Fit all vehicles"
-      onClick={() => {
-        if (vehicles.length === 0) {
-          return;
-        }
-        const bounds = L.latLngBounds(vehicles.map((vehicle) => [vehicle.position!.latitude, vehicle.position!.longitude]));
-        map.fitBounds(bounds.pad(0.25), { maxZoom: 17 });
-      }}
-    >
-      <LocateFixed size={18} />
-    </button>
-  );
-}
-
-function YpRangeRings({ yp }: { yp?: Vehicle }) {
-  const position = yp?.position;
-  if (!position) {
-    return null;
-  }
-
-  return (
-    <>
-      {[50, 100, 200].map((radius) => (
-        <Circle
-          key={radius}
-          center={[position.latitude, position.longitude]}
-          radius={radius}
-          pathOptions={{
-            color: "#38bdf8",
-            dashArray: radius === 200 ? "6 8" : undefined,
-            fillColor: "#38bdf8",
-            fillOpacity: 0.035,
-            opacity: 0.6,
-            weight: 1.5,
-          }}
-          interactive={false}
-        />
-      ))}
-    </>
-  );
-}
-
-function WaypointCrosshair({
-  waypoint,
-  vehicle,
-  onDragStart,
-  onDragEnd,
-  onMove,
-}: {
-  waypoint: WaypointMarker;
-  vehicle?: Vehicle;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onMove: (lat: number, lon: number) => void;
-}) {
-  const color = vehicle ? vehicleMarkerColor(vehicle) : "#0f172a";
-  const position = useMemo<[number, number]>(() => [waypoint.latitude, waypoint.longitude], [waypoint.latitude, waypoint.longitude]);
-  const icon = useMemo(() => waypointIcon(color), [color]);
-  return (
-    <Marker
-      position={position}
-      icon={icon}
-      zIndexOffset={6000}
-      draggable
-      eventHandlers={{
-        click: (event) => L.DomEvent.stopPropagation(event.originalEvent),
-        dragstart: onDragStart,
-        dragend: (event) => {
-          const position = event.target.getLatLng();
-          onMove(position.lat, position.lng);
-          onDragEnd();
-        },
-      }}
-    />
-  );
-}
-
-function waypointIcon(color: string) {
-  return L.divIcon({
-    className: "",
-    iconSize: [44, 44],
-    iconAnchor: [22, 22],
-    html: `
-      <div class="waypoint-crosshair" style="--waypoint-color: ${color}">
-        <svg viewBox="0 0 34 34" aria-hidden="true">
-          <circle cx="17" cy="17" r="7" />
-          <path d="M17 2 V11 M17 23 V32 M2 17 H11 M23 17 H32" />
-        </svg>
-      </div>
-    `,
+function MapZoomTracker({ onZoom }: { onZoom: (zoom: number) => void }) {
+  useMapEvents({
+    zoomend: (event) => onZoom(event.target.getZoom()),
   });
-}
-
-function VehicleModal({
-  vehicle,
-  onClose,
-  onRtb,
-  onWaypoint,
-  onStreamVideo,
-  onColorSave,
-}: {
-  vehicle: Vehicle;
-  onClose: () => void;
-  onRtb: () => void;
-  onWaypoint: () => void;
-  onStreamVideo: () => void;
-  onColorSave: (color: string) => void;
-}) {
-  const position = vehicle.position;
-  const [showColorPalette, setShowColorPalette] = useState(false);
-  const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
-  return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="vehicle-modal" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <div className={`type-chip ${vehicle.vehicle_type}`}>{vehicle.vehicle_type.toUpperCase()}</div>
-          <div>
-            <h2>{vehicle.vehicle_id}</h2>
-            <p>{vehicle.connected ? "Connected" : "Last seen offline"}</p>
-          </div>
-          <button className="icon-button" title="Close" onClick={onClose}>
-            <X size={20} />
-          </button>
-        </div>
-        <div className="metrics">
-          <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} />
-          <Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} />
-          <Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} />
-          <Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} />
-          <Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} />
-        </div>
-        <div className="modal-actions">
-          <button className="danger" onClick={onRtb}>
-            <RotateCcw size={18} />
-            RTB
-          </button>
-          <button className="secondary" onClick={() => setShowColorPalette((value) => !value)}>
-            <Brush size={18} />
-            Color
-          </button>
-          {vehicle.vehicle_type === "usv" && (
-            <button className="stream" onClick={onStreamVideo}>
-              <Video size={18} />
-              Stream Video
-            </button>
-          )}
-          <button className="primary" onClick={onWaypoint}>
-            <Route size={18} />
-            Waypoint
-          </button>
-        </div>
-        {showColorPalette && (
-          <div className="color-panel">
-            <div className="color-swatches">
-              {VEHICLE_COLOR_PALETTE.map((color) => (
-                <button
-                  key={color}
-                  className={draftColor === color ? "color-swatch selected" : "color-swatch"}
-                  style={{ backgroundColor: color }}
-                  title={color}
-                  onClick={() => {
-                    setDraftColor(color);
-                    onColorSave(color);
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function UsvVideoViewer({
-  vehicleId,
-  src,
-  onClose,
-}: {
-  vehicleId: string;
-  src: string;
-  onClose: () => void;
-}) {
-  const [frame, setFrame] = useState(() => ({
-    x: Math.max(16, window.innerWidth - 456),
-    y: 120,
-    width: Math.min(420, window.innerWidth - 32),
-    height: 320,
-  }));
-  const dragRef = useRef<{
-    mode: "move" | "resize";
-    pointerId: number;
-    startX: number;
-    startY: number;
-    frame: typeof frame;
-  } | null>(null);
-
-  const updateFrame = (next: typeof frame) => {
-    const maxWidth = Math.max(280, window.innerWidth - 24);
-    const maxHeight = Math.max(220, window.innerHeight - 24);
-    const width = Math.min(maxWidth, Math.max(280, next.width));
-    const height = Math.min(maxHeight, Math.max(220, next.height));
-    setFrame({
-      width,
-      height,
-      x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
-      y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
-    });
-  };
-
-  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = {
-      mode,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      frame,
-    };
-  };
-
-  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
-    if (drag.mode === "move") {
-      updateFrame({ ...drag.frame, x: drag.frame.x + dx, y: drag.frame.y + dy });
-      return;
-    }
-    updateFrame({ ...drag.frame, width: drag.frame.width + dx, height: drag.frame.height + dy });
-  };
-
-  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
-      dragRef.current = null;
-    }
-  };
-
-  return (
-    <section
-      className="video-viewer"
-      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
-      onMouseDown={(event) => event.stopPropagation()}
-    >
-      <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
-        <div>
-          <Video size={16} />
-          <strong>{vehicleId}</strong>
-        </div>
-        <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
-          <X size={17} />
-        </button>
-      </header>
-      <video className="video-viewer-media" src={src} autoPlay muted loop playsInline controls />
-      <button
-        className="video-resize-handle"
-        title="Resize stream"
-        onPointerDown={(event) => startDrag("resize", event)}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-      >
-        <Maximize2 size={15} />
-      </button>
-    </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function TelemetryTooltip({ vehicle }: { vehicle: Vehicle }) {
-  return (
-    <div className="tooltip-data">
-      <strong>{vehicle.vehicle_id}</strong>
-      <span>{vehicle.vehicle_type.toUpperCase()}</span>
-      <span>Alt {(vehicle.position?.altitude ?? 0).toFixed(1)} m</span>
-      <span>Hdg {(vehicle.heading ?? 0).toFixed(0)} deg</span>
-      {vehicle.battery?.percentage != null && (
-        <span className="battery-line">
-          <Battery size={13} /> {Math.round(vehicle.battery.percentage * 100)}%
-        </span>
-      )}
-    </div>
-  );
-}
-
-interface DemoVehicle {
-  vehicle_id: string;
-  vehicle_type: VehicleType;
-  lat: number;
-  lon: number;
-  alt: number;
-  heading: number;
-  battery: number;
-  speed: number;
-  batteryDrainPerSecond: number;
-  marker_color: string;
-  manualWaypoint: boolean;
-  target: { latitude: number; longitude: number; altitude: number };
-  mode: string;
-  history: Vehicle["history"];
-  messages: Vehicle["messages"];
-  localX: number;
-  localY: number;
-}
-
-function createDemoVehicles(): DemoVehicle[] {
-  const base = { latitude: 38.984764, longitude: -76.478643 };
-  const vehicles = [
-    createDemoVehicle("yp", "yp", base.latitude, base.longitude, 2, YP_DEMO_HEADING, YP_DEMO_SPEED_MPS, 0.000002),
-    createDemoVehicle("demo-uav-1", "uav", base.latitude + 0.00072, base.longitude - 0.00058, 48, 122, 9, 0.0018, 0.82),
-    createDemoVehicle("demo-uav-2", "uav", base.latitude + 0.00042, base.longitude + 0.00075, 42, 210, 8, 0.0032, 0.32),
-    createDemoVehicle("demo-usv-1", "usv", base.latitude - 0.00048, base.longitude + 0.00046, 0, 40, 2.8, 0.0011, 0.76),
-    createDemoVehicle("demo-usv-2", "usv", base.latitude - 0.00078, base.longitude - 0.00008, 0, 275, 2.5, 0.0024, 0.44),
-    createDemoVehicle("demo-uuv-1", "uuv", base.latitude - 0.00064, base.longitude - 0.00042, -8, 255, 1.3, 0.0015, 0.68),
-  ];
-  const typeCounts: Partial<Record<VehicleType, number>> = {};
-  for (const vehicle of vehicles) {
-    const typeIndex = typeCounts[vehicle.vehicle_type] ?? 0;
-    vehicle.marker_color = assignedVehicleColor(vehicle.vehicle_type, typeIndex);
-    typeCounts[vehicle.vehicle_type] = typeIndex + 1;
-  }
-  seedForwardDemoWaypoints(vehicles);
-  return vehicles;
-}
-
-function createDemoVehicle(
-  vehicle_id: string,
-  vehicle_type: VehicleType,
-  lat: number,
-  lon: number,
-  alt: number,
-  heading: number,
-  speed: number,
-  batteryDrainPerSecond: number,
-  battery = 0.86,
-): DemoVehicle {
-  return {
-    vehicle_id,
-    vehicle_type,
-    lat,
-    lon,
-    alt,
-    heading,
-    speed,
-    battery: vehicle_type === "yp" ? 1 : battery,
-    batteryDrainPerSecond,
-    marker_color: vehicleColor(vehicle_type),
-    manualWaypoint: false,
-    target: randomDemoTarget(lat, lon, alt),
-    mode: "loiter",
-    history: [],
-    messages: {},
-    localX: 0,
-    localY: 0,
-  };
-}
-
-function stepDemoVehicle(vehicle: DemoVehicle, dt: number, stamp: number, vehicles: DemoVehicle[]): Array<Parameters<typeof streamMessageFromPayload>[0]> {
-  if (vehicle.vehicle_type === "yp") {
-    vehicle.heading = YP_DEMO_HEADING;
-    const next = destinationPoint(vehicle.lat, vehicle.lon, vehicle.heading, YP_DEMO_SPEED_MPS * dt);
-    vehicle.lat = next.latitude;
-    vehicle.lon = next.longitude;
-    vehicle.localX += Math.sin((vehicle.heading * Math.PI) / 180) * YP_DEMO_SPEED_MPS * dt;
-    vehicle.localY += Math.cos((vehicle.heading * Math.PI) / 180) * YP_DEMO_SPEED_MPS * dt;
-    vehicle.history = [...(vehicle.history ?? []), { stamp, latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt }].slice(-500);
-    return recordDemoMessages(vehicle, stamp);
-  }
-
-  const yp = vehicles.find((candidate) => candidate.vehicle_type === "yp");
-  if (vehicle.mode === "rtb" && yp) {
-    vehicle.target = sternTargetForYp(yp, vehicle);
-  } else if (!vehicle.manualWaypoint && yp) {
-    const rangeFromYp = haversineMeters(vehicle.lat, vehicle.lon, yp.lat, yp.lon);
-    const targetRange = haversineMeters(vehicle.target.latitude, vehicle.target.longitude, yp.lat, yp.lon);
-    if (rangeFromYp > DEMO_KEEP_IN_RANGE_M || targetRange > DEMO_KEEP_IN_RANGE_M) {
-      vehicle.target = randomDemoTargetNearYp(yp, vehicle);
-    }
-  }
-
-  const distance = haversineMeters(vehicle.lat, vehicle.lon, vehicle.target.latitude, vehicle.target.longitude);
-  if (distance < Math.max(3, vehicle.speed * dt * 2)) {
-    if (vehicle.mode === "rtb") {
-      vehicle.target = yp ? sternTargetForYp(yp, vehicle) : vehicle.target;
-    } else if (vehicle.manualWaypoint) {
-      vehicle.mode = "hold";
-    } else {
-      vehicle.target = yp ? randomDemoTargetNearYp(yp, vehicle) : randomDemoTarget(vehicle.lat, vehicle.lon, vehicle.alt);
-    }
-  } else {
-    const bearing = bearingDegrees(vehicle.lat, vehicle.lon, vehicle.target.latitude, vehicle.target.longitude);
-    vehicle.heading = smoothDegrees(vehicle.heading, bearing, Math.min(1, dt * 1.6));
-    const travel = Math.min(distance, vehicle.speed * dt);
-    const next = destinationPoint(vehicle.lat, vehicle.lon, vehicle.heading, travel);
-    vehicle.lat = next.latitude;
-    vehicle.lon = next.longitude;
-    vehicle.alt += Math.max(-1, Math.min(1, vehicle.target.altitude - vehicle.alt)) * Math.min(1, dt);
-    if (vehicle.vehicle_type === "usv") {
-      vehicle.alt = 0;
-    }
-    if (vehicle.vehicle_type === "uuv") {
-      vehicle.alt = Math.min(-1, vehicle.alt);
-    }
-    vehicle.localX += Math.sin((vehicle.heading * Math.PI) / 180) * travel;
-    vehicle.localY += Math.cos((vehicle.heading * Math.PI) / 180) * travel;
-  }
-  vehicle.battery = Math.max(0.05, vehicle.battery - dt * vehicle.batteryDrainPerSecond);
-  vehicle.history = [...(vehicle.history ?? []), { stamp, latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt }].slice(-500);
-  return recordDemoMessages(vehicle, stamp);
-}
-
-function recordDemoMessages(vehicle: DemoVehicle, stamp: number): Array<Parameters<typeof streamMessageFromPayload>[0]> {
-  const messages = demoMessages(vehicle, stamp);
-  for (const message of messages) {
-    vehicle.messages[message.topic ?? ""] = { type: message.type ?? "unknown", stamp, msg: message.msg ?? {} };
-  }
-  return messages;
-}
-
-function demoVehicleSnapshot(vehicle: DemoVehicle): Vehicle {
-  return {
-    vehicle_id: vehicle.vehicle_id,
-    vehicle_type: vehicle.vehicle_type,
-    connected: true,
-    last_seen: Date.now() / 1000,
-    last_seen_age: 0,
-    position: { latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt },
-    history: vehicle.history,
-    heading: vehicle.heading,
-    battery: { percentage: vehicle.battery, voltage: 22.2 * vehicle.battery, current: -4 },
-    messages: vehicle.messages,
-    marker_color: vehicle.marker_color,
-  } as DemoVehicleWithStyle;
-}
-
-function demoMessages(vehicle: DemoVehicle, stamp: number): Array<Parameters<typeof streamMessageFromPayload>[0]> {
-  const topic = (suffix: string) => `/vehicles/${vehicle.vehicle_id}/${suffix}`;
-  const quat = yawToQuaternion(vehicle.heading);
-  return [
-    wrapDemoMessage(vehicle, topic("heartbeat"), "yp_ground_station/msg/Heartbeat", stamp, { mode: vehicle.mode, armed: true }),
-    wrapDemoMessage(vehicle, topic("navsatfix"), "sensor_msgs/msg/NavSatFix", stamp, {
-      latitude: vehicle.lat,
-      longitude: vehicle.lon,
-      altitude: vehicle.alt,
-      heading: vehicle.heading,
-      status: { status: 0, service: 1 },
-    }),
-    wrapDemoMessage(vehicle, topic("pose"), "geometry_msgs/msg/Pose", stamp, {
-      position: { x: vehicle.localX, y: vehicle.localY, z: vehicle.alt },
-      orientation: quat,
-      heading: vehicle.heading,
-    }),
-    wrapDemoMessage(vehicle, topic("battery"), "sensor_msgs/msg/BatteryState", stamp, {
-      voltage: 22.2 * vehicle.battery,
-      current: -4,
-      percentage: vehicle.battery,
-      present: true,
-    }),
-    wrapDemoMessage(vehicle, topic("trajectory"), "trajectory_msgs/msg/MultiDOFJointTrajectory", stamp, {
-      points: [{ transforms: [{ translation: { x: vehicle.localX, y: vehicle.localY, z: vehicle.alt }, rotation: quat }] }],
-    }),
-  ];
-}
-
-function wrapDemoMessage(vehicle: DemoVehicle, topic: string, type: string, stamp: number, msg: Record<string, unknown>): Parameters<typeof streamMessageFromPayload>[0] {
-  return { vehicle_id: vehicle.vehicle_id, vehicle_type: vehicle.vehicle_type, topic, type, stamp, msg };
-}
-
-function handleDemoCommand(vehicles: DemoVehicle[], vehicleId: string, command: Command): void {
-  const vehicle = vehicles.find((candidate) => candidate.vehicle_id === vehicleId);
-  if (!vehicle) {
-    return;
-  }
-  if (command.type === "rtb") {
-    vehicle.mode = "rtb";
-    vehicle.manualWaypoint = false;
-    const yp = vehicles.find((candidate) => candidate.vehicle_type === "yp");
-    vehicle.target = yp ? sternTargetForYp(yp, vehicle) : { latitude: 38.984764, longitude: -76.478643, altitude: vehicle.vehicle_type === "uuv" ? -4 : vehicle.vehicle_type === "uav" ? 45 : 0 };
-  }
-  if (command.type === "waypoint" && command.target) {
-    vehicle.mode = "waypoint";
-    vehicle.manualWaypoint = true;
-    vehicle.target = command.target;
-  }
-}
-
-function updateDemoVehicleColor(vehicles: DemoVehicle[], vehicleId: string, color: string): void {
-  const vehicle = vehicles.find((candidate) => candidate.vehicle_id === vehicleId);
-  if (vehicle) {
-    vehicle.marker_color = color;
-  }
-}
-
-function seedForwardDemoWaypoints(vehicles: DemoVehicle[]): void {
-  const yp = vehicles.find((vehicle) => vehicle.vehicle_type === "yp");
-  if (!yp) {
-    return;
-  }
-  const forwardOffsets = [
-    { distance: 120, lateral: -65 },
-    { distance: 175, lateral: 55 },
-  ];
-  const aftOffsets = [
-    { distance: 80, lateral: -45 },
-    { distance: 115, lateral: 45 },
-    { distance: 150, lateral: 0 },
-  ];
-  let forwardIndex = 0;
-  let aftIndex = 0;
-  vehicles
-    .filter((vehicle) => vehicle.vehicle_type !== "yp")
-    .forEach((vehicle) => {
-      const useForwardTarget = vehicle.vehicle_type === "uav";
-      const offset = useForwardTarget ? forwardOffsets[forwardIndex % forwardOffsets.length] : aftOffsets[aftIndex % aftOffsets.length];
-      if (useForwardTarget) {
-        forwardIndex += 1;
-      } else {
-        aftIndex += 1;
-      }
-      const axisBearing = useForwardTarget ? yp.heading : yp.heading + 180;
-      const axisPoint = destinationPoint(yp.lat, yp.lon, axisBearing, offset.distance);
-      const target = destinationPoint(axisPoint.latitude, axisPoint.longitude, yp.heading + 90, offset.lateral);
-      vehicle.target = {
-        latitude: target.latitude,
-        longitude: target.longitude,
-        altitude: vehicle.vehicle_type === "uuv" ? -7 : vehicle.vehicle_type === "uav" ? vehicle.alt : 0,
-      };
-      vehicle.mode = "waypoint";
-      vehicle.manualWaypoint = true;
-    });
-}
-
-function randomDemoTarget(lat: number, lon: number, alt: number): DemoVehicle["target"] {
-  return {
-    latitude: lat + (Math.random() - 0.5) * 0.002,
-    longitude: lon + (Math.random() - 0.5) * 0.002,
-    altitude: alt,
-  };
-}
-
-function randomDemoTargetNearYp(yp: DemoVehicle, vehicle: DemoVehicle): DemoVehicle["target"] {
-  const bearing = Math.random() * 360;
-  const distance = 50 + Math.random() * 130;
-  const target = destinationPoint(yp.lat, yp.lon, bearing, distance);
-  return {
-    latitude: target.latitude,
-    longitude: target.longitude,
-    altitude: vehicle.vehicle_type === "uuv" ? -6 - Math.random() * 8 : vehicle.vehicle_type === "uav" ? 35 + Math.random() * 25 : 0,
-  };
-}
-
-function sternTargetForYp(yp: DemoVehicle, vehicle: DemoVehicle): DemoVehicle["target"] {
-  const stern = destinationPoint(yp.lat, yp.lon, yp.heading + 180, 35);
-  const lateralOffset = vehicle.vehicle_type === "uav" ? 12 : vehicle.vehicle_type === "uuv" ? -12 : 0;
-  const target = lateralOffset === 0 ? stern : destinationPoint(stern.latitude, stern.longitude, yp.heading + 90, lateralOffset);
-  return {
-    latitude: target.latitude,
-    longitude: target.longitude,
-    altitude: vehicle.vehicle_type === "uuv" ? -5 : vehicle.vehicle_type === "uav" ? 35 : 0,
-  };
+  return null;
 }
 
 function waypointOffset(lat: number, lon: number, index: number, total: number): { latitude: number; longitude: number } {
@@ -1946,191 +1853,7 @@ function waypointOffset(lat: number, lon: number, index: number, total: number):
   return destinationPoint(lat, lon, bearing, radius);
 }
 
-function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const radius = 6371000;
-  const p1 = (lat1 * Math.PI) / 180;
-  const p2 = (lat2 * Math.PI) / 180;
-  const dp = ((lat2 - lat1) * Math.PI) / 180;
-  const dl = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
-  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function bearingDegrees(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const p1 = (lat1 * Math.PI) / 180;
-  const p2 = (lat2 * Math.PI) / 180;
-  const dl = ((lon2 - lon1) * Math.PI) / 180;
-  const y = Math.sin(dl) * Math.cos(p2);
-  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
-  return (Math.atan2(y, x) * 180) / Math.PI;
-}
-
-function destinationPoint(lat: number, lon: number, bearing: number, distance: number): { latitude: number; longitude: number } {
-  const radius = 6371000;
-  const angular = distance / radius;
-  const theta = (bearing * Math.PI) / 180;
-  const p1 = (lat * Math.PI) / 180;
-  const l1 = (lon * Math.PI) / 180;
-  const p2 = Math.asin(Math.sin(p1) * Math.cos(angular) + Math.cos(p1) * Math.sin(angular) * Math.cos(theta));
-  const l2 = l1 + Math.atan2(Math.sin(theta) * Math.sin(angular) * Math.cos(p1), Math.cos(angular) - Math.sin(p1) * Math.sin(p2));
-  return { latitude: (p2 * 180) / Math.PI, longitude: (l2 * 180) / Math.PI };
-}
-
-function smoothDegrees(current: number, target: number, ratio: number): number {
-  const delta = ((((target - current) % 360) + 540) % 360) - 180;
-  return (current + delta * ratio + 360) % 360;
-}
-
-function yawToQuaternion(yawDeg: number): Record<string, number> {
-  const half = (yawDeg * Math.PI) / 360;
-  return { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) };
-}
-
-function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number, iconScalePercent: number) {
-  const type = vehicle.vehicle_type;
-  const heading = vehicle.heading ?? 0;
-  const altitude = vehicle.position?.altitude ?? 0;
-  const color = vehicleMarkerColor(vehicle);
-  const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
-  const hasVideo = vehicle.vehicle_type === "usv";
-  const phoneScale = isPhoneViewer ? 0.5 : 1;
-  const typeScale = type === "yp" ? 1.2 : 1;
-  const visualScale = zoomVehicleIconScale(zoom) * (iconScalePercent / 100) * typeScale;
-  const iconSize: [number, number] = [92 * phoneScale, 50 * phoneScale];
-  const translateY = isPhoneViewer ? -4 : -8;
-  return L.divIcon({
-    className: "",
-    iconSize,
-    iconAnchor: [iconSize[0] / 2, iconSize[1] / 2],
-    html: `
-      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="transform: translateY(${translateY}px) scale(${visualScale})">
-        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="--vehicle-color: ${color}; transform: rotate(${heading}deg)">
-          ${vehicleGlyph(type)}
-        </div>
-        <div class="alt-label">
-          ${altitude.toFixed(0)} m
-          ${
-            hasVideo
-              ? `<span class="video-stream-mark" title="Video stream available"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5v3L21 17V7z"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg></span>`
-              : ""
-          }
-          ${
-            lowBattery
-              ? `<span class="low-battery-mark" title="Low battery"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h15v8H3z"/><path d="M20 10v4"/><path d="M6 11v2"/></svg></span>`
-              : ""
-          }
-        </div>
-      </div>
-    `,
-  });
-}
-
-function zoomVehicleIconScale(zoom: number): number {
-  if (zoom >= VEHICLE_ICON_REFERENCE_ZOOM) {
-    return 1;
-  }
-  return clamp(0.35, 1, Math.pow(0.76, VEHICLE_ICON_REFERENCE_ZOOM - zoom));
-}
-
-function storedVehicleIconScale(): number {
-  const storedValue = localStorage.getItem(VEHICLE_ICON_SCALE_STORAGE_KEY);
-  if (storedValue == null) {
-    return DEFAULT_VEHICLE_ICON_SCALE;
-  }
-  const stored = Number(storedValue);
-  return Number.isFinite(stored) ? clamp(50, 140, stored) : DEFAULT_VEHICLE_ICON_SCALE;
-}
-
-function clamp(min: number, max: number, value: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function vehicleGlyph(type: VehicleType): string {
-  if (type === "yp") {
-    return `
-      <svg viewBox="0 0 72 96" aria-hidden="true">
-        <path class="v-shadow" d="M36 3 C52 17 62 42 60 76 C54 88 46 93 36 94 C26 93 18 88 12 76 C10 42 20 17 36 3 Z" />
-        <path class="v-hull" d="M36 4 C51 18 59 42 56 76 C51 86 44 90 36 91 C28 90 21 86 16 76 C13 42 21 18 36 4 Z" />
-        <path class="v-deck" d="M36 13 C47 28 52 50 49 73 C45 80 40 83 36 83 C32 83 27 80 23 73 C20 50 25 28 36 13 Z" />
-        <path class="v-panel" d="M26 43 H46 L48 61 H24 Z" />
-        <path class="v-window" d="M27 36 H34 V43 H27 Z M38 36 H45 V43 H38 Z" />
-        <path class="v-line" d="M22 70 H50 M29 21 L36 9 L43 21 M19 49 L25 47 M53 49 L47 47" />
-      </svg>
-    `;
-  }
-
-  if (type === "uav") {
-    return `
-      <svg viewBox="0 0 88 88" aria-hidden="true">
-        <path class="v-arm" d="M42 42 L18 18 M46 42 L70 18 M42 46 L18 70 M46 46 L70 70" />
-        <circle class="v-rotor" cx="15" cy="15" r="9" />
-        <circle class="v-rotor" cx="73" cy="15" r="9" />
-        <circle class="v-rotor" cx="15" cy="73" r="9" />
-        <circle class="v-rotor" cx="73" cy="73" r="9" />
-        <path class="v-blade" d="M7 12 C12 8 18 8 23 12 M65 12 C70 8 76 8 81 12 M7 76 C12 80 18 80 23 76 M65 76 C70 80 76 80 81 76" />
-        <path class="v-hull" d="M44 20 L54 43 L44 58 L34 43 Z" />
-        <path class="v-panel" d="M39 33 H49 V48 H39 Z" />
-      </svg>
-    `;
-  }
-
-  if (type === "uuv") {
-    return `
-      <svg viewBox="0 0 56 112" aria-hidden="true">
-        <path class="v-hull" d="M28 4 C38 15 42 35 42 69 C42 94 36 108 28 108 C20 108 14 94 14 69 C14 35 18 15 28 4 Z" />
-        <path class="v-fin" d="M14 70 L3 82 L14 85 Z M42 70 L53 82 L42 85 Z M23 100 L28 111 L33 100 Z" />
-        <path class="v-panel" d="M23 25 H33 V38 H23 Z M22 55 H34 V78 H22 Z" />
-        <path class="v-line" d="M16 52 H40 M18 91 H38" />
-      </svg>
-    `;
-  }
-
-  return `
-    <svg viewBox="0 0 72 96" aria-hidden="true">
-      <path class="v-hull" d="M36 5 C50 19 56 41 54 78 C49 87 43 91 36 91 C29 91 23 87 18 78 C16 41 22 19 36 5 Z" />
-      <path class="v-deck" d="M36 17 C45 31 49 51 47 72 C43 78 39 80 36 80 C33 80 29 78 25 72 C23 51 27 31 36 17 Z" />
-      <path class="v-panel" d="M28 45 H44 L45 58 H27 Z" />
-      <path class="v-line" d="M23 73 H49 M28 27 L36 15 L44 27" />
-    </svg>
-  `;
-}
-
-function vehicleColor(type: VehicleType): string {
-  return {
-    uav: "#dc2626",
-    usv: "#16a34a",
-    uuv: "#eab308",
-    yp: "#6b7280",
-  }[type];
-}
-
-function vehicleMarkerColor(vehicle: Vehicle): string {
-  return (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type);
-}
-
 function withLocalVehicleColor(vehicle: Vehicle, localColors: Record<string, string>): Vehicle {
   const color = localColors[vehicle.vehicle_id];
-  return color ? ({ ...vehicle, marker_color: color } as DemoVehicleWithStyle) : vehicle;
-}
-
-function vehicleZIndexOffset(type: VehicleType): number {
-  return {
-    uav: 4000,
-    yp: 3000,
-    usv: 2000,
-    uuv: 1000,
-  }[type];
-}
-
-function assignedVehicleColor(type: VehicleType, typeIndex: number): string {
-  return lightenHex(vehicleColor(type), Math.min(typeIndex * 0.18, 0.5));
-}
-
-function lightenHex(hex: string, amount: number): string {
-  const clean = hex.replace("#", "");
-  const red = parseInt(clean.slice(0, 2), 16);
-  const green = parseInt(clean.slice(2, 4), 16);
-  const blue = parseInt(clean.slice(4, 6), 16);
-  const mix = (value: number) => Math.round(value + (255 - value) * amount);
-  return `#${[mix(red), mix(green), mix(blue)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+  return color ? ({ ...vehicle, marker_color: color } ) : vehicle;
 }

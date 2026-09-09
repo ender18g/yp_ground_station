@@ -1,0 +1,58 @@
+.vehicleModal {
+  width: min(460px, 100%);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 30px 90px rgba(15, 23, 32, 0.35);
+}
+
+.modalHeader {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.modalHeader h2 { margin: 0; font-size: 20px; line-height: 1.2; }
+.modalHeader p { margin: 3px 0 0; color: #64748b; font-size: 13px; }
+
+.typeChip {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 36px;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+.typeChip.uav { background: #dc2626; }
+.typeChip.usv { background: #16a34a; }
+.typeChip.ugv { background: #b45309; }
+.typeChip.uuv { background: #d6a100; }
+.typeChip.yp { background: #6b7280; }
+
+.metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 16px; }
+.metric { padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.metric span, .metric strong { display: block; }
+.metric span { margin-bottom: 5px; color: #64748b; font-size: 12px; }
+.metric strong { font-size: 14px; }
+
+.modalActions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 0 16px 16px; }
+.modalActions button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px; color: #fff; cursor: pointer; font-size: 13px; font-weight: 700; white-space: nowrap; }
+.modalActions .danger { background: #dc2626; }
+.modalActions .primary { background: #2563eb; }
+.modalActions .secondary { background: #475569; }
+.modalActions .stream { background: #16a34a; }
+
+.colorPanel { display: block; padding: 0 16px 16px; }
+.colorSwatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.colorSwatch { width: 30px; height: 30px; border: 2px solid #fff; border-radius: 999px; box-shadow: 0 0 0 1px #cbd5e1; cursor: pointer; }
+.colorSwatch.selected { box-shadow: 0 0 0 2px #0f172a, 0 0 0 5px #bfdbfe; }
+
+@media (max-width: 640px) {
+  .metrics { grid-template-columns: 1fr; }
+  .modalActions { grid-template-columns: 1fr; }
+}

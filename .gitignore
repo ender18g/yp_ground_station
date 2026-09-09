@@ -65,6 +65,10 @@ db.sqlite3-journal
 instance/
 .webassets-cache
 
+# Local authentication database
+data/auth/*.db
+data/auth/*.db-*
+
 # Scrapy stuff:
 .scrapy
 
@@ -222,6 +226,8 @@ __marimo__/
 node_modules/
 web/node_modules/
 web/dist/
+web/test-results/
+web/playwright-report/
 data/tiles/
 data/tile-cache/
 data/influx/
