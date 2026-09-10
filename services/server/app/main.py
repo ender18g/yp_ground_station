@@ -75,6 +75,18 @@ EARTH_RADIUS_M = 6_378_137.0
 
 # RTCM streamer variables
 _rtcm_seq_id = 0
+_rtcm_last_broadcast_at = 0.0
+rtcm_watchdog_task: Optional[asyncio.Task[None]] = None
+# Live status surfaced to the UI: state is "disabled" | "connecting" | "connected" | "stale" | "error"
+rtcm_status: dict[str, Any] = {
+    "state": "disabled",
+    "source_type": "disabled",
+    "target": None,
+    "last_frame_at": None,
+    "frame_count": 0,
+    "bytes_total": 0,
+    "error": None,
+}
 
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
@@ -387,7 +399,7 @@ async def root() -> dict[str, Any]:
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize persistence, vehicle services, and background tasks."""
-    global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, deconfliction_task
+    global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, rtcm_watchdog_task, deconfliction_task
     # Initialize authentication database
     init_database()
 
@@ -416,6 +428,7 @@ async def startup() -> None:
 
     # Start background RTCM base station ingestion task
     rtcm_task = asyncio.create_task(rtcm_ingest_loop())
+    rtcm_watchdog_task = asyncio.create_task(rtcm_watchdog_loop())
 
 
 @app.on_event("shutdown")
@@ -423,7 +436,7 @@ async def shutdown() -> None:
     """Cancel background tasks and close external clients on server shutdown."""
     tasks = [
         task for task in (
-            rtcm_task, cleanup_task, deconfliction_task,
+            rtcm_task, rtcm_watchdog_task, cleanup_task, deconfliction_task,
             *sitl_bridges.values(), *_rtb_follow_tasks.values(),
         ) if task is not None
     ]
@@ -1113,6 +1126,12 @@ async def get_settings() -> dict[str, Any]:
     return {**settings, "yp_role_vehicle_id": _yp_role_vehicle_id}
 
 
+@app.get("/api/rtcm/status")
+async def get_rtcm_status() -> dict[str, Any]:
+    """Return the live connection status of the RTCM correction stream."""
+    return dict(rtcm_status)
+
+
 def _parse_log_time(value: str, name: str) -> datetime:
     """Parse an ISO-8601 timestamp and normalize it to UTC."""
     try:
@@ -1608,6 +1627,7 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
                 "waypoints": list(shared_waypoints.values()),
                 "sar_patterns": shared_sar_patterns,
                 "mission_plans": shared_mission_plans,
+                "rtcm_status": dict(rtcm_status),
             })
         while True:
             payload = await websocket.receive_json()
@@ -2658,10 +2678,16 @@ def quaternion_to_yaw_deg(q: dict[str, Any]) -> Optional[float]:
 
 
 
+async def _set_rtcm_status(**updates: Any) -> None:
+    """Merge fields into the global rtcm_status and push the new snapshot to connected UIs."""
+    rtcm_status.update(updates)
+    await broadcast_ui({"op": "rtcm_status_update", "status": dict(rtcm_status)})
+
+
 # # Distribute RTCM correction frames for RTK fix distribution to all connected vehicles that can accept it
 async def rtcm_ingest_loop():
     """Background loop that dynamically connects to configured RTCM sources with automatic retry logic."""
-    global _rtcm_seq_id
+    global _rtcm_seq_id, _rtcm_last_broadcast_at
     loop = asyncio.get_running_loop()
     
     while True:
@@ -2672,8 +2698,13 @@ async def rtcm_ingest_loop():
         baudrate = int(settings.get("rtk_baudrate", 115200))
 
         if source_type == "disabled":
+            if rtcm_status["state"] != "disabled":
+                await _set_rtcm_status(state="disabled", source_type="disabled", target=None, error=None)
             await asyncio.sleep(2.0)
             continue
+
+        target_label = port_or_host if source_type == "serial" else f"{port_or_host}:{network_port}"
+        await _set_rtcm_status(state="connecting", source_type=source_type, target=target_label, error=None)
 
         buffer = bytearray()
         stream_reader = None
@@ -2699,6 +2730,8 @@ async def rtcm_ingest_loop():
                 sock.bind((port_or_host, network_port))
                 sock.setblocking(False)
                 print(f"[RTCM] Listening for UDP RTCM stream on {port_or_host}:{network_port}")
+
+            await _set_rtcm_status(state="connected", error=None)
 
             # Stream processing loop
             while settings.get("rtk_source_type") == source_type:
@@ -2742,9 +2775,19 @@ async def rtcm_ingest_loop():
                     await distribute_rtcm_frame(rtcm_frame, _rtcm_seq_id)
                     _rtcm_seq_id = (_rtcm_seq_id + 1) % 32
 
+                    now = time.time()
+                    rtcm_status["frame_count"] += 1
+                    rtcm_status["bytes_total"] += len(rtcm_frame)
+                    rtcm_status["last_frame_at"] = now
+                    # Throttle UI broadcasts so a fast correction stream doesn't flood the websocket
+                    if now - _rtcm_last_broadcast_at > 0.5:
+                        _rtcm_last_broadcast_at = now
+                        await _set_rtcm_status(state="connected")
+
         except (serial.SerialException, asyncio.TimeoutError, OSError, ConnectionRefusedError) as exc:
             # Gracefully log stream outage without crashing the server
             print(f"[RTCM] Stream unavailable ({source_type}://{port_or_host}): {exc}. Retrying in 5 seconds...")
+            await _set_rtcm_status(state="error", error=str(exc))
             await asyncio.sleep(5.0)  # Wait before attempting auto-reconnect
             
         finally:
@@ -2755,6 +2798,21 @@ async def rtcm_ingest_loop():
                 writer.close()
             elif source_type == "udp" and 'sock' in locals():
                 sock.close()
+
+
+async def rtcm_watchdog_loop() -> None:
+    """Mark the RTCM stream as \"stale\" if the transport is open but no frames have arrived recently."""
+    STALE_AFTER_S = 8.0
+    while True:
+        await asyncio.sleep(2.0)
+        if rtcm_status["state"] not in ("connected", "stale"):
+            continue
+        last_frame_at = rtcm_status["last_frame_at"]
+        is_stale = last_frame_at is None or (time.time() - last_frame_at) > STALE_AFTER_S
+        if is_stale and rtcm_status["state"] != "stale":
+            await _set_rtcm_status(state="stale")
+        elif not is_stale and rtcm_status["state"] != "connected":
+            await _set_rtcm_status(state="connected")
 
 def fragment_rtcm_frame(rtcm_bytes: bytes, sequence_id: int) -> list[dict]:
     """Break raw RTCM bytes into standard MAVLink GPS_RTCM_DATA payload dictionaries."""

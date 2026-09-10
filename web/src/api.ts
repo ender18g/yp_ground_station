@@ -23,6 +23,16 @@ export interface ServerSettings {
   rtk_baudrate?: number;
 }
 
+export interface RtcmStatus {
+  state: "disabled" | "connecting" | "connected" | "stale" | "error";
+  source_type: string;
+  target: string | null;
+  last_frame_at: number | null;
+  frame_count: number;
+  bytes_total: number;
+  error: string | null;
+}
+
 // ===== Authentication helpers =====
 
 function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
@@ -163,6 +173,10 @@ export function fetchSettings(): Promise<ServerSettings> {
 
 export function updateSettings(settings: Partial<ServerSettings>): Promise<ServerSettings> {
   return settingsRequest("/api/settings", "settings update failed", settings);
+}
+
+export function fetchRtcmStatus(): Promise<RtcmStatus> {
+  return settingsRequest("/api/rtcm/status", "rtcm status fetch failed");
 }
 
 export async function exportFlightLog(lastHours: number): Promise<Response> {

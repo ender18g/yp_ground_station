@@ -22,8 +22,8 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
-import type { CurrentUser, SITLBridge } from "./api";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { CurrentUser, SITLBridge, RtcmStatus } from "./api";
 import type { Command, Position, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
@@ -50,6 +50,21 @@ const VIEW_MODE = !DEMO_MODE && (window.location.pathname.startsWith("/view") ||
 /** Returns true if a vehicle ID belongs to a docker-spawned sim vehicle. */
 function isSimVehicle(vehicleId: string): boolean {
   return vehicleId.startsWith("sim-");
+}
+const RTCM_STATUS_LABELS: Record<RtcmStatus["state"], string> = {
+  disabled: "Disabled",
+  connecting: "Connecting…",
+  connected: "Receiving Corrections",
+  stale: "No Data Received",
+  error: "Connection Error",
+};
+/** Renders elapsed time since a unix-seconds timestamp as a short human string. */
+function formatSecondsAgo(epochSeconds: number | null): string {
+  if (epochSeconds == null) return "never";
+  const deltaS = Math.max(0, Date.now() / 1000 - epochSeconds);
+  if (deltaS < 1) return "just now";
+  if (deltaS < 60) return `${Math.round(deltaS)}s ago`;
+  return `${Math.round(deltaS / 60)}m ago`;
 }
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
 type MapBase = "satellite" | "street";
@@ -147,6 +162,15 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [rtkHostOrPort, setRtkHostOrPort] = useState("/dev/ttyACM0");
   const [rtkNetworkPort, setRtkNetworkPort] = useState(9000);
   const [rtkBaudrate, setRtkBaudrate] = useState(115200);
+  const [rtcmStatus, setRtcmStatus] = useState<RtcmStatus>({
+    state: "disabled",
+    source_type: "disabled",
+    target: null,
+    last_frame_at: null,
+    frame_count: 0,
+    bytes_total: 0,
+    error: null,
+  });
   const [deconflictionEnabled, setDeconflictionEnabled] = useState(false);
   const [deconflictionSettingsLoaded, setDeconflictionSettingsLoaded] = useState(DEMO_MODE);
   const [deconflictionGlobalRadius, setDeconflictionGlobalRadius] = useState(10.0);
@@ -178,6 +202,10 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
         setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
         setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
+        if (payload.rtcm_status) setRtcmStatus(payload.rtcm_status as RtcmStatus);
+      }
+      if (payload.op === "rtcm_status_update") {
+        setRtcmStatus(payload.status as RtcmStatus);
       }
       if (payload.op === "vehicle_update") {
         const incoming = withLocalVehicleColor(payload.vehicle as Vehicle, localVehicleColorsRef.current);
@@ -383,6 +411,19 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setSettingsLoaded(true);
       })
       .catch(() => setSettingsLoaded(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    fetchRtcmStatus()
+      .then((status) => {
+        if (!cancelled) setRtcmStatus(status);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -982,6 +1023,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
               onClick={() => setSettingsTab("rtk")}
             >
               RTK Correction
+              {rtcmStatus.state !== "disabled" && <span className={`rtcm-tab-dot rtcm-status-${rtcmStatus.state}`} />}
             </button>
           </div>          {settingsTab === "display" && (
             <>
@@ -1011,6 +1053,18 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           )}
           {settingsTab === "rtk" && (
             <>
+              <div className={`rtcm-status-indicator rtcm-status-${rtcmStatus.state}`}>
+                <span className="rtcm-status-dot" />
+                <span className="rtcm-status-text">{RTCM_STATUS_LABELS[rtcmStatus.state]}</span>
+              </div>
+              {rtcmStatus.state !== "disabled" && (
+                <p className="settings-hint">
+                  {rtcmStatus.target && <>Source: {rtcmStatus.target} · </>}
+                  {rtcmStatus.state === "error"
+                    ? rtcmStatus.error ?? "Unknown error"
+                    : `${rtcmStatus.frame_count} frames received · last frame ${formatSecondsAgo(rtcmStatus.last_frame_at)}`}
+                </p>
+              )}
               <label>
                 Source Mode
                 <select
