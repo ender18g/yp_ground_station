@@ -993,6 +993,41 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                 0.0,
             )
 
+    elif cmd_type == "land_on_boat_step":
+        target = command.get("target", {})
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        if lat is not None and lon is not None:
+            vehicle_id = str(cmd_payload.get("vehicle_id") or "")
+            now = time.monotonic()
+            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) >= 5.0:
+                mode_mapping = master.mode_mapping()
+                if mode_mapping and "GUIDED" in mode_mapping:
+                    master.mav.set_mode_send(
+                        master.target_system,
+                        _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        mode_mapping["GUIDED"],
+                    )
+                    _sitl_follow_guided_requests[vehicle_id] = now
+            master.mav.set_position_target_global_int_send(
+                0,
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0b100111000000,
+                int(float(lat) * 1e7),
+                int(float(lon) * 1e7),
+                float(target.get("altitude") or 0.0),
+                float(command.get("velocity_north_ms") or 0.0),
+                float(command.get("velocity_east_ms") or 0.0),
+                float(command.get("sink_rate_ms") or 0.0),
+                0.0,
+                0.0,
+                0.0,
+                math.radians(float(command.get("heading") or 0.0)),
+                0.0,
+            )
+
     elif cmd_type == "mission_plan":
         if _sar_missions is None:
             print("[SITL] mission_plan ignored: sar_missions helpers unavailable")

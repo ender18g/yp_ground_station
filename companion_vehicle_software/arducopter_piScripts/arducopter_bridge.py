@@ -429,6 +429,44 @@ def follow_yp_velocity(master, command_data: dict) -> None:
     )
 
 
+def execute_land_step(master, command_data: dict) -> None:
+    """Stream a moving pad target, including descent or hover velocity."""
+    target = command_data.get("target", {})
+    lat = target.get("latitude")
+    lon = target.get("longitude")
+    alt = target.get("altitude")
+
+    if None in (lat, lon, alt):
+        return
+
+    vn = float(command_data.get("velocity_north_ms", 0.0))
+    ve = float(command_data.get("velocity_east_ms", 0.0))
+    vd = float(command_data.get("sink_rate_ms", 0.0))  # Positive = downward velocity
+    yaw_rad = math.radians(float(command_data.get("heading", 0.0)))
+
+    # Ensure flight controller is in GUIDED mode
+    try:
+        if master.flightmode != "GUIDED":
+            master.set_mode("GUIDED")
+    except Exception:
+        pass
+
+    # Send position + velocity + yaw, while ignoring acceleration and yaw rate.
+    master.mav.set_position_target_global_int_send(
+        0,                                                  # time_boot_ms
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        0b100111000000,
+        int(float(lat) * 1e7),
+        int(float(lon) * 1e7),
+        float(alt),
+        vn, ve, vd,                                         # Velocity North, East, Down (m/s)
+        0, 0, 0,                                            # Acceleration
+        yaw_rad, 0                                          # Yaw angle
+    )
+
+
 async def telemetry_loop() -> None:
     global VEHICLE_TYPE
     global SAR_INCLUDE_TAKEOFF
@@ -495,6 +533,8 @@ async def telemetry_loop() -> None:
 
                             if cmd_type == "rtb_follow":
                                 follow_yp_velocity(master, command_data)
+                            elif cmd_type == "land_on_boat_step":
+                                execute_land_step(master, command_data)
                             elif cmd_type == "waypoint":
                                 target = command_data.get("target", {})
                                 source = server_msg.get("source")
