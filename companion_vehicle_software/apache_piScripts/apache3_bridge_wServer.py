@@ -47,7 +47,7 @@ DEFAULT_CONFIG = {
     "mavlink_baud": int(os.getenv("MAVLINK_BAUD", "115200")),
     "send_hz": float(os.getenv("SEND_HZ", "5")),
     "video_stream_url": os.getenv("VIDEO_STREAM_URL", ""),
-    "web_port": 8080,
+    "web_port": 8880,
 }
 
 config = {}
@@ -387,9 +387,9 @@ async def start_web_server():
     app.router.add_post("/save", handle_save)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8880))
     await site.start()
-    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8080)}")
+    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8880)}")
 
 # --- HELPER FUNCTIONS ---
 
@@ -836,8 +836,8 @@ async def telemetry_loop(current_config: dict) -> None:
                             if cmd_type == "rtb_follow":
                                 send_steering_and_speed(master, command_data)
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude")):
-                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
-                                # goto_waypoint_rc_override(master, command_data["target"]["latitude"], command_data["target"]["longitude"])
+                                # goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
+                                goto_waypoint_rc_override(master, command_data["target"]["latitude"], command_data["target"]["longitude"])
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20))), daemon=True).start()
                             elif cmd_type == "mob" and len(command_data.get("track_points", [])) >= 2:
