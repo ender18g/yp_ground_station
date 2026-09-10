@@ -20,6 +20,7 @@ export interface RelativeWaypoint {
 }
 
 export interface Vehicle {
+  marker_color?: string;
   vehicle_id: string;
   vehicle_type: VehicleType;
   connected: boolean;

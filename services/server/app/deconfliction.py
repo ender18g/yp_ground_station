@@ -93,6 +93,7 @@ class DeconflictionEngine:
             )
         
         state = self.vehicle_states[vehicle_id]
+        state.vehicle_type = vehicle_type
         state.position = position
         if mission_type:
             state.mission_type = mission_type
@@ -292,7 +293,6 @@ class DeconflictionEngine:
     @staticmethod
     def _calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate bearing from point 1 to point 2 (degrees, 0-360)."""
-        dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
         
         y = math.sin(dlon) * math.cos(math.radians(lat2))

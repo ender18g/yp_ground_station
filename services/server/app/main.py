@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 import serial
 import socket
-import email.utils
-import hashlib
 import json
 import math
 import os
@@ -16,7 +14,6 @@ import time
 import zlib
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:
@@ -31,19 +28,15 @@ except ImportError:  # pragma: no cover
 
 from fastapi import Body, FastAPI, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-import httpx
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# Import authentication module
-from app.auth import (
-    init_database, create_user, delete_user, list_users, 
-    create_access_token, get_current_user, update_user_permissions, 
-    update_user_password, verify_password, record_login, set_user_permissions
-)
+from app.auth import init_database, get_current_user, require_permission
+from app.auth_routes import router as auth_router
 from app.settings import get_deconfliction_settings, update_deconfliction_settings
-from app.settings import get_application_settings, update_application_settings
+from app.settings import APPLICATION_SETTING_DEFAULTS, get_application_settings, update_application_settings
+from app.tiles import router as tile_router, TILE_MAX_CACHE_AGE_SECONDS
 
 # Import deconfliction module
 from app.deconfliction import DeconflictionEngine, MISSION_PRIORITY, DEFAULT_DECONFLICT_RADIUS_M
@@ -53,17 +46,6 @@ INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
 INFLUX_ORG = os.getenv("INFLUX_ORG", "yp")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "telemetry")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "yp-dev-token")
-TILE_DIR = Path(os.getenv("TILE_DIR", "/data/tiles"))
-TILE_CACHE_DIR = Path(os.getenv("TILE_CACHE_DIR", "/data/tile-cache"))
-OSM_TILE_URL = os.getenv("OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
-OSM_USER_AGENT = os.getenv("OSM_USER_AGENT", "YPGroundStation/0.1")
-OSM_REFERER = os.getenv("OSM_REFERER", "http://localhost:8080/")
-EARTH_TILE_URL = os.getenv("EARTH_TILE_URL", "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}")
-EARTH_USER_AGENT = os.getenv("EARTH_USER_AGENT", OSM_USER_AGENT)
-EARTH_REFERER = os.getenv("EARTH_REFERER", OSM_REFERER)
-MIN_TILE_TTL_SECONDS = int(os.getenv("MIN_TILE_TTL_SECONDS", str(7 * 24 * 60 * 60)))
-TILE_MAX_CACHE_AGE_SECONDS = int(os.getenv("TILE_MAX_CACHE_AGE_SECONDS", str(365 * 24 * 60 * 60)))
-MAX_TILE_ZOOM = int(os.getenv("MAX_TILE_ZOOM", "20"))
 VEHICLE_TTL_SECONDS = float(os.getenv("VEHICLE_TTL_SECONDS", "30"))
 HISTORY_MAX_POINTS = int(os.getenv("HISTORY_MAX_POINTS", "5000"))
 MESSAGE_RETENTION_SECONDS = float(os.getenv("MESSAGE_RETENTION_SECONDS", str(10 * 60)))
@@ -73,10 +55,6 @@ VIDEO_STREAMS_JSON = os.getenv("VIDEO_STREAMS_JSON", "{}")
 CAMERA_DISCOVERY_PORT = int(os.getenv("CAMERA_DISCOVERY_PORT", "8889"))
 CAMERA_PROBE_INTERVAL_SECONDS = float(os.getenv("CAMERA_PROBE_INTERVAL_SECONDS", "60.0"))
 CAMERA_PROBE_TIMEOUT_SECONDS = float(os.getenv("CAMERA_PROBE_TIMEOUT_SECONDS", "2.0"))
-AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
-KNOWN_BLOCKED_TILE_SHA1 = {
-    "0cfb5f443183efc5921f61005aaa7f341fcfd143",
-}
 
 # SAR defaults — override in docker-compose environment
 SAR_CORRIDOR_HALF_WIDTH_M = float(os.getenv("SAR_CORRIDOR_HALF_WIDTH_M", "50.0"))
@@ -90,13 +68,14 @@ RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ALTITUDE_M = float(os.getenv("RTB_ALTITUDE_M", "30.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
-FALLBACK_TILE_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" fill="#dbeafe"/></svg>"""
 
 # RTCM streamer variables
 _rtcm_seq_id = 0
 
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
+app.include_router(tile_router)
+app.include_router(auth_router)
 
 
 @app.middleware("http")
@@ -123,7 +102,6 @@ vehicle_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
 ui_connections: set[WebSocket] = set()
 ros_connections: dict[WebSocket, set[str]] = defaultdict(set)
 state_lock = asyncio.Lock()
-tile_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # Command-derived overlays are shared by all UI clients and included in their
 # initial WebSocket snapshot so late joiners see the active operational plan.
@@ -176,12 +154,12 @@ _VALID_MAVLINK_PREFIXES = (
 _VALID_STREAM_ID_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
 
 influx_client: Optional[InfluxDBClient] = None
-tile_http_client: Optional[httpx.AsyncClient] = None
 write_api = None
 delete_api = None
 query_api = None
 cleanup_task: Optional[asyncio.Task[None]] = None
 rtcm_task: Optional[asyncio.Task[None]] = None
+deconfliction_task: Optional[asyncio.Task[None]] = None
 
 
 # YP role assignment: any vehicle whose vehicle_id matches this value will be
@@ -190,17 +168,13 @@ rtcm_task: Optional[asyncio.Task[None]] = None
 _yp_role_vehicle_id: Optional[str] = None
 
 settings = {
+    **APPLICATION_SETTING_DEFAULTS,
     "message_retention_seconds": MESSAGE_RETENTION_SECONDS,
     "message_cleanup_interval_seconds": MESSAGE_CLEANUP_INTERVAL_SECONDS,
     "influx_max_write_hz": INFLUX_MAX_WRITE_HZ,
     "tile_max_cache_age_seconds": TILE_MAX_CACHE_AGE_SECONDS,
     "rtb_update_hz": RTB_UPDATE_HZ,
     "rtb_altitude_m": RTB_ALTITUDE_M,
-    # RTK Injection defaults
-    "rtk_source_type": "serial",      # "serial", "tcp", "udp", or "disabled"
-    "rtk_host_or_port": "/dev/ttyACM0",
-    "rtk_network_port": 9000,
-    "rtk_baudrate": 115200,
 }
 last_influx_write_at: dict[tuple[str, str], float] = {}
 
@@ -407,37 +381,21 @@ async def root() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize the tile cache dir, HTTP/InfluxDB clients, auth database, and background tasks."""
-    global cleanup_task, delete_api, influx_client, tile_http_client, write_api, query_api, rtcm_task
+    """Initialize persistence, vehicle services, and background tasks."""
+    global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, deconfliction_task
     # Initialize authentication database
     init_database()
 
     persisted_settings = get_application_settings()
-    settings.update({
-        "message_retention_seconds": persisted_settings["message_retention_seconds"],
-        "rtb_update_hz": persisted_settings["rtb_update_hz"],
-        "rtb_stern_distance_m": persisted_settings["rtb_stern_distance_m"],
-        "rtb_altitude_m": persisted_settings["rtb_altitude_m"],
-        "mob_track_seconds": persisted_settings["mob_track_seconds"],
-        "mob_swath_m": persisted_settings["mob_swath_m"],
-        "mob_altitude_m": persisted_settings["mob_altitude_m"],
-        "mob_corridor_half_width_m": persisted_settings["mob_corridor_half_width_m"],
-        "mob_takeoff_altitude_m": persisted_settings["mob_takeoff_altitude_m"],
-        "mob_climb_speed_ms": persisted_settings["mob_climb_speed_ms"],
-    })
+    settings.update(persisted_settings)
     global _yp_role_vehicle_id
     _yp_role_vehicle_id = persisted_settings.get("yp_role_vehicle_id")
     
     # Load deconfliction settings from database
     db_settings = get_deconfliction_settings()
-    deconfliction_engine.set_enabled(db_settings.get("enabled", False))
-    deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
-    for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
-        deconfliction_engine.set_radius(vehicle_type, radius)
+    _apply_deconfliction_settings(db_settings)
     print(f"[DECONFLICTION] Initialized: enabled={deconfliction_engine.enabled}, global_radius={deconfliction_engine.global_radius_m}m")
     
-    TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tile_http_client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
     try:
         influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
         write_api = influx_client.write_api(write_options=SYNCHRONOUS)
@@ -449,7 +407,7 @@ async def startup() -> None:
     load_video_streams_from_env()
     
     # Start deconfliction check task
-    asyncio.create_task(_deconfliction_check_loop())
+    deconfliction_task = asyncio.create_task(_deconfliction_check_loop())
 
     # Start background RTCM base station ingestion task
     rtcm_task = asyncio.create_task(rtcm_ingest_loop())
@@ -458,15 +416,15 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     """Cancel background tasks and close external clients on server shutdown."""
-    if rtcm_task:
-        rtcm_task.cancel()
-    
-    for task in list(sitl_bridges.values()):
+    tasks = [
+        task for task in (
+            rtcm_task, cleanup_task, deconfliction_task,
+            *sitl_bridges.values(), *_rtb_follow_tasks.values(),
+        ) if task is not None
+    ]
+    for task in tasks:
         task.cancel()
-    if cleanup_task:
-        cleanup_task.cancel()
-    if tile_http_client:
-        await tile_http_client.aclose()
+    await asyncio.gather(*tasks, return_exceptions=True)
     if influx_client:
         influx_client.close()
 
@@ -475,211 +433,6 @@ async def shutdown() -> None:
 async def health() -> dict[str, str]:
     """Liveness probe endpoint."""
     return {"status": "ok"}
-
-
-def require_permission(authorization: Optional[str], permission: str) -> Optional[JSONResponse]:
-    """Return an authorization error response, or None when permission is granted."""
-    if not authorization or not authorization.startswith("Bearer "):
-        return JSONResponse({"error": "missing or invalid authorization header"}, status_code=401)
-
-    user = get_current_user(authorization[7:])
-    if not user:
-        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
-    if not user.has_permission(permission):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Authentication endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/api/auth/login")
-async def login(payload: dict[str, Any] = Body(default={})) -> JSONResponse:
-    """Authenticate a user and return a JWT token."""
-    username: str = str(payload.get("username") or "").strip()
-    password: str = str(payload.get("password") or "").strip()
-    
-    if not username or not password:
-        return JSONResponse({"error": "username and password are required"}, status_code=400)
-    
-    from app.auth import get_db_session, User
-    session = get_db_session()
-    try:
-        user = session.query(User).filter_by(username=username).first()
-        if not user or not verify_password(password, user.password_hash):
-            return JSONResponse({"error": "invalid credentials"}, status_code=401)
-        
-        if not user.active:
-            return JSONResponse({"error": "account is disabled"}, status_code=401)
-        
-        # Record login time
-        record_login(username)
-        
-        # Create the token only in an HttpOnly cookie; it must not be exposed to JavaScript or URLs.
-        token = create_access_token(username)
-        response = JSONResponse({
-            "ok": True,
-            "token_type": "bearer",
-            "user": {
-                "username": user.username,
-                "permissions": sorted([p.permission for p in user.permissions])
-            }
-        })
-        response.set_cookie("auth_token", token, httponly=True, secure=AUTH_COOKIE_SECURE, samesite="lax", max_age=60 * 60 * 24)
-        return response
-    finally:
-        session.close()
-
-
-@app.post("/api/auth/logout")
-async def logout() -> JSONResponse:
-    response = JSONResponse({"ok": True})
-    response.delete_cookie("auth_token", httponly=True, samesite="lax")
-    return response
-
-
-@app.get("/api/auth/me")
-async def get_current_user_info(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    """Return the current authenticated user's information."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    # Extract token from "Bearer <token>"
-    token = None
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    
-    user = get_current_user(token)
-    if not user:
-        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
-    
-    return JSONResponse({
-        "username": user.username,
-        "active": user.active,
-        "permissions": sorted([p.permission for p in user.permissions]),
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-        "last_login": user.last_login.isoformat() if user.last_login else None,
-    })
-
-
-@app.post("/api/auth/users")
-async def create_new_user(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    """Create a new user account (admin only)."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    token = authorization[7:] if authorization.startswith("Bearer ") else None
-    user = get_current_user(token)
-    if not user or not user.has_permission("manage_users"):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    
-    username: str = str(payload.get("username") or "").strip()
-    password: str = str(payload.get("password") or "").strip()
-    permission_level: str = str(payload.get("permission_level") or "view_only").strip()
-    
-    if not username or not password:
-        return JSONResponse({"error": "username and password are required"}, status_code=400)
-    
-    success, message = create_user(username, password, permission_level)
-    if not success:
-        return JSONResponse({"error": message}, status_code=400)
-    
-    return JSONResponse({"ok": True, "message": message})
-
-
-@app.get("/api/auth/users")
-async def list_all_users(authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    """List all users (admin only)."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    token = authorization[7:] if authorization.startswith("Bearer ") else None
-    user = get_current_user(token)
-    if not user or not user.has_permission("manage_users"):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    
-    users_list = list_users()
-    return JSONResponse({"users": users_list})
-
-
-@app.delete("/api/auth/users/{username}")
-async def delete_user_endpoint(username: str, authorization: Optional[str] = Header(default=None)) -> JSONResponse:
-    """Delete a user account (admin only)."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    token = authorization[7:] if authorization.startswith("Bearer ") else None
-    user = get_current_user(token)
-    if not user or not user.has_permission("manage_users"):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    
-    success, message = delete_user(username)
-    if not success:
-        return JSONResponse({"error": message}, status_code=400)
-    
-    return JSONResponse({"ok": True, "message": message})
-
-
-@app.put("/api/auth/users/{username}/permissions")
-async def update_permissions_endpoint(
-    username: str, 
-    payload: dict[str, Any] = Body(default={}),
-    authorization: Optional[str] = Header(default=None)
-) -> JSONResponse:
-    """Update a user's permission level (admin only)."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    token = authorization[7:] if authorization.startswith("Bearer ") else None
-    user = get_current_user(token)
-    if not user or not user.has_permission("manage_users"):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    
-    permissions = payload.get("permissions")
-    if isinstance(permissions, list):
-        if not all(isinstance(permission, str) for permission in permissions):
-            return JSONResponse({"error": "permissions must be a list of strings"}, status_code=400)
-        success, message = set_user_permissions(username, set(permissions))
-    else:
-        permission_level: str = str(payload.get("permission_level") or "").strip()
-        if not permission_level:
-            return JSONResponse({"error": "permission_level or permissions is required"}, status_code=400)
-        success, message = update_user_permissions(username, permission_level)
-    if not success:
-        return JSONResponse({"error": message}, status_code=400)
-    
-    return JSONResponse({"ok": True, "message": message})
-
-
-@app.put("/api/auth/users/{username}/password")
-async def update_password_endpoint(
-    username: str, 
-    payload: dict[str, Any] = Body(default={}),
-    authorization: Optional[str] = Header(default=None)
-) -> JSONResponse:
-    """Update a user's password (admin only or self)."""
-    if not authorization:
-        return JSONResponse({"error": "missing authorization header"}, status_code=401)
-    
-    token = authorization[7:] if authorization.startswith("Bearer ") else None
-    user = get_current_user(token)
-    if not user:
-        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
-    
-    # Allow user to change their own password, or admin to change any password
-    if user.username != username and not user.has_permission("manage_users"):
-        return JSONResponse({"error": "insufficient permissions"}, status_code=403)
-    
-    new_password: str = str(payload.get("password") or "").strip()
-    if not new_password:
-        return JSONResponse({"error": "password is required"}, status_code=400)
-    
-    success, message = update_user_password(username, new_password)
-    if not success:
-        return JSONResponse({"error": message}, status_code=400)
-    
-    return JSONResponse({"ok": True, "message": message})
 
 
 # ---------------------------------------------------------------------------
@@ -1245,59 +998,13 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             print("[SITL] mission_plan ignored: no waypoints provided")
             return
 
-        mission_items: list[tuple[float, float, float, int, float, float, float, float]] = []
-        item_type_to_cmd = {
-            "waypoint": int(_mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
-            "takeoff": int(_mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
-            "loiter_time": int(_mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME),
-            "land": int(_mavutil.mavlink.MAV_CMD_NAV_LAND),
-            "rtl": int(_mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH),
-            "do_jump": int(_mavutil.mavlink.MAV_CMD_DO_JUMP),
-        }
-        for wp in waypoints:
-            if not isinstance(wp, dict):
-                continue
-            lat = wp.get("latitude")
-            lon = wp.get("longitude")
-            if lat is None or lon is None:
-                continue
-            item_type = str(wp.get("item_type") or "waypoint").lower()
-            command_id = int(wp.get("command_id") or item_type_to_cmd.get(item_type, item_type_to_cmd["waypoint"]))
-            default_p1 = float(wp.get("hold_time_s", 0.0))
-            default_p2 = float(wp.get("acceptance_radius_m", 8.0))
-            default_p3 = 0.0
-            default_p4 = float(wp.get("yaw_deg", 0.0) or 0.0)
-            mission_items.append(
-                (
-                    float(lat),
-                    float(lon),
-                    float(wp.get("altitude", 30.0)),
-                    command_id,
-                    float(wp.get("param1", default_p1)),
-                    float(wp.get("param2", default_p2)),
-                    float(wp.get("param3", default_p3)),
-                    float(wp.get("param4", default_p4)),
-                )
-            )
-
+        mission_items = _sar_missions.build_mission_items(
+            waypoints,
+            force_guided_on_complete=bool(command.get("force_guided_on_complete", False)),
+        )
         if not mission_items:
             print("[SITL] mission_plan ignored: no valid waypoint entries")
             return
-
-        if bool(command.get("force_guided_on_complete", False)):
-            last_lat, last_lon, last_alt = mission_items[-1][0], mission_items[-1][1], mission_items[-1][2]
-            mission_items.append(
-                (
-                    float(last_lat),
-                    float(last_lon),
-                    float(last_alt),
-                    int(_mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE),
-                    1.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                )
-            )
 
         if not _sar_missions.upload_mission(master, mission_items):
             print("[SITL] mission_plan upload failed")
@@ -1524,15 +1231,7 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
     if authorization_error:
         return authorization_error
     
-    supported = {
-        "trail_seconds", "show_yp_range_rings", "message_retention_seconds",
-        "rtb_update_hz", "rtb_stern_distance_m", "rtb_altitude_m",
-        "mob_track_seconds", "mob_swath_m", "mob_altitude_m",
-        "mob_corridor_half_width_m", "mob_takeoff_altitude_m", "mob_climb_speed_ms",
-        "yp_role_vehicle_id",
-        "rtk_source_type", "rtk_host_or_port", "rtk_network_port", "rtk_baudrate",
-    }
-    application_payload = {key: value for key, value in payload.items() if key in supported}
+    application_payload = {key: value for key, value in payload.items() if key in APPLICATION_SETTING_DEFAULTS}
     if not application_payload:
         return JSONResponse({"error": "At least one setting value is required"}, status_code=400)
 
@@ -1540,32 +1239,25 @@ async def update_settings(payload: dict[str, Any], authorization: Optional[str] 
     if not success:
         return JSONResponse({"error": message}, status_code=400)
 
+    persisted_settings = get_application_settings()
+    settings.update(persisted_settings)
     global _yp_role_vehicle_id
-    if "yp_role_vehicle_id" in application_payload:
-        _yp_role_vehicle_id = application_payload["yp_role_vehicle_id"]
-    settings.update({key: value for key, value in application_payload.items() if key in settings})
+    _yp_role_vehicle_id = persisted_settings["yp_role_vehicle_id"]
+    return JSONResponse(settings)
 
-    if payload.get("message_retention_seconds") is not None:
-        retention = payload.get("message_retention_seconds")
+
+def _apply_deconfliction_settings(values: dict[str, Any]) -> None:
+    deconfliction_engine.set_enabled(values.get("enabled", False))
+    deconfliction_engine.global_radius_m = values.get("global_radius_m", 10.0)
+    deconfliction_engine.radius_per_type = DEFAULT_DECONFLICT_RADIUS_M.copy()
+    # Older databases could contain overrides that the API now rejects.
+    for vehicle_type, value in values.get("radius_per_type", {}).items():
         try:
-            retention_seconds = float(retention)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "message_retention_seconds must be a number"}, status_code=400)
-        if retention_seconds < 60 or retention_seconds > 30 * 24 * 60 * 60:
-            return JSONResponse({"error": "message_retention_seconds must be between 60 seconds and 30 days"}, status_code=400)
-        settings["message_retention_seconds"] = retention_seconds
-
-    if payload.get("rtb_update_hz") is not None:
-        rtb_update_hz = payload.get("rtb_update_hz")
-        try:
-            rtb_update_hz_value = float(rtb_update_hz)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "rtb_update_hz must be a number"}, status_code=400)
-        if rtb_update_hz_value < 0.2 or rtb_update_hz_value > 20.0:
-            return JSONResponse({"error": "rtb_update_hz must be between 0.2 and 20.0"}, status_code=400)
-        settings["rtb_update_hz"] = rtb_update_hz_value
-
-    return JSONResponse({**settings, **get_application_settings()})
+            radius = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not isinstance(value, bool) and math.isfinite(radius) and radius > 0:
+            deconfliction_engine.set_radius(vehicle_type, radius)
 
 
 @app.get("/api/deconfliction/settings")
@@ -1589,10 +1281,7 @@ async def update_deconfliction_settings_api(
         # Reload deconfliction engine settings
         async with _deconfliction_lock:
             db_settings = get_deconfliction_settings()
-            deconfliction_engine.set_enabled(db_settings.get("enabled", False))
-            deconfliction_engine.global_radius_m = db_settings.get("global_radius_m", 10.0)
-            for vehicle_type, radius in db_settings.get("radius_per_type", {}).items():
-                deconfliction_engine.set_radius(vehicle_type, radius)
+            _apply_deconfliction_settings(db_settings)
         
         return JSONResponse(db_settings)
     else:
@@ -1844,317 +1533,6 @@ async def trigger_mob(payload: dict[str, Any] = Body(default={}), authorization:
     return JSONResponse({"ok": True, "vehicle_id": target_vehicle_id})
 
 
-@app.get("/api/tile-cache")
-async def tile_cache_status() -> dict[str, Any]:
-    """Report tile cache disk usage and settings per map provider."""
-    providers = {
-        "osm": {
-            "name": "OpenStreetMap",
-            "source_url": OSM_TILE_URL,
-        },
-        "earth": {
-            "name": "Earth View",
-            "source_url": EARTH_TILE_URL,
-        },
-    }
-    provider_status = {}
-    total_tiles = 0
-    total_bytes = 0
-    for provider, details in providers.items():
-        files = list((TILE_CACHE_DIR / provider).glob("*/*/*.png"))
-        bytes_used = sum(path.stat().st_size for path in files)
-        total_tiles += len(files)
-        total_bytes += bytes_used
-        provider_status[provider] = details | {"tiles": len(files), "bytes": bytes_used}
-    return {
-        "cache_dir": str(TILE_CACHE_DIR),
-        "providers": provider_status,
-        "tiles": total_tiles,
-        "bytes": total_bytes,
-        "min_ttl_seconds": MIN_TILE_TTL_SECONDS,
-        "tile_max_cache_age_seconds": settings["tile_max_cache_age_seconds"],
-    }
-
-
-@app.get("/tiles/{z}/{x}/{y}.png", response_model=None)
-async def tiles(z: int, x: int, y: int):
-    """Serve a pre-provisioned offline tile from TILE_DIR."""
-    tile_path = TILE_DIR / str(z) / str(x) / f"{y}.png"
-    if not tile_path.is_file():
-        return JSONResponse({"error": "offline tile not found"}, status_code=404)
-    if hashlib.sha1(tile_path.read_bytes()).hexdigest() in KNOWN_BLOCKED_TILE_SHA1:
-        return JSONResponse({"error": "offline tile is a known blocked placeholder"}, status_code=404)
-    return FileResponse(tile_path, media_type="image/png")
-
-
-@app.get("/tiles/osm/{z}/{x}/{y}.png", response_model=None)
-async def cached_osm_tile(z: int, x: int, y: int):
-    """Serve an OpenStreetMap tile, fetching and caching it if needed."""
-    return await cached_provider_tile(
-        provider="osm",
-        source_name="openstreetmap",
-        source_url=OSM_TILE_URL,
-        user_agent=OSM_USER_AGENT,
-        referer=OSM_REFERER,
-        z=z,
-        x=x,
-        y=y,
-    )
-
-
-@app.get("/tiles/earth/{z}/{x}/{y}.png", response_model=None)
-async def cached_earth_tile(z: int, x: int, y: int):
-    """Serve a satellite imagery tile, fetching and caching it if needed."""
-    return await cached_provider_tile(
-        provider="earth",
-        source_name="earth-view",
-        source_url=EARTH_TILE_URL,
-        user_agent=EARTH_USER_AGENT,
-        referer=EARTH_REFERER,
-        z=z,
-        x=x,
-        y=y,
-    )
-
-
-@app.get("/tiles/cache/{z}/{x}/{y}.png", response_model=None)
-async def cache_only_tile(z: int, x: int, y: int):
-    """Serve an OSM tile only if already cached; never fetch remotely."""
-    return cache_only_provider_tile("osm", "openstreetmap", z, x, y)
-
-
-@app.get("/tiles/earth-cache/{z}/{x}/{y}.png", response_model=None)
-async def earth_cache_only_tile(z: int, x: int, y: int):
-    """Serve a satellite tile only if already cached; never fetch remotely."""
-    return cache_only_provider_tile("earth", "earth-view", z, x, y)
-
-
-async def cached_provider_tile(
-    provider: str,
-    source_name: str,
-    source_url: str,
-    user_agent: str,
-    referer: str,
-    z: int,
-    x: int,
-    y: int,
-):
-    """Return a cached tile if fresh, else fetch, cache, and return it (with stale/fallback handling)."""
-    validation_error = validate_tile_coordinates(z, x, y)
-    if validation_error:
-        return JSONResponse({"error": validation_error}, status_code=400)
-
-    cache_path = provider_tile_path(provider, z, x, y)
-    metadata_path = provider_metadata_path(provider, z, x, y)
-    lock = tile_locks[f"{provider}/{z}/{x}/{y}"]
-
-    async with lock:
-        metadata = read_tile_metadata(metadata_path)
-        if is_usable_cached_tile(cache_path) and not tile_expired(metadata, cache_path):
-            return tile_file_response(cache_path, metadata, cache_status="hit", source_name=source_name)
-
-        result = await fetch_and_cache_tile(source_name, source_url, user_agent, referer, z, x, y, cache_path, metadata_path, metadata)
-        if result:
-            return result
-
-        if is_usable_cached_tile(cache_path):
-            stale_metadata = read_tile_metadata(metadata_path)
-            return tile_file_response(cache_path, stale_metadata, cache_status="stale", source_name=source_name)
-
-    return fallback_tile_response("unavailable")
-
-
-def cache_only_provider_tile(provider: str, source_name: str, z: int, x: int, y: int):
-    """Return a cached tile for the given provider, or a fallback placeholder."""
-    validation_error = validate_tile_coordinates(z, x, y)
-    if validation_error:
-        return fallback_tile_response("invalid")
-
-    cache_path = provider_tile_path(provider, z, x, y)
-    metadata = read_tile_metadata(provider_metadata_path(provider, z, x, y))
-    if is_usable_cached_tile(cache_path):
-        return tile_file_response(cache_path, metadata, cache_status="hit", source_name=source_name)
-    return fallback_tile_response("empty")
-
-
-def validate_tile_coordinates(z: int, x: int, y: int) -> Optional[str]:
-    """Return an error message if z/x/y are outside the valid slippy-map range, else None."""
-    if z < 0 or z > MAX_TILE_ZOOM:
-        return f"zoom must be between 0 and {MAX_TILE_ZOOM}"
-    limit = 2**z
-    if x < 0 or x >= limit or y < 0 or y >= limit:
-        return "tile coordinates are outside the valid slippy-map range"
-    return None
-
-
-def provider_tile_path(provider: str, z: int, x: int, y: int) -> Path:
-    """Return the on-disk cache path for a provider's tile image."""
-    return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.png"
-
-
-def provider_metadata_path(provider: str, z: int, x: int, y: int) -> Path:
-    """Return the on-disk cache path for a provider's tile metadata JSON."""
-    return TILE_CACHE_DIR / provider / str(z) / str(x) / f"{y}.json"
-
-
-def read_tile_metadata(path: Path) -> dict[str, Any]:
-    """Read and parse a tile's metadata JSON, returning {} if missing or invalid."""
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return {}
-
-
-def write_tile_metadata(path: Path, metadata: dict[str, Any]) -> None:
-    """Persist tile metadata JSON alongside the cached tile image."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
-
-
-def tile_expired(metadata: dict[str, Any], cache_path: Path) -> bool:
-    """Return whether a cached tile should be revalidated against its source."""
-    now = time.time()
-    fetched_at = metadata.get("fetched_at")
-    if fetched_at is None:
-        try:
-            fetched_at = cache_path.stat().st_mtime
-        except OSError:
-            fetched_at = 0
-    if now - float(fetched_at) < float(settings["tile_max_cache_age_seconds"]):
-        return False
-    return now >= float(metadata.get("expires_at", 0))
-
-
-def is_usable_cached_tile(path: Path) -> bool:
-    """Return whether a cached tile file exists and isn't a known blocked placeholder."""
-    if not path.is_file():
-        return False
-    try:
-        return hashlib.sha1(path.read_bytes()).hexdigest() not in KNOWN_BLOCKED_TILE_SHA1
-    except Exception:
-        return False
-
-
-async def fetch_and_cache_tile(
-    source_name: str,
-    source_url: str,
-    user_agent: str,
-    referer: str,
-    z: int,
-    x: int,
-    y: int,
-    cache_path: Path,
-    metadata_path: Path,
-    metadata: dict[str, Any],
-):
-    """Fetch a tile from its source, cache it to disk, and return the HTTP response, or None on failure."""
-    if not tile_http_client:
-        return None
-
-    headers = {
-        "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
-        "User-Agent": user_agent,
-        "Referer": referer,
-    }
-    if metadata.get("etag"):
-        headers["If-None-Match"] = str(metadata["etag"])
-    if metadata.get("last_modified"):
-        headers["If-Modified-Since"] = str(metadata["last_modified"])
-
-    url = source_url.format(z=z, x=x, y=y)
-    try:
-        response = await tile_http_client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        print(f"{source_name} tile fetch failed {z}/{x}/{y}: {exc}")
-        return None
-
-    if response.status_code == 304 and is_usable_cached_tile(cache_path):
-        refreshed = metadata | {"fetched_at": time.time(), "expires_at": tile_expires_at(response.headers)}
-        write_tile_metadata(metadata_path, refreshed)
-        return tile_file_response(cache_path, refreshed, cache_status="revalidated", source_name=source_name)
-
-    if response.status_code != 200:
-        print(f"{source_name} tile fetch failed {z}/{x}/{y}: HTTP {response.status_code}")
-        return None
-
-    content_type = response.headers.get("content-type", "")
-    if "image" not in content_type:
-        print(f"{source_name} tile fetch failed {z}/{x}/{y}: unexpected content-type {content_type}")
-        return None
-
-    data = response.content
-    if hashlib.sha1(data).hexdigest() in KNOWN_BLOCKED_TILE_SHA1:
-        print(f"{source_name} tile fetch blocked {z}/{x}/{y}: provider returned access-blocked placeholder")
-        return None
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = cache_path.with_suffix(".tmp")
-    temp_path.write_bytes(data)
-    temp_path.replace(cache_path)
-
-    new_metadata = {
-        "source_url": url,
-        "fetched_at": time.time(),
-        "expires_at": tile_expires_at(response.headers),
-        "etag": response.headers.get("etag"),
-        "last_modified": response.headers.get("last-modified"),
-        "cache_control": response.headers.get("cache-control"),
-        "content_type": content_type,
-    }
-    write_tile_metadata(metadata_path, new_metadata)
-    return tile_file_response(cache_path, new_metadata, cache_status="miss", source_name=source_name)
-
-
-def tile_expires_at(headers: httpx.Headers) -> float:
-    """Compute a tile's cache expiry time from response headers, or a default TTL."""
-    cache_control = headers.get("cache-control", "")
-    for part in cache_control.split(","):
-        part = part.strip().lower()
-        if part.startswith("max-age="):
-            try:
-                return time.time() + max(0, int(part.split("=", 1)[1]))
-            except ValueError:
-                pass
-
-    expires = headers.get("expires")
-    if expires:
-        try:
-            return email.utils.parsedate_to_datetime(expires).timestamp()
-        except Exception:
-            pass
-
-    return time.time() + MIN_TILE_TTL_SECONDS
-
-
-def tile_file_response(path: Path, metadata: dict[str, Any], cache_status: str, source_name: str) -> FileResponse:
-    """Build a FileResponse for a cached tile with cache-status headers."""
-    max_age = max(60, int(float(metadata.get("expires_at", time.time() + 60)) - time.time()))
-    return FileResponse(
-        path,
-        media_type=str(metadata.get("content_type") or "image/png").split(";", 1)[0],
-        headers={
-            "Cache-Control": f"public, max-age={max_age}",
-            "X-Tile-Cache": cache_status,
-            "X-Tile-Source": source_name,
-        },
-    )
-
-
-def fallback_tile_response(cache_status: str) -> Response:
-    """Return a placeholder SVG tile for use when no cached or fetched tile is available."""
-    return Response(
-        content=FALLBACK_TILE_SVG,
-        media_type="image/svg+xml",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Tile-Cache": cache_status,
-            "X-Tile-Source": "fallback",
-        },
-    )
-
-
 @app.websocket("/ws/vehicle/{vehicle_id}")
 async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
     """Bridge a single vehicle's telemetry (inbound) and command queue (outbound) over a WebSocket."""
@@ -2173,17 +1551,23 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
             command = await queue.get()
             await websocket.send_json(command)
 
+    tasks = [asyncio.create_task(receive_loop()), asyncio.create_task(send_loop())]
     try:
-        await asyncio.gather(receive_loop(), send_loop())
+        await asyncio.gather(*tasks)
     except WebSocketDisconnect:
         pass
     finally:
-        vehicle_queues.pop(vehicle_id, None)
-        async with state_lock:
-            if vehicle_id in vehicles:
-                vehicles[vehicle_id]["connected"] = False
-                vehicles[vehicle_id]["last_seen_age"] = time.time() - vehicles[vehicle_id].get("last_seen", time.time())
-        await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # A replacement connection may already own this vehicle's queue.
+        if vehicle_queues.get(vehicle_id) is queue:
+            vehicle_queues.pop(vehicle_id, None)
+            async with state_lock:
+                if vehicle_id in vehicles:
+                    vehicles[vehicle_id]["connected"] = False
+                    vehicles[vehicle_id]["last_seen_age"] = time.time() - vehicles[vehicle_id].get("last_seen", time.time())
+            await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
 
 
 @app.websocket("/ws/ui")
@@ -2242,6 +1626,7 @@ def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
         "mob": "trigger_mob",
         "clear_sar_pattern": "cancel_sar",
         "mission_plan": "upload_mission",
+        "ship_relative_trajectory": "upload_mission",
         "trajectory": "send_waypoint",
     }
     
@@ -2380,11 +1765,10 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     await broadcast_ros(topic, msg, msg_type)
 
 
-def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]]:
-    """Return [[lat, lon], ...] waypoint pairs for the SAR flight path, or []."""
+def _compute_sar_waypoints(command: dict[str, Any]) -> list[list[float]]:
+    """Compute a SAR path once for both UI overlays and simulated navigation."""
     if _sar_missions is None:
         return []
-    command = cmd_payload.get("command", cmd_payload)
     cmd_type = command.get("type")
     try:
         if cmd_type == "search_grid":
@@ -2410,7 +1794,7 @@ def _compute_sar_pattern_points(cmd_payload: dict[str, Any]) -> list[list[float]
             )
         else:
             return []
-        return [[float(wp[0]), float(wp[1])] for wp in wps]
+        return [[float(wp[0]), float(wp[1]), float(wp[2])] for wp in wps]
     except Exception as exc:
         print(f"[SAR] Pattern compute error: {exc}")
         return []
@@ -2466,11 +1850,11 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
 
     # Broadcast SAR flight-path pattern to the UI before dispatching
     if cmd_type in ("search_grid", "mob"):
-        pattern_pts = _compute_sar_pattern_points({"command": command})
-        if pattern_pts:
+        sar_waypoints = _compute_sar_waypoints(command)
+        if sar_waypoints:
             pattern = {
                 "pattern_type": cmd_type,
-                "waypoints": pattern_pts,
+                "waypoints": [waypoint[:2] for waypoint in sar_waypoints],
             }
             shared_sar_patterns[vehicle_id] = pattern
             await broadcast_ui({
@@ -2482,32 +1866,8 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         # For websocket sim vehicles only, embed full 3-D waypoints so
         # sim_vehicle.py can navigate the pattern visually. Do not attach this
         # list for hardware bridges.
-        if vehicle_id.startswith("sim-") and _sar_missions is not None:
-            command = dict(command)  # shallow copy — don't mutate the caller's dict
-            try:
-                if cmd_type == "search_grid":
-                    lat = command.get("lat")
-                    lon = command.get("lon")
-                    if lat is not None and lon is not None:
-                        wps = _sar_missions.calculate_search_grid_waypoints(
-                            float(lat), float(lon),
-                            float(command.get("grid_size_m", 200)),
-                            float(command.get("swath_m", SAR_SWATH_M)),
-                            float(command.get("altitude_m", SAR_ALTITUDE_M)),
-                        )
-                        command["sim_waypoints"] = [[wp[0], wp[1], wp[2]] for wp in wps]
-                elif cmd_type == "mob":
-                    track_points = command.get("track_points", [])
-                    if len(track_points) >= 2:
-                        wps = _sar_missions.calculate_mob_waypoints(
-                            track_points,
-                            float(command.get("corridor_half_width_m", SAR_CORRIDOR_HALF_WIDTH_M)),
-                            float(command.get("swath_m", SAR_SWATH_M)),
-                            float(command.get("altitude_m", SAR_ALTITUDE_M)),
-                        )
-                        command["sim_waypoints"] = [[wp[0], wp[1], wp[2]] for wp in wps]
-            except Exception as exc:
-                print(f"[SAR][sim] Waypoint embed error: {exc}")
+        if vehicle_id.startswith("sim-") and sar_waypoints:
+            command = {**command, "sim_waypoints": sar_waypoints}
 
     if cmd_type == "mission_plan":
         mission_points = [

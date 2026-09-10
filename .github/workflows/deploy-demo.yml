@@ -28,9 +28,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - run: npm run build:demo
-        env:
-          GITHUB_PAGES: "true"
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:demo
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web/dist

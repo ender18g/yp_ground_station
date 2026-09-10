@@ -1,51 +1,830 @@
-function Editor({ item, count, onUpdate, onDelete, onClose }: { item: MissionWaypoint; count: number; onUpdate: (id: string, changes: Partial<MissionWaypoint>) => void; onDelete: (id: string) => void; onClose: () => void }) {
-  const number = (key: keyof MissionWaypoint, value: string, min?: number) => { const parsed = Number(value); onUpdate(item.id, { [key]: Number.isFinite(parsed) ? Math.max(min ?? -Infinity, parsed) : 0 }); };
-  return <div className="mission-waypoint-modal-overlay" onClick={onClose}><div className="mission-waypoint-modal" onClick={(event) => event.stopPropagation()}><div className="mission-waypoint-modal-title">Waypoint details</div><label>Item Type<select value={item.itemType} onChange={(event) => onUpdate(item.id, { itemType: event.target.value as MissionItemType, commandIdOverride: null })}><option value="waypoint">Waypoint</option><option value="takeoff">Takeoff</option><option value="loiter_time">Loiter Time</option><option value="land">Land</option><option value="rtl">Return To Launch</option><option value="do_jump">Conditional Jump (DO_JUMP)</option></select></label><label>MAV_CMD Override (optional)<input type="number" value={item.commandIdOverride ?? ""} placeholder={`${commandIdFor(item.itemType)}`} onChange={(event) => onUpdate(item.id, { commandIdOverride: event.target.value.trim() ? Number(event.target.value) : null })} /></label><label>Altitude (m)<input type="number" value={item.altitude} onChange={(event) => number("altitude", event.target.value)} /></label>{item.itemType === "do_jump" ? <><label>Jump Target Waypoint #<input type="number" min={1} max={Math.max(1, count)} value={item.jumpTargetIndex} onChange={(event) => number("jumpTargetIndex", event.target.value, 1)} /></label><label>Jump Repeat Count<input type="number" min={1} value={item.jumpRepeatCount} onChange={(event) => number("jumpRepeatCount", event.target.value, 1)} /></label></> : <><label>Hold Time (s)<input type="number" min={0} value={item.holdTimeS} onChange={(event) => number("holdTimeS", event.target.value, 0)} /></label><label>Acceptance Radius (m)<input type="number" min={1} value={item.acceptanceRadiusM} onChange={(event) => number("acceptanceRadiusM", event.target.value, 1)} /></label></>}<label>Param3<input type="number" value={item.param3} onChange={(event) => number("param3", event.target.value)} /></label><label>Yaw (deg, optional)<input type="number" value={item.yawDeg ?? ""} placeholder="leave blank" onChange={(event) => onUpdate(item.id, { yawDeg: event.target.value.trim() ? Number(event.target.value) : null })} /></label><div className="mission-waypoint-modal-actions"><button type="button" className="danger" onClick={() => onDelete(item.id)}>Delete Waypoint</button><button type="button" onClick={onClose}>Done</button></div></div></div>;
-}
 import L from "leaflet";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { CircleMarker, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMap, useMapEvents } from "react-leaflet";
+import {
+  MapContainer,
+  Marker,
+  Polyline,
+  TileLayer,
+  useMap,
+  useMapEvents,
+} from "react-leaflet";
 import type { Command, Vehicle } from "../types";
-import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, WaypointCrosshair, YpRangeRings } from "../App";
+import {
+  FitAllControl,
+  FollowYpCenter,
+  SarPatternOverlay,
+  VehicleLayer,
+  WaypointCrosshair,
+  YpRangeRings,
+} from "./map/VehicleLayers";
 import { WeatherRadarLayer, WindLayer } from "./map/OverlayLayers";
 
-type MissionItemType = "waypoint" | "takeoff" | "loiter_time" | "land" | "rtl" | "do_jump";
-type MissionWaypoint = { id: string; latitude: number; longitude: number; altitude: number; itemType: MissionItemType; commandIdOverride: number | null; param3: number; jumpTargetIndex: number; jumpRepeatCount: number; holdTimeS: number; acceptanceRadiusM: number; yawDeg: number | null };
-type Props = { center: [number, number]; zoom: number; onZoomChange: (zoom: number) => void; onCenterChange: (center: [number, number]) => void; mapLayer: { url: string; attribution: string; maxNativeZoom: number }; vehicles: Vehicle[]; missionPlans: Record<string, [number, number][]>; waypointMarkers: Record<string, { vehicle_id: string; latitude: number; longitude: number; trackingYP?: boolean }>; yp?: Vehicle; showWeatherRadar: boolean; showWindOverlay: boolean; onToggleWind: () => void; showYpRangeRings: boolean; sarPatterns: Record<string, { patternType: string; waypoints: [number, number][] }>; trailSeconds: number; canCommandVehicle: (vehicleId: string) => boolean; onCommand: (vehicleId: string, command: Command) => void };
+import {
+  commandIdFor,
+  parseQgc,
+  parseWpl,
+  toQgcPlan,
+  toWpl,
+  type MissionItemType,
+  type MissionWaypoint,
+} from "../services/missionFiles";
+type Props = {
+  center: [number, number];
+  zoom: number;
+  onZoomChange: (zoom: number) => void;
+  onCenterChange: (center: [number, number]) => void;
+  mapLayer: { url: string; attribution: string; maxNativeZoom: number };
+  vehicles: Vehicle[];
+  missionPlans: Record<string, [number, number][]>;
+  waypointMarkers: Record<
+    string,
+    {
+      vehicle_id: string;
+      latitude: number;
+      longitude: number;
+      trackingYP?: boolean;
+    }
+  >;
+  yp?: Vehicle;
+  showWeatherRadar: boolean;
+  showWindOverlay: boolean;
+  onToggleWind: () => void;
+  showYpRangeRings: boolean;
+  sarPatterns: Record<
+    string,
+    { patternType: string; waypoints: [number, number][] }
+  >;
+  trailSeconds: number;
+  canCommandVehicle: (vehicleId: string) => boolean;
+  onCommand: (vehicleId: string, command: Command) => void;
+};
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-function newWaypoint(latitude: number, longitude: number, altitude: number): MissionWaypoint { return { id: makeId(), latitude, longitude, altitude, itemType: "waypoint", commandIdOverride: null, param3: 0, jumpTargetIndex: 1, jumpRepeatCount: 1, holdTimeS: 0, acceptanceRadiusM: 8, yawDeg: null }; }
-function commandIdFor(type: MissionItemType): number { return { waypoint: 16, loiter_time: 19, rtl: 20, land: 21, takeoff: 22, do_jump: 177 }[type]; }
-function itemTypeFor(command: number): MissionItemType { if (command === 22) return "takeoff"; if (command === 19) return "loiter_time"; if (command === 21) return "land"; if (command === 20) return "rtl"; if (command === 177) return "do_jump"; return "waypoint"; }
-
-function toQgcPlan(items: MissionWaypoint[], defaultAltitude: number): Record<string, unknown> {
-  return { fileType: "Plan", geoFence: { polygons: [], circles: [], version: 2 }, rallyPoints: { points: [], version: 2 }, version: 1, mission: { cruiseSpeed: 10, firmwareType: 12, hoverSpeed: 5, plannedHomePosition: [0, 0, 0], vehicleType: 2, version: 2, defaultAltitude, items: items.map((item, index) => { const command = item.commandIdOverride ?? commandIdFor(item.itemType); const jump = command === 177; return { AMSLAltAboveTerrain: null, Altitude: item.altitude, AltitudeMode: 1, autoContinue: true, command, doJumpId: index + 1, frame: 3, params: [jump ? item.jumpTargetIndex : item.holdTimeS, jump ? item.jumpRepeatCount : item.acceptanceRadiusM, item.param3, item.yawDeg ?? 0, item.latitude, item.longitude, item.altitude], type: "SimpleItem" }; }) } };
+function newWaypoint(
+  latitude: number,
+  longitude: number,
+  altitude: number,
+): MissionWaypoint {
+  return {
+    id: makeId(),
+    latitude,
+    longitude,
+    altitude,
+    itemType: "waypoint",
+    commandIdOverride: null,
+    param3: 0,
+    jumpTargetIndex: 1,
+    jumpRepeatCount: 1,
+    holdTimeS: 0,
+    acceptanceRadiusM: 8,
+    yawDeg: null,
+  };
 }
-function toWpl(items: MissionWaypoint[]): string { const lines = ["QGC WPL 110", [0, 1, 0, 16, 0, 0, 0, 0, 0, 0, 0, 1].join("\t")]; items.forEach((item, index) => { const command = item.commandIdOverride ?? commandIdFor(item.itemType); const jump = command === 177; lines.push([index + 1, index === 0 ? 1 : 0, 3, command, jump ? item.jumpTargetIndex : item.holdTimeS, jump ? item.jumpRepeatCount : item.acceptanceRadiusM, item.param3, item.yawDeg ?? 0, item.latitude, item.longitude, item.altitude, 1].join("\t")); }); return lines.join("\n"); }
-function parseQgc(raw: string): { waypoints: MissionWaypoint[]; defaultAltitude?: number } | null { try { const parsed = JSON.parse(raw) as { mission?: { items?: Array<{ command?: number; params?: number[] }>; defaultAltitude?: number } }; const waypoints = (parsed.mission?.items ?? []).flatMap((item) => { const params = item.params ?? []; const command = Number(item.command ?? 16); const latitude = Number(params[4]); const longitude = Number(params[5]); if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return []; const altitude = Number(params[6]); return [{ id: makeId(), latitude, longitude, altitude: Number.isFinite(altitude) ? altitude : 30, itemType: itemTypeFor(command), commandIdOverride: command, param3: Number(params[2] ?? 0), jumpTargetIndex: Number(params[0] ?? 1), jumpRepeatCount: Number(params[1] ?? 1), holdTimeS: Number(params[0] ?? 0), acceptanceRadiusM: Number(params[1] ?? 8), yawDeg: Number.isFinite(Number(params[3])) ? Number(params[3]) : null }]; }); return { waypoints, defaultAltitude: parsed.mission?.defaultAltitude }; } catch { return null; } }
-function parseWpl(raw: string): MissionWaypoint[] { const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#")); if (!lines[0]?.toUpperCase().startsWith("QGC WPL")) return []; return lines.slice(1).flatMap((line) => { const parts = line.split(/\s+/); if (parts.length < 12 || Number(parts[0]) === 0) return []; const command = Number(parts[3]); const p1 = Number(parts[4]); const p2 = Number(parts[5]); const latitude = Number(parts[8]); const longitude = Number(parts[9]); if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return []; return [{ id: makeId(), latitude, longitude, altitude: Number(parts[10]) || 30, itemType: itemTypeFor(command), commandIdOverride: Number.isFinite(command) ? command : null, param3: Number(parts[6]) || 0, jumpTargetIndex: Number.isFinite(p1) ? p1 : 1, jumpRepeatCount: Number.isFinite(p2) ? p2 : 1, holdTimeS: Number.isFinite(p1) ? p1 : 0, acceptanceRadiusM: Number.isFinite(p2) ? p2 : 8, yawDeg: Number.isFinite(Number(parts[7])) ? Number(parts[7]) : null }]; }); }
-function download(filename: string, content: string, type: string): void { const url = URL.createObjectURL(new Blob([content], { type })); const link = document.createElement("a"); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url); }
-function icon(index: number, selected: boolean): L.DivIcon { return L.divIcon({ className: "", iconSize: [28, 28], iconAnchor: [14, 14], html: `<div class="mission-waypoint-dot${selected ? " selected" : ""}">${index}</div>` }); }
-function vehicleColor(vehicle: Vehicle): string { return (vehicle as Vehicle & { marker_color?: string }).marker_color ?? (vehicle.vehicle_type === "yp" ? "#64748b" : "#2563eb"); }
-
-function MapEvents({ onAdd, onZoom, onPan, dragRef }: { onAdd: (lat: number, lon: number) => void; onZoom: (zoom: number) => void; onPan: (center: [number, number]) => void; dragRef: { current: boolean } }) { useMapEvents({ click: (event) => { if (dragRef.current) { dragRef.current = false; return; } onAdd(event.latlng.lat, event.latlng.lng); }, zoomend: (event) => onZoom(event.target.getZoom()), dragend: (event) => { const center = event.target.getCenter(); onPan([center.lat, center.lng]); } }); return null; }
-function ViewportSync({ center, zoom }: { center: [number, number]; zoom: number }) { const map = useMap(); useEffect(() => { const current = map.getCenter(); if (Math.abs(current.lat - center[0]) > 0.000001 || Math.abs(current.lng - center[1]) > 0.000001 || map.getZoom() !== zoom) map.setView(center, zoom, { animate: false }); }, [center, zoom, map]); return null; }
-function WaypointMarker({ item, index, selected, onEdit, onUpdate, dragRef }: { item: MissionWaypoint; index: number; selected: boolean; onEdit: (id: string) => void; onUpdate: (id: string, changes: Partial<MissionWaypoint>) => void; dragRef: { current: boolean } }) { return <Marker position={[item.latitude, item.longitude]} icon={icon(index + 1, selected)} draggable zIndexOffset={7000 + index} eventHandlers={{ click: (event) => { L.DomEvent.stopPropagation(event.originalEvent); onEdit(item.id); }, dragstart: () => { dragRef.current = true; }, dragend: (event) => { const position = event.target.getLatLng(); onUpdate(item.id, { latitude: position.lat, longitude: position.lng }); } }} />; }
-
-export function MissionPlannerMode({ center, zoom, onZoomChange, onCenterChange, mapLayer, vehicles, missionPlans, waypointMarkers, yp, showWeatherRadar, showWindOverlay, onToggleWind, showYpRangeRings, sarPatterns, trailSeconds, canCommandVehicle, onCommand }: Props) {
-  const commandable = useMemo(() => vehicles.filter((vehicle) => vehicle.vehicle_type !== "yp" && canCommandVehicle(vehicle.vehicle_id)), [vehicles, canCommandVehicle]);
-  const [waypoints, setWaypoints] = useState<MissionWaypoint[]>([]); const [vehicleId, setVehicleId] = useState(""); const [editingId, setEditingId] = useState<string | null>(null); const [defaultAltitude, setDefaultAltitude] = useState(30); const [forceGuided, setForceGuided] = useState(false); const fileRef = useRef<HTMLInputElement>(null); const dragRef = useRef(false); const editing = waypoints.find((item) => item.id === editingId) ?? null;
-  useEffect(() => { if (!commandable.some((vehicle) => vehicle.vehicle_id === vehicleId)) setVehicleId(commandable[0]?.vehicle_id ?? ""); }, [commandable, vehicleId]);
-  const update = (id: string, changes: Partial<MissionWaypoint>) => setWaypoints((items) => items.map((item) => item.id === id ? { ...item, ...changes } : item));
-  const reorder = (id: string, direction: -1 | 1) => setWaypoints((items) => { const index = items.findIndex((item) => item.id === id); const next = index + direction; if (index < 0 || next < 0 || next >= items.length) return items; const result = [...items]; const [item] = result.splice(index, 1); result.splice(next, 0, item); return result; });
-  const remove = (id: string) => { setWaypoints((items) => items.filter((item) => item.id !== id)); if (editingId === id) setEditingId(null); };
-  const filename = () => `mission-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  const saveJson = () => { if (!waypoints.length) return alert("Add at least one waypoint before saving a mission file."); download(`${filename()}.json`, JSON.stringify({ version: 1, saved_at: new Date().toISOString(), default_altitude_m: defaultAltitude, force_guided_on_complete: forceGuided, waypoints: waypoints.map((item) => ({ latitude: item.latitude, longitude: item.longitude, altitude: item.altitude, item_type: item.itemType, command_id: item.commandIdOverride, param1: item.itemType === "do_jump" ? item.jumpTargetIndex : item.holdTimeS, param2: item.itemType === "do_jump" ? item.jumpRepeatCount : item.acceptanceRadiusM, param3: item.param3, param4: item.yawDeg, hold_time_s: item.holdTimeS, acceptance_radius_m: item.acceptanceRadiusM, yaw_deg: item.yawDeg })) }, null, 2), "application/json"); };
-  const savePlan = () => { if (!waypoints.length) return alert("Add at least one waypoint before exporting a QGroundControl plan."); download(`${filename()}.plan`, JSON.stringify(toQgcPlan(waypoints, defaultAltitude), null, 2), "application/json"); };
-  const saveWpl = () => { if (!waypoints.length) return alert("Add at least one waypoint before exporting a Mission Planner WPL file."); download(`${filename()}.waypoints`, toWpl(waypoints), "text/plain"); };
-  const load = async (event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; try { const text = await file.text(); const qgc = parseQgc(text); let loaded = qgc?.waypoints ?? []; let loadedAltitude = qgc?.defaultAltitude; if (!loaded.length) { loaded = parseWpl(text); } if (!loaded.length) { const parsed = JSON.parse(text) as { default_altitude_m?: number; force_guided_on_complete?: boolean; waypoints?: Array<Record<string, unknown>> }; loadedAltitude = parsed.default_altitude_m; if (typeof parsed.force_guided_on_complete === "boolean") setForceGuided(parsed.force_guided_on_complete); loaded = (parsed.waypoints ?? []).flatMap((item) => { const latitude = Number(item.latitude); const longitude = Number(item.longitude); if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return []; const itemType = (item.item_type as MissionItemType | undefined) ?? "waypoint"; return [{ id: makeId(), latitude, longitude, altitude: Number(item.altitude ?? parsed.default_altitude_m ?? defaultAltitude), itemType, commandIdOverride: item.command_id == null ? null : Number(item.command_id), param3: Number(item.param3 ?? 0), jumpTargetIndex: Number(item.param1 ?? 1), jumpRepeatCount: Number(item.param2 ?? 1), holdTimeS: Number(item.hold_time_s ?? item.param1 ?? 0), acceptanceRadiusM: Number(item.acceptance_radius_m ?? item.param2 ?? 8), yawDeg: item.yaw_deg == null ? (item.param4 == null ? null : Number(item.param4)) : Number(item.yaw_deg) }]; }); } if (!loaded.length) return alert("Mission file did not contain valid waypoints."); setWaypoints(loaded); setEditingId(null); if (loadedAltitude != null && Number.isFinite(loadedAltitude)) setDefaultAltitude(loadedAltitude); } catch { alert("Failed to load mission file. Supported formats: native JSON, QGroundControl .plan, Mission Planner WPL."); } finally { event.target.value = ""; } };
-  const upload = () => { if (!vehicleId) return alert("Select a vehicle before uploading a mission."); if (!waypoints.length) return alert("Add at least one waypoint before uploading."); onCommand(vehicleId, { type: "mission_plan", auto_arm_start: true, force_guided_on_complete: forceGuided, waypoints: waypoints.map((item) => ({ command_id: item.commandIdOverride ?? commandIdFor(item.itemType), latitude: item.latitude, longitude: item.longitude, altitude: item.altitude, item_type: item.itemType, param1: item.itemType === "do_jump" ? item.jumpTargetIndex : item.holdTimeS, param2: item.itemType === "do_jump" ? item.jumpRepeatCount : item.acceptanceRadiusM, param3: item.param3, param4: item.yawDeg ?? 0, hold_time_s: item.holdTimeS, acceptance_radius_m: item.acceptanceRadiusM, yaw_deg: item.yawDeg })) }); alert(`Uploaded and started mission (${waypoints.length} waypoints) on ${vehicleId}.`); };
-  return <div className="mission-planner-root"><MapContainer key={`${mapLayer.url}-${mapLayer.maxNativeZoom}`} center={center} zoom={zoom} minZoom={3} maxZoom={20} zoomControl className="map"><TileLayer url={mapLayer.url} attribution={mapLayer.attribution} maxNativeZoom={mapLayer.maxNativeZoom} maxZoom={20} /><ViewportSync center={center} zoom={zoom} /><MapEvents onAdd={(lat, lon) => setWaypoints((items) => [...items, newWaypoint(lat, lon, defaultAltitude)])} onZoom={onZoomChange} onPan={onCenterChange} dragRef={dragRef} />{showWeatherRadar && <WeatherRadarLayer />}<WindLayer yp={yp} showVectors={showWindOverlay} onToggleVectors={onToggleWind} /><FollowYpCenter yp={yp} enabled={false} /><FitAllControl vehicles={vehicles.filter((vehicle) => vehicle.position)} />{showYpRangeRings && <YpRangeRings yp={yp} />}{Object.entries(sarPatterns).map(([vehicleId, pattern]) => <SarPatternOverlay key={vehicleId} vehicleId={vehicleId} patternType={pattern.patternType} waypoints={pattern.waypoints} color={vehicleColor(vehicles.find((vehicle) => vehicle.vehicle_id === vehicleId) ?? ({ vehicle_type: "uav" } as Vehicle))} onClear={() => onCommand(vehicleId, { type: "clear_sar_pattern" })} />)}{Object.values(waypointMarkers).map((waypoint) => <WaypointCrosshair key={waypoint.vehicle_id} waypoint={waypoint} vehicle={vehicles.find((candidate) => candidate.vehicle_id === waypoint.vehicle_id)} yp={yp} onClick={() => undefined} onDragStart={() => undefined} onDragEnd={() => undefined} onMove={(lat, lon) => onCommand(waypoint.vehicle_id, { type: "waypoint", target: { latitude: lat, longitude: lon, altitude: vehicles.find((candidate) => candidate.vehicle_id === waypoint.vehicle_id)?.position?.altitude ?? 0 } })} />)}{vehicles.filter((vehicle) => vehicle.position).map((vehicle) => <VehicleLayer key={vehicle.vehicle_id} vehicle={vehicle} trailSeconds={trailSeconds} isPhoneViewer={false} mapZoom={zoom} onClick={() => undefined} />)}{waypoints.length > 1 && <Polyline positions={waypoints.map((item) => [item.latitude, item.longitude] as [number, number])} pathOptions={{ color: "#2563eb", weight: 3 }} />}{Object.entries(missionPlans).map(([id, points]) => points.length > 1 && <Polyline key={id} positions={points} pathOptions={{ color: "#16a34a", weight: 3 }} />)}{waypoints.map((item, index) => <WaypointMarker key={item.id} item={item} index={index} selected={item.id === editingId} onEdit={setEditingId} onUpdate={update} dragRef={dragRef} />)}</MapContainer>
-    <div className="mission-planner-panel" onClick={(event) => event.stopPropagation()}><div className="mission-planner-panel-title"><strong>Mission Planner</strong></div><div className="mission-planner-help">Left-click map to add waypoints. Drag points to move. Click a waypoint to edit details.</div><label>Vehicle<select value={vehicleId} onChange={(event) => setVehicleId(event.target.value)}><option value="">-- Select vehicle --</option>{commandable.map((vehicle) => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id} ({vehicle.vehicle_type})</option>)}</select></label><label>Default waypoint altitude (m)<input type="number" value={defaultAltitude} onChange={(event) => setDefaultAltitude(Number(event.target.value) || 0)} /></label><label className="setting-toggle mission-guided-toggle"><span>Force GUIDED after mission completion</span><input type="checkbox" checked={forceGuided} onChange={(event) => setForceGuided(event.target.checked)} /></label><div className="mission-planner-summary">Waypoints: {waypoints.length}</div><div className="mission-waypoint-table"><div className="mission-waypoint-table-header">Seq</div><div className="mission-waypoint-table-header">Type</div><div className="mission-waypoint-table-header">Alt</div><div className="mission-waypoint-table-header">Actions</div>{waypoints.map((item, index) => <div className="mission-waypoint-row" key={item.id}><div className="mission-waypoint-cell">{index + 1}</div><div className="mission-waypoint-cell">{item.itemType}</div><div className="mission-waypoint-cell">{item.altitude.toFixed(0)} m</div><div className="mission-waypoint-cell mission-waypoint-actions-cell"><button type="button" onClick={() => reorder(item.id, -1)} disabled={index === 0}>Up</button><button type="button" onClick={() => reorder(item.id, 1)} disabled={index === waypoints.length - 1}>Down</button><button type="button" onClick={() => setEditingId(item.id)}>Edit</button></div></div>)}</div><div className="mission-planner-actions"><button type="button" onClick={() => setWaypoints((items) => items.slice(0, -1))} disabled={!waypoints.length}>Remove Last</button><button type="button" onClick={() => { setWaypoints([]); setEditingId(null); }} disabled={!waypoints.length}>Clear Mission</button><button type="button" onClick={saveJson} disabled={!waypoints.length}>Save JSON</button><button type="button" onClick={savePlan} disabled={!waypoints.length}>Export QGC .plan</button><button type="button" onClick={saveWpl} disabled={!waypoints.length}>Export WPL</button><button type="button" onClick={() => fileRef.current?.click()}>Import Mission</button><button type="button" className="mission-upload" onClick={upload} disabled={!vehicleId || !waypoints.length}>Upload + Arm + Start</button></div><input ref={fileRef} type="file" accept="application/json,.json,.plan,.waypoints,.txt" style={{ display: "none" }} onChange={load} /></div>{editing && <Editor item={editing} count={waypoints.length} onUpdate={update} onDelete={remove} onClose={() => setEditingId(null)} />}</div>;
+function download(filename: string, content: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+function icon(index: number, selected: boolean): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+    html: `<div class="mission-waypoint-dot${selected ? " selected" : ""}">${index}</div>`,
+  });
+}
+function vehicleColor(vehicle: Vehicle): string {
+  return (
+    (vehicle as Vehicle & { marker_color?: string }).marker_color ??
+    (vehicle.vehicle_type === "yp" ? "#64748b" : "#2563eb")
+  );
 }
 
+function MapEvents({
+  onAdd,
+  onZoom,
+  onPan,
+  dragRef,
+}: {
+  onAdd: (lat: number, lon: number) => void;
+  onZoom: (zoom: number) => void;
+  onPan: (center: [number, number]) => void;
+  dragRef: { current: boolean };
+}) {
+  useMapEvents({
+    click: (event) => {
+      if (dragRef.current) {
+        dragRef.current = false;
+        return;
+      }
+      onAdd(event.latlng.lat, event.latlng.lng);
+    },
+    zoomend: (event) => onZoom(event.target.getZoom()),
+    dragend: (event) => {
+      const center = event.target.getCenter();
+      onPan([center.lat, center.lng]);
+    },
+  });
+  return null;
+}
+function ViewportSync({
+  center,
+  zoom,
+}: {
+  center: [number, number];
+  zoom: number;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const current = map.getCenter();
+    if (
+      Math.abs(current.lat - center[0]) > 0.000001 ||
+      Math.abs(current.lng - center[1]) > 0.000001 ||
+      map.getZoom() !== zoom
+    )
+      map.setView(center, zoom, { animate: false });
+  }, [center, zoom, map]);
+  return null;
+}
+function WaypointMarker({
+  item,
+  index,
+  selected,
+  onEdit,
+  onUpdate,
+  dragRef,
+}: {
+  item: MissionWaypoint;
+  index: number;
+  selected: boolean;
+  onEdit: (id: string) => void;
+  onUpdate: (id: string, changes: Partial<MissionWaypoint>) => void;
+  dragRef: { current: boolean };
+}) {
+  return (
+    <Marker
+      position={[item.latitude, item.longitude]}
+      icon={icon(index + 1, selected)}
+      draggable
+      zIndexOffset={7000 + index}
+      eventHandlers={{
+        click: (event) => {
+          L.DomEvent.stopPropagation(event.originalEvent);
+          onEdit(item.id);
+        },
+        dragstart: () => {
+          dragRef.current = true;
+        },
+        dragend: (event) => {
+          const position = event.target.getLatLng();
+          onUpdate(item.id, {
+            latitude: position.lat,
+            longitude: position.lng,
+          });
+        },
+      }}
+    />
+  );
+}
+
+export function MissionPlannerMode({
+  center,
+  zoom,
+  onZoomChange,
+  onCenterChange,
+  mapLayer,
+  vehicles,
+  missionPlans,
+  waypointMarkers,
+  yp,
+  showWeatherRadar,
+  showWindOverlay,
+  onToggleWind,
+  showYpRangeRings,
+  sarPatterns,
+  trailSeconds,
+  canCommandVehicle,
+  onCommand,
+}: Props) {
+  const commandable = useMemo(
+    () =>
+      vehicles.filter(
+        (vehicle) =>
+          vehicle.vehicle_type !== "yp" &&
+          canCommandVehicle(vehicle.vehicle_id),
+      ),
+    [vehicles, canCommandVehicle],
+  );
+  const [waypoints, setWaypoints] = useState<MissionWaypoint[]>([]);
+  const [vehicleId, setVehicleId] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [defaultAltitude, setDefaultAltitude] = useState(30);
+  const [forceGuided, setForceGuided] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const dragRef = useRef(false);
+  const editing = waypoints.find((item) => item.id === editingId) ?? null;
+  useEffect(() => {
+    if (!commandable.some((vehicle) => vehicle.vehicle_id === vehicleId))
+      setVehicleId(commandable[0]?.vehicle_id ?? "");
+  }, [commandable, vehicleId]);
+  const update = (id: string, changes: Partial<MissionWaypoint>) =>
+    setWaypoints((items) =>
+      items.map((item) => (item.id === id ? { ...item, ...changes } : item)),
+    );
+  const reorder = (id: string, direction: -1 | 1) =>
+    setWaypoints((items) => {
+      const index = items.findIndex((item) => item.id === id);
+      const next = index + direction;
+      if (index < 0 || next < 0 || next >= items.length) return items;
+      const result = [...items];
+      const [item] = result.splice(index, 1);
+      result.splice(next, 0, item);
+      return result;
+    });
+  const remove = (id: string) => {
+    setWaypoints((items) => items.filter((item) => item.id !== id));
+    if (editingId === id) setEditingId(null);
+  };
+  const filename = () =>
+    `mission-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const saveJson = () => {
+    if (!waypoints.length)
+      return alert("Add at least one waypoint before saving a mission file.");
+    download(
+      `${filename()}.json`,
+      JSON.stringify(
+        {
+          version: 1,
+          saved_at: new Date().toISOString(),
+          default_altitude_m: defaultAltitude,
+          force_guided_on_complete: forceGuided,
+          waypoints: waypoints.map((item) => ({
+            latitude: item.latitude,
+            longitude: item.longitude,
+            altitude: item.altitude,
+            item_type: item.itemType,
+            command_id: item.commandIdOverride,
+            param1:
+              item.itemType === "do_jump"
+                ? item.jumpTargetIndex
+                : item.holdTimeS,
+            param2:
+              item.itemType === "do_jump"
+                ? item.jumpRepeatCount
+                : item.acceptanceRadiusM,
+            param3: item.param3,
+            param4: item.yawDeg,
+            hold_time_s: item.holdTimeS,
+            acceptance_radius_m: item.acceptanceRadiusM,
+            yaw_deg: item.yawDeg,
+          })),
+        },
+        null,
+        2,
+      ),
+      "application/json",
+    );
+  };
+  const savePlan = () => {
+    if (!waypoints.length)
+      return alert(
+        "Add at least one waypoint before exporting a QGroundControl plan.",
+      );
+    download(
+      `${filename()}.plan`,
+      JSON.stringify(toQgcPlan(waypoints, defaultAltitude), null, 2),
+      "application/json",
+    );
+  };
+  const saveWpl = () => {
+    if (!waypoints.length)
+      return alert(
+        "Add at least one waypoint before exporting a Mission Planner WPL file.",
+      );
+    download(`${filename()}.waypoints`, toWpl(waypoints), "text/plain");
+  };
+  const load = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const qgc = parseQgc(text);
+      let loaded = qgc?.waypoints ?? [];
+      let loadedAltitude = qgc?.defaultAltitude;
+      if (!loaded.length) {
+        loaded = parseWpl(text);
+      }
+      if (!loaded.length) {
+        const parsed = JSON.parse(text) as {
+          default_altitude_m?: number;
+          force_guided_on_complete?: boolean;
+          waypoints?: Array<Record<string, unknown>>;
+        };
+        loadedAltitude = parsed.default_altitude_m;
+        if (typeof parsed.force_guided_on_complete === "boolean")
+          setForceGuided(parsed.force_guided_on_complete);
+        loaded = (parsed.waypoints ?? []).flatMap((item) => {
+          const latitude = Number(item.latitude);
+          const longitude = Number(item.longitude);
+          if (!Number.isFinite(latitude) || !Number.isFinite(longitude))
+            return [];
+          const itemType =
+            (item.item_type as MissionItemType | undefined) ?? "waypoint";
+          return [
+            {
+              id: makeId(),
+              latitude,
+              longitude,
+              altitude: Number(
+                item.altitude ?? parsed.default_altitude_m ?? defaultAltitude,
+              ),
+              itemType,
+              commandIdOverride:
+                item.command_id == null ? null : Number(item.command_id),
+              param3: Number(item.param3 ?? 0),
+              jumpTargetIndex: Number(item.param1 ?? 1),
+              jumpRepeatCount: Number(item.param2 ?? 1),
+              holdTimeS: Number(item.hold_time_s ?? item.param1 ?? 0),
+              acceptanceRadiusM: Number(
+                item.acceptance_radius_m ?? item.param2 ?? 8,
+              ),
+              yawDeg:
+                item.yaw_deg == null
+                  ? item.param4 == null
+                    ? null
+                    : Number(item.param4)
+                  : Number(item.yaw_deg),
+            },
+          ];
+        });
+      }
+      if (!loaded.length)
+        return alert("Mission file did not contain valid waypoints.");
+      setWaypoints(loaded);
+      setEditingId(null);
+      if (loadedAltitude != null && Number.isFinite(loadedAltitude))
+        setDefaultAltitude(loadedAltitude);
+    } catch {
+      alert(
+        "Failed to load mission file. Supported formats: native JSON, QGroundControl .plan, Mission Planner WPL.",
+      );
+    } finally {
+      event.target.value = "";
+    }
+  };
+  const upload = () => {
+    if (!vehicleId)
+      return alert("Select a vehicle before uploading a mission.");
+    if (!waypoints.length)
+      return alert("Add at least one waypoint before uploading.");
+    onCommand(vehicleId, {
+      type: "mission_plan",
+      auto_arm_start: true,
+      force_guided_on_complete: forceGuided,
+      waypoints: waypoints.map((item) => ({
+        command_id: item.commandIdOverride ?? commandIdFor(item.itemType),
+        latitude: item.latitude,
+        longitude: item.longitude,
+        altitude: item.altitude,
+        item_type: item.itemType,
+        param1:
+          item.itemType === "do_jump" ? item.jumpTargetIndex : item.holdTimeS,
+        param2:
+          item.itemType === "do_jump"
+            ? item.jumpRepeatCount
+            : item.acceptanceRadiusM,
+        param3: item.param3,
+        param4: item.yawDeg ?? 0,
+        hold_time_s: item.holdTimeS,
+        acceptance_radius_m: item.acceptanceRadiusM,
+        yaw_deg: item.yawDeg,
+      })),
+    });
+    alert(
+      `Uploaded and started mission (${waypoints.length} waypoints) on ${vehicleId}.`,
+    );
+  };
+  return (
+    <div className="mission-planner-root">
+      <MapContainer
+        key={`${mapLayer.url}-${mapLayer.maxNativeZoom}`}
+        center={center}
+        zoom={zoom}
+        minZoom={3}
+        maxZoom={20}
+        zoomControl
+        className="map"
+      >
+        <TileLayer
+          url={mapLayer.url}
+          attribution={mapLayer.attribution}
+          maxNativeZoom={mapLayer.maxNativeZoom}
+          maxZoom={20}
+        />
+        <ViewportSync center={center} zoom={zoom} />
+        <MapEvents
+          onAdd={(lat, lon) =>
+            setWaypoints((items) => [
+              ...items,
+              newWaypoint(lat, lon, defaultAltitude),
+            ])
+          }
+          onZoom={onZoomChange}
+          onPan={onCenterChange}
+          dragRef={dragRef}
+        />
+        {showWeatherRadar && <WeatherRadarLayer />}
+        <WindLayer
+          yp={yp}
+          showVectors={showWindOverlay}
+          onToggleVectors={onToggleWind}
+        />
+        <FollowYpCenter yp={yp} enabled={false} />
+        <FitAllControl
+          vehicles={vehicles.filter((vehicle) => vehicle.position)}
+        />
+        {showYpRangeRings && <YpRangeRings yp={yp} />}
+        {Object.entries(sarPatterns).map(([vehicleId, pattern]) => (
+          <SarPatternOverlay
+            key={vehicleId}
+            vehicleId={vehicleId}
+            patternType={pattern.patternType}
+            waypoints={pattern.waypoints}
+            color={vehicleColor(
+              vehicles.find((vehicle) => vehicle.vehicle_id === vehicleId) ??
+                ({ vehicle_type: "uav" } as Vehicle),
+            )}
+            onClear={() => onCommand(vehicleId, { type: "clear_sar_pattern" })}
+          />
+        ))}
+        {Object.values(waypointMarkers).map((waypoint) => (
+          <WaypointCrosshair
+            key={waypoint.vehicle_id}
+            waypoint={waypoint}
+            vehicle={vehicles.find(
+              (candidate) => candidate.vehicle_id === waypoint.vehicle_id,
+            )}
+            yp={yp}
+            onClick={() => undefined}
+            onDragStart={() => undefined}
+            onDragEnd={() => undefined}
+            onMove={(lat, lon) =>
+              onCommand(waypoint.vehicle_id, {
+                type: "waypoint",
+                target: {
+                  latitude: lat,
+                  longitude: lon,
+                  altitude:
+                    vehicles.find(
+                      (candidate) =>
+                        candidate.vehicle_id === waypoint.vehicle_id,
+                    )?.position?.altitude ?? 0,
+                },
+              })
+            }
+          />
+        ))}
+        {vehicles
+          .filter((vehicle) => vehicle.position)
+          .map((vehicle) => (
+            <VehicleLayer
+              key={vehicle.vehicle_id}
+              vehicle={vehicle}
+              trailSeconds={trailSeconds}
+              isPhoneViewer={false}
+              mapZoom={zoom}
+              onClick={() => undefined}
+            />
+          ))}
+        {waypoints.length > 1 && (
+          <Polyline
+            positions={waypoints.map(
+              (item) => [item.latitude, item.longitude] as [number, number],
+            )}
+            pathOptions={{ color: "#2563eb", weight: 3 }}
+          />
+        )}
+        {Object.entries(missionPlans).map(
+          ([id, points]) =>
+            points.length > 1 && (
+              <Polyline
+                key={id}
+                positions={points}
+                pathOptions={{ color: "#16a34a", weight: 3 }}
+              />
+            ),
+        )}
+        {waypoints.map((item, index) => (
+          <WaypointMarker
+            key={item.id}
+            item={item}
+            index={index}
+            selected={item.id === editingId}
+            onEdit={setEditingId}
+            onUpdate={update}
+            dragRef={dragRef}
+          />
+        ))}
+      </MapContainer>
+      <div
+        className="mission-planner-panel"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mission-planner-panel-title">
+          <strong>Mission Planner</strong>
+        </div>
+        <div className="mission-planner-help">
+          Left-click map to add waypoints. Drag points to move. Click a waypoint
+          to edit details.
+        </div>
+        <label>
+          Vehicle
+          <select
+            value={vehicleId}
+            onChange={(event) => setVehicleId(event.target.value)}
+          >
+            <option value="">-- Select vehicle --</option>
+            {commandable.map((vehicle) => (
+              <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>
+                {vehicle.vehicle_id} ({vehicle.vehicle_type})
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Default waypoint altitude (m)
+          <input
+            type="number"
+            value={defaultAltitude}
+            onChange={(event) =>
+              setDefaultAltitude(Number(event.target.value) || 0)
+            }
+          />
+        </label>
+        <label className="setting-toggle mission-guided-toggle">
+          <span>Force GUIDED after mission completion</span>
+          <input
+            type="checkbox"
+            checked={forceGuided}
+            onChange={(event) => setForceGuided(event.target.checked)}
+          />
+        </label>
+        <div className="mission-planner-summary">
+          Waypoints: {waypoints.length}
+        </div>
+        <div className="mission-waypoint-table">
+          <div className="mission-waypoint-table-header">Seq</div>
+          <div className="mission-waypoint-table-header">Type</div>
+          <div className="mission-waypoint-table-header">Alt</div>
+          <div className="mission-waypoint-table-header">Actions</div>
+          {waypoints.map((item, index) => (
+            <div className="mission-waypoint-row" key={item.id}>
+              <div className="mission-waypoint-cell">{index + 1}</div>
+              <div className="mission-waypoint-cell">{item.itemType}</div>
+              <div className="mission-waypoint-cell">
+                {item.altitude.toFixed(0)} m
+              </div>
+              <div className="mission-waypoint-cell mission-waypoint-actions-cell">
+                <button
+                  type="button"
+                  onClick={() => reorder(item.id, -1)}
+                  disabled={index === 0}
+                >
+                  Up
+                </button>
+                <button
+                  type="button"
+                  onClick={() => reorder(item.id, 1)}
+                  disabled={index === waypoints.length - 1}
+                >
+                  Down
+                </button>
+                <button type="button" onClick={() => setEditingId(item.id)}>
+                  Edit
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mission-planner-actions">
+          <button
+            type="button"
+            onClick={() => setWaypoints((items) => items.slice(0, -1))}
+            disabled={!waypoints.length}
+          >
+            Remove Last
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setWaypoints([]);
+              setEditingId(null);
+            }}
+            disabled={!waypoints.length}
+          >
+            Clear Mission
+          </button>
+          <button type="button" onClick={saveJson} disabled={!waypoints.length}>
+            Save JSON
+          </button>
+          <button type="button" onClick={savePlan} disabled={!waypoints.length}>
+            Export QGC .plan
+          </button>
+          <button type="button" onClick={saveWpl} disabled={!waypoints.length}>
+            Export WPL
+          </button>
+          <button type="button" onClick={() => fileRef.current?.click()}>
+            Import Mission
+          </button>
+          <button
+            type="button"
+            className="mission-upload"
+            onClick={upload}
+            disabled={!vehicleId || !waypoints.length}
+          >
+            Upload + Arm + Start
+          </button>
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json,.plan,.waypoints,.txt"
+          style={{ display: "none" }}
+          onChange={load}
+        />
+      </div>
+      {editing && (
+        <Editor
+          item={editing}
+          count={waypoints.length}
+          onUpdate={update}
+          onDelete={remove}
+          onClose={() => setEditingId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Editor({
+  item,
+  count,
+  onUpdate,
+  onDelete,
+  onClose,
+}: {
+  item: MissionWaypoint;
+  count: number;
+  onUpdate: (id: string, changes: Partial<MissionWaypoint>) => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  const number = (key: keyof MissionWaypoint, value: string, min?: number) => {
+    const parsed = Number(value);
+    onUpdate(item.id, {
+      [key]: Number.isFinite(parsed) ? Math.max(min ?? -Infinity, parsed) : 0,
+    });
+  };
+  return (
+    <div className="mission-waypoint-modal-overlay" onClick={onClose}>
+      <div
+        className="mission-waypoint-modal"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mission-waypoint-modal-title">Waypoint details</div>
+        <label>
+          Item Type
+          <select
+            value={item.itemType}
+            onChange={(event) =>
+              onUpdate(item.id, {
+                itemType: event.target.value as MissionItemType,
+                commandIdOverride: null,
+              })
+            }
+          >
+            <option value="waypoint">Waypoint</option>
+            <option value="takeoff">Takeoff</option>
+            <option value="loiter_time">Loiter Time</option>
+            <option value="land">Land</option>
+            <option value="rtl">Return To Launch</option>
+            <option value="do_jump">Conditional Jump (DO_JUMP)</option>
+          </select>
+        </label>
+        <label>
+          MAV_CMD Override (optional)
+          <input
+            type="number"
+            value={item.commandIdOverride ?? ""}
+            placeholder={`${commandIdFor(item.itemType)}`}
+            onChange={(event) =>
+              onUpdate(item.id, {
+                commandIdOverride: event.target.value.trim()
+                  ? Number(event.target.value)
+                  : null,
+              })
+            }
+          />
+        </label>
+        <label>
+          Altitude (m)
+          <input
+            type="number"
+            value={item.altitude}
+            onChange={(event) => number("altitude", event.target.value)}
+          />
+        </label>
+        {item.itemType === "do_jump" ? (
+          <>
+            <label>
+              Jump Target Waypoint #
+              <input
+                type="number"
+                min={1}
+                max={Math.max(1, count)}
+                value={item.jumpTargetIndex}
+                onChange={(event) =>
+                  number("jumpTargetIndex", event.target.value, 1)
+                }
+              />
+            </label>
+            <label>
+              Jump Repeat Count
+              <input
+                type="number"
+                min={1}
+                value={item.jumpRepeatCount}
+                onChange={(event) =>
+                  number("jumpRepeatCount", event.target.value, 1)
+                }
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label>
+              Hold Time (s)
+              <input
+                type="number"
+                min={0}
+                value={item.holdTimeS}
+                onChange={(event) => number("holdTimeS", event.target.value, 0)}
+              />
+            </label>
+            <label>
+              Acceptance Radius (m)
+              <input
+                type="number"
+                min={1}
+                value={item.acceptanceRadiusM}
+                onChange={(event) =>
+                  number("acceptanceRadiusM", event.target.value, 1)
+                }
+              />
+            </label>
+          </>
+        )}
+        <label>
+          Param3
+          <input
+            type="number"
+            value={item.param3}
+            onChange={(event) => number("param3", event.target.value)}
+          />
+        </label>
+        <label>
+          Yaw (deg, optional)
+          <input
+            type="number"
+            value={item.yawDeg ?? ""}
+            placeholder="leave blank"
+            onChange={(event) =>
+              onUpdate(item.id, {
+                yawDeg: event.target.value.trim()
+                  ? Number(event.target.value)
+                  : null,
+              })
+            }
+          />
+        </label>
+        <div className="mission-waypoint-modal-actions">
+          <button
+            type="button"
+            className="danger"
+            onClick={() => onDelete(item.id)}
+          >
+            Delete Waypoint
+          </button>
+          <button type="button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
