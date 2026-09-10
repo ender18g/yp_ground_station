@@ -85,6 +85,10 @@ SAR_ALTITUDE_M = float(os.getenv("SAR_ALTITUDE_M", "30.0"))
 SAR_MOB_TRACK_SECONDS = float(os.getenv("SAR_MOB_TRACK_SECONDS", "120.0"))
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
+LAND_ON_BOAT_HOVER_CLEARANCE_M = float(os.getenv("LAND_ON_BOAT_HOVER_CLEARANCE_M", "0.5"))
+LAND_ON_BOAT_DESCENT_RATE_MS = float(os.getenv("LAND_ON_BOAT_DESCENT_RATE_MS", "0.5"))
+LAND_ON_BOAT_PAD_OFFSET_M = float(os.getenv("LAND_ON_BOAT_PAD_OFFSET_M", "5.0"))
+LAND_ON_BOAT_ALIGNMENT_RADIUS_M = float(os.getenv("LAND_ON_BOAT_ALIGNMENT_RADIUS_M", "1.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
@@ -134,8 +138,9 @@ shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 # SITL MAVLink bridge state
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
 sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
-_rtb_follow_tasks: dict[str, asyncio.Task[None]] = {}
-_sitl_follow_guided_requests: dict[str, float] = {}
+_rtb_follow_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running return to boat (RTB) and follow boat task
+_land_on_boat_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running land on boat task
+_sitl_follow_guided_requests: dict[str, float] = {} # vehicle_id -> timestamp of last follow-guided request (to avoid spamming the vehicle with repeated requests)
 
 # MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
 _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
@@ -1317,6 +1322,17 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             return
         _sar_missions.set_mode(master, str(mode), wait_for_ack=False)
 
+    elif cmd_type == "disarm":
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            0,
+            21196,
+            0, 0, 0, 0, 0,
+        )
+
     elif cmd_type == "rtcm_data":
         flags = command.get("flags", 0)
         data_len = command.get("len", 0)
@@ -2237,6 +2253,7 @@ def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
         "cancel_sar": "cancel_sar",
         "search_grid": "search_grid",
         "mob": "trigger_mob",
+        "land_on_boat": "send_rtb",
         "clear_sar_pattern": "cancel_sar",
         "mission_plan": "upload_mission",
         "trajectory": "send_waypoint",
@@ -2450,14 +2467,21 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         await _emit_command_ack(vehicle_id, command, source)
         return
 
-    # Any operator command except RTB should terminate active RTB-follow.
-    if source != "rtb_follow" and cmd_type != "rtb":
+    # Any operator command except RTB or Land should terminate active RTB-follow / Landing
+    if source not in ("rtb_follow", "land_on_boat") and cmd_type not in ("rtb", "land_on_boat"):
         await _stop_rtb_follow(vehicle_id)
+        await _stop_land_on_boat(vehicle_id)
 
     if cmd_type == "rtb":
         if vehicle_id in vehicles:
             await _update_deconfliction_state(vehicle_id, vehicles[vehicle_id], command)
         await _start_rtb_follow(vehicle_id, source)
+        await _emit_command_ack(vehicle_id, command, source)
+        return
+
+    # HANDLER FOR LAND COMMANDS
+    if cmd_type == "land_on_boat":
+        await _start_land_on_boat(vehicle_id, source)
         await _emit_command_ack(vehicle_id, command, source)
         return
 
@@ -2816,6 +2840,131 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
         if current_task is asyncio.current_task():
             _rtb_follow_tasks.pop(vehicle_id, None)
 
+async def _stop_land_on_boat(vehicle_id: str) -> None:
+    """Cancel and await a vehicle's running landing task, if any."""
+    task = _land_on_boat_tasks.pop(vehicle_id, None)
+    if not task:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[LAND] Stop task error for {vehicle_id}: {exc}")
+
+
+async def _start_land_on_boat(vehicle_id: str, source: str) -> None:
+    """Stop RTB or existing landing tasks and start the landing loop."""
+    await _stop_land_on_boat(vehicle_id)
+    await _stop_rtb_follow(vehicle_id)
+    task = asyncio.create_task(_land_on_boat_loop(vehicle_id), name=f"land-boat-{vehicle_id}")
+    _land_on_boat_tasks[vehicle_id] = task
+    print(f"[LAND] Started land-on-boat sequence for {vehicle_id} (source={source})")
+
+
+async def _land_on_boat_loop(vehicle_id: str) -> None:
+    """Track the moving pad, descend to a hover clearance, and hold there."""
+    STATE_APPROACH = 0
+    STATE_DESCENT = 1
+    STATE_HOVER = 2
+
+    current_state = STATE_APPROACH
+    target_alt_m: Optional[float] = None
+
+    try:
+        while True:
+            period_s = 0.05  # High-rate 20 Hz loop for smooth dynamic tracking
+            step_command: Optional[dict[str, Any]] = None
+
+            async with state_lock:
+                target_vehicle = vehicles.get(vehicle_id)
+                yp_vehicle = _select_yp_vehicle_locked()
+
+                if not target_vehicle or not target_vehicle.get("connected") or not yp_vehicle:
+                    print(f"[LAND] Vehicle or YP unavailable; cancelling land sequence for {vehicle_id}")
+                    return
+
+                target_pos = target_vehicle.get("position") or {}
+                yp_pos = yp_vehicle.get("position") or {}
+
+                if yp_pos.get("latitude") is None or target_pos.get("latitude") is None:
+                    target_alt_m = None
+                else:
+                    yp_heading = float(yp_vehicle.get("heading") or 0.0) % 360.0
+
+                    yp_history = yp_vehicle.get("history") or []
+                    yp_speed_mps = 0.0
+                    if len(yp_history) >= 2:
+                        p1, p2 = yp_history[-2], yp_history[-1]
+                        dt = float(p2.get("stamp") or 0) - float(p1.get("stamp") or 0)
+                        if dt > 0:
+                            yp_speed_mps = _haversine_m(
+                                p1["latitude"], p1["longitude"],
+                                p2["latitude"], p2["longitude"],
+                            ) / dt
+
+                    pad_lat, pad_lon = _destination_point(
+                        float(yp_pos["latitude"]),
+                        float(yp_pos["longitude"]),
+                        yp_heading + 180.0,
+                        LAND_ON_BOAT_PAD_OFFSET_M,
+                    )
+                    horiz_dist_m = _haversine_m(
+                        float(target_pos["latitude"]), float(target_pos["longitude"]),
+                        pad_lat, pad_lon,
+                    )
+                    pad_hover_alt_m = float(yp_pos.get("altitude") or 0.0) + LAND_ON_BOAT_HOVER_CLEARANCE_M
+                    vehicle_alt_m = float(target_pos.get("altitude") or 0.0)
+
+                    # Avoid an abrupt first altitude command; descend from the
+                    # current reported altitude toward the pad-relative target.
+                    if target_alt_m is None:
+                        target_alt_m = max(vehicle_alt_m, pad_hover_alt_m)
+
+                    sink_rate_ms = 0.0
+                    if current_state == STATE_APPROACH and horiz_dist_m <= LAND_ON_BOAT_ALIGNMENT_RADIUS_M:
+                        current_state = STATE_DESCENT
+                        print(f"[LAND] Aligned with pad; descending to {LAND_ON_BOAT_HOVER_CLEARANCE_M:.2f}m hover on {vehicle_id}")
+
+                    if current_state == STATE_DESCENT:
+                        target_alt_m = max(
+                            pad_hover_alt_m,
+                            target_alt_m - LAND_ON_BOAT_DESCENT_RATE_MS * period_s,
+                        )
+                        if target_alt_m <= pad_hover_alt_m:
+                            target_alt_m = pad_hover_alt_m
+                            current_state = STATE_HOVER
+                            print(f"[LAND] Hover clearance reached on {vehicle_id}; holding above pad")
+                        else:
+                            sink_rate_ms = LAND_ON_BOAT_DESCENT_RATE_MS
+
+                    if current_state == STATE_HOVER:
+                        target_alt_m = pad_hover_alt_m
+
+                    step_command = {
+                        "type": "land_on_boat_step",
+                        "target": {
+                            "latitude": pad_lat,
+                            "longitude": pad_lon,
+                            "altitude": target_alt_m,
+                        },
+                        "heading": yp_heading,
+                        "velocity_north_ms": yp_speed_mps * math.cos(math.radians(yp_heading)),
+                        "velocity_east_ms": yp_speed_mps * math.sin(math.radians(yp_heading)),
+                        "sink_rate_ms": sink_rate_ms,
+                    }
+
+            if step_command is not None:
+                await _dispatch_vehicle_command(vehicle_id, step_command, source="land_on_boat", emit_ack=False, write_log=False)
+            await asyncio.sleep(period_s)
+
+    except asyncio.CancelledError:
+        return
+    finally:
+        current_task = _land_on_boat_tasks.get(vehicle_id)
+        if current_task is asyncio.current_task():
+            _land_on_boat_tasks.pop(vehicle_id, None)
 
 async def _deconfliction_check_loop() -> None:
     """Periodically check for vehicle conflicts and issue deconfliction commands."""

@@ -1,6 +1,7 @@
 import L from "leaflet";
 import {
   AlertTriangle,
+  Anchor,
   Battery,
   Brush,
   Cable,
@@ -1358,6 +1359,29 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               }));
             }
 
+            setSelected(null);
+          }}
+          onLandOnBoat={() => {
+            // 1. Cancel any active search missions
+            command(selected.vehicle_id, { type: "cancel_sar" });
+            // 2. Dispatch the land_on_boat command to main.py
+            command(selected.vehicle_id, { type: "land_on_boat" });
+
+            // 3. Lock the map crosshair overlay onto the YP boat
+            const ypLat = yp?.position?.latitude;
+            const ypLon = yp?.position?.longitude;
+
+            if (ypLat !== undefined && ypLon !== undefined) {
+              setWaypointMarkers((current) => ({
+                ...current,
+                [selected.vehicle_id]: {
+                  vehicle_id: selected.vehicle_id,
+                  latitude: ypLat,
+                  longitude: ypLon,
+                  trackingYP: true,
+                }
+              }));
+            }
             setSelected(null);
           }}
           onEndSar={() => {

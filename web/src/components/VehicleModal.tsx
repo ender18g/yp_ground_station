@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Brush, CircleDashed, Maximize2, RotateCcw, Route, Video, X } from "lucide-react";
+import { Anchor, Brush, CircleDashed, Maximize2, RotateCcw, Route, Video, X } from "lucide-react";
 
 import type { Vehicle, VehicleType } from "../types";
 import { calculateRelativePosition } from "../utils/geo";
@@ -11,6 +11,7 @@ type VehicleModalProps = {
   sarMissionActive?: boolean;
   canCommand?: boolean;
   onClose: () => void;
+  onLandOnBoat: () => void;
   onRtb: () => void;
   onEndSar: () => void;
   onWaypoint: () => void;
@@ -49,6 +50,7 @@ export function VehicleModal({
   sarMissionActive = false,
   canCommand = true,
   onClose,
+  onLandOnBoat,
   onRtb,
   onEndSar,
   onWaypoint,
@@ -110,6 +112,7 @@ export function VehicleModal({
       <div className={styles.modalActions} style={{ marginTop: "15px" }}>
         {canCommand && <button className={styles.secondary} onClick={onEndSar} disabled={!sarMissionActive} title={sarMissionActive ? "Stop active SAR mission" : "No active SAR mission"}><CircleDashed size={18} />End SAR Mission</button>}
         {canCommand && <button className={styles.danger} onClick={onRtb}><RotateCcw size={18} />RTB</button>}
+        {canCommand && <button className={styles.danger} onClick={onLandOnBoat}><Anchor size={18} />Land on Boat</button>}
         <button className={styles.secondary} onClick={() => setShowColorPalette((value) => !value)}><Brush size={18} />Color</button>
         {canCommand && VEHICLE_MODES[vehicle.vehicle_type]?.length > 0 && <button className={styles.secondary} onClick={() => setShowModeSelector((value) => !value)}>Settings{showModeSelector && <X size={14} aria-label="Close mode selector" />}</button>}
         {canStreamVideo && <button className={styles.stream} onClick={onStreamVideo}><Video size={18} />Stream Video</button>}
