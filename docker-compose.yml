@@ -49,10 +49,13 @@ services:
     depends_on:
       - influxdb
     # To connect an RFD-900 (or any serial telemetry radio) via the browser UI,
+    # or an RTK base station (e.g. u-blox / Here+) for RTCM correction streaming,
     # pass the USB device through to the server container. Adjust the device path
-    # to match what appears on your host (check with: python -m serial.tools.list_ports)
-    # devices:
-    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    # to match what appears on your host (check with: python -m serial.tools.list_ports
+    # or ls -l /dev/serial/by-id).
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    # - /dev/ttyUSB0:/dev/ttyUSB0
 
   web:
     build:
