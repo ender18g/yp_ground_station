@@ -14,7 +14,7 @@ function ShipModel({ modelUrl }: { modelUrl: string }) {
   return <primitive object={scene} scale={0.01} rotation={[-Math.PI / 2, 0, 0]} position={[0, -2, 5]} />;
 }
 
-useGLTF.preload("/logos/YP_CAD.glb");
+const SHIP_MODEL_URL = `${import.meta.env.BASE_URL}logos/YP_CAD.glb`;
 
 export function WaypointScene({ waypoints, selectedId }: { waypoints: SceneWaypoint[]; selectedId: string | null }) {
   const linePoints = waypoints.map((waypoint) => [-waypoint.x, waypoint.z, waypoint.y] as [number, number, number]);
@@ -23,7 +23,7 @@ export function WaypointScene({ waypoints, selectedId }: { waypoints: SceneWaypo
       <ambientLight intensity={0.5} />
       <directionalLight position={[10, 10, 5]} intensity={1.5} />
       <Suspense fallback={<mesh position={[0, 0, 0]}><boxGeometry args={[2, 2, 2]} /><meshStandardMaterial color="#f97316" wireframe /></mesh>}>
-        <ShipModel modelUrl="/logos/YP_CAD.glb" />
+        <ShipModel modelUrl={SHIP_MODEL_URL} />
       </Suspense>
       {waypoints.map((waypoint) => (
         <Sphere key={waypoint.id} position={[-waypoint.x, waypoint.z, waypoint.y]} args={[1.5, 16, 16]}>

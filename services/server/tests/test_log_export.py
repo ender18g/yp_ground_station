@@ -1,9 +1,10 @@
-import asyncio
 import gzip
 import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 from app import main
 
@@ -28,6 +29,16 @@ class FakeQueryApi:
 
 
 class FlightLogExportTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main.app)
+        self.addCleanup(self.client.close)
+
+    def export(self):
+        return self.client.get(
+            "/api/logs/export", params={"last_hours": 1},
+            headers={"Authorization": "Bearer token"},
+        )
+
     def test_range_requires_start_and_end(self):
         with self.assertRaisesRegex(ValueError, "start and end"):
             main._log_range(None, None, None)
@@ -37,19 +48,19 @@ class FlightLogExportTests(unittest.TestCase):
             main._log_range("2026-09-02T10:00:00Z", "2026-09-02T09:00:00Z", None)
 
     def test_export_requires_permission(self):
-        response = asyncio.run(main.export_log(last_hours=1, authorization=None))
+        response = self.client.get("/api/logs/export", params={"last_hours": 1})
         self.assertEqual(response.status_code, 401)
 
     def test_empty_export_returns_not_found(self):
-        with patch.object(main, "query_api", FakeQueryApi()):
-            response = asyncio.run(main.export_log(last_hours=1, authorization="Bearer token"))
+        with patch.object(main, "require_permission", return_value=None), patch.object(main, "query_api", FakeQueryApi()):
+            response = self.export()
         self.assertEqual(response.status_code, 404)
 
     def test_query_failure_returns_service_unavailable(self):
         with patch.object(main, "require_permission", return_value=None), patch.object(
             main, "query_api", FakeQueryApi(error=RuntimeError("offline"))
         ):
-            response = asyncio.run(main.export_log(last_hours=1, authorization="Bearer token"))
+            response = self.export()
         self.assertEqual(response.status_code, 503)
 
     def test_successful_export_has_metadata_and_message_records(self):
@@ -67,8 +78,8 @@ class FlightLogExportTests(unittest.TestCase):
         with patch.object(main, "require_permission", return_value=None), patch.object(
             main, "query_api", FakeQueryApi([record])
         ):
-            response = asyncio.run(main.export_log(last_hours=1, authorization="Bearer token"))
-            body = asyncio.run(collect_response(response))
+            response = self.export()
+            body = response.content
 
         lines = [json.loads(line) for line in gzip.decompress(body).decode().splitlines()]
         self.assertEqual(lines[0]["format"], "yp-ground-station-log")
@@ -85,8 +96,8 @@ class FlightLogExportTests(unittest.TestCase):
         with patch.object(main, "require_permission", return_value=None), patch.object(
             main, "query_api", FakeQueryApi(records)
         ):
-            response = asyncio.run(main.export_log(last_hours=1, authorization="Bearer token"))
-            body = asyncio.run(collect_response(response))
+            response = self.export()
+            body = response.content
 
         lines = [json.loads(line) for line in gzip.decompress(body).decode().splitlines()]
         self.assertEqual(len(lines), 2)
@@ -107,13 +118,6 @@ class FlightLogExportTests(unittest.TestCase):
                 }
             )
         self.assertTrue(main._influx_write_queue.empty())
-
-
-async def collect_response(response):
-    chunks = []
-    async for chunk in response.body_iterator:
-        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-    return b"".join(chunks)
 
 
 if __name__ == "__main__":

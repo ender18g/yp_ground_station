@@ -5,47 +5,39 @@ import {
   Battery,
   Brush,
   Cable,
-  CheckCircle2,
-  CircleDashed,
   Crosshair,
   EthernetPort,
   Grid3X3,
   Layers,
   Loader2,
-  LocateFixed,
-  Maximize2,
   MessageSquare,
-  Plus,
   Radio,
-  RotateCcw,
   Route,
   Save,
   Settings,
   Ship,
-  Trash2,
-  Video,
   Wifi,
   WifiOff,
-  X,
   Map as MapIcon,
   LogOut,
   Users,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Circle, CircleMarker, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, WMSTileLayer, useMap, useMapEvents } from "react-leaflet";
-import { createPortal } from "react-dom";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, getCurrentUser, listSITLBridges, listSerialPorts, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
-import type { CurrentUser, SITLBridge, SerialPortInfo } from "./api";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { CurrentUser, SITLBridge } from "./api";
 import type { Command, Position, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
-import { bearingDegrees, calculateRelativePosition, destinationPoint, haversineMeters, localToGlobalWaypoint } from "./utils/geo";
-import { formatHeading, formatKnots, kmhToKnots, metersPerSecondToKnots } from "./utils/formatters";
+import { destinationPoint } from "./utils/geo";
 import { useTelemetrySocket } from "./hooks/useTelemetrySocket";
 import { MessageDrawer, type StreamMessage } from "./components/MessageDrawer";
 import { SITLPanel } from "./components/SITLPanel";
 import { VehicleModal } from "./components/VehicleModal";
+import { VideoViewer } from "./components/VideoViewer";
+import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, WaypointCrosshair, YpRangeRings, type WaypointMarker } from "./components/map/VehicleLayers";
+import { vehicleMarkerColor } from "./utils/vehicleStyle";
 import { WeatherRadarLayer, WindLayer } from "./components/map/OverlayLayers";
 import { createDemoVehicles, demoVehicleSnapshot, handleDemoCommand, stepDemoVehicle, updateDemoVehicleColor, type DemoMessagePayload, type DemoVehicle } from "./services/demo";
 
@@ -62,70 +54,9 @@ const VIEW_MODE = !DEMO_MODE && (window.location.pathname.startsWith("/view") ||
 function isSimVehicle(vehicleId: string): boolean {
   return vehicleId.startsWith("sim-");
 }
-const YP_DEMO_SPEED_MPS = 5 * 0.514444;
-const YP_DEMO_HEADING = 330;
-const DEMO_KEEP_IN_RANGE_M = 200;
-const LOW_BATTERY_THRESHOLD = 0.25;
 const BRAND_LOGO_URL = `${import.meta.env.BASE_URL}logos/usna_crest_jhublue.png`;
-const WEATHER_RADAR_WMS_URL = "https://mapservices.weather.noaa.gov/eventdriven/services/radar/radar_base_reflectivity/MapServer/WMSServer";
-const WEATHER_RADAR_REFRESH_MS = 10 * 60 * 1000;
-const WEATHER_RADAR_OPACITY = 0.48;
-const TRANSPARENT_TILE_DATA_URL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
-const WIND_OVERLAY_REFRESH_MS = 15 * 60 * 1000;
-const WIND_OVERLAY_SOURCE = "Open-Meteo";
-const WIND_OVERLAY_ATTRIBUTION = `Wind &copy; ${WIND_OVERLAY_SOURCE}`;
-const WIND_SAMPLE_COLUMNS = 4;
-const WIND_SAMPLE_ROWS = 3;
-const WIND_FETCH_TIMEOUT_MS = 7000;
-
-/** Mode availability by vehicle type (ArduPilot-based vehicles and PX4) */
-const VEHICLE_MODES: Record<string, string[]> = {
-  uav: ["STABILIZE", "ACRO", "ALT_HOLD", "AUTO", "GUIDED", "LOITER", "RTL", "CIRCLE", "LAND", "DRIFT", "SPORT", "FLIP", "AUTOTUNE", "POSHOLD"],
-  usv: ["MANUAL", "GUIDED", "AUTO", "RTL", "LOITER", "CIRCLE"],
-  ugv: ["MANUAL", "GUIDED", "AUTO", "RTL", "LOITER", "CIRCLE"],
-  uavf: ["MANUAL", "ALTITUDE_CONTROL", "POSITION_CONTROL", "AUTO", "OFFBOARD", "EMERGENCY"],
-  uuv: ["MANUAL", "GUIDED", "AUTO", "RTL", "LOITER"],
-  yp: [],
-};
-
 type MapBase = "satellite" | "street";
 type MapSource = "auto" | "cache" | "online";
-
-interface WindSample {
-  id: string;
-  latitude: number;
-  longitude: number;
-  speedKmh: number;
-  directionDeg: number;
-}
-
-type ProjectedWindSample = WindSample & { x: number; y: number };
-
-interface WindState {
-  samples: WindSample[];
-  projectedSamples: ProjectedWindSample[];
-}
-
-interface YpReadout {
-  headingDeg?: number;
-  speedKts?: number;
-}
-
-interface MissionPlannerWaypoint {
-  id: string;
-  latitude: number;
-  longitude: number;
-  altitude: number;
-  itemType: "waypoint" | "takeoff" | "loiter_time" | "land" | "rtl" | "do_jump";
-  commandIdOverride: number | null;
-  param3: number;
-  jumpTargetIndex: number;
-  jumpRepeatCount: number;
-  holdTimeS: number;
-  acceptanceRadiusM: number;
-  yawDeg: number | null;
-}
 
 interface MapActionMenuState {
   lat: number;
@@ -134,45 +65,47 @@ interface MapActionMenuState {
   y: number;
 }
 
-type DemoVehicleWithStyle = Vehicle & { marker_color?: string };
-
-interface WaypointMarker {
-  vehicle_id: string;
-  latitude: number;
-  longitude: number;
-  trackingYP?: boolean;
-}
-
-const VEHICLE_COLOR_PALETTE = [
-  "#dc2626", "#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16",
-  "#16a34a", "#14b8a6", "#06b6d4", "#0ea5e9", "#2563eb", "#4f46e5",
-  "#7c3aed", "#c026d3", "#db2777", "#6b7280",
-];
+const DEMO_USER: CurrentUser = {
+  username: "demo",
+  active: true,
+  permissions: [],
+  created_at: null,
+  last_login: null,
+};
 
 export function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(DEMO_MODE ? DEMO_USER : undefined);
+  const [sessionVersion, setSessionVersion] = useState(0);
 
   useViewportLayoutSync();
 
   useEffect(() => {
-    void getCurrentUser().then((user) => setIsLoggedIn(Boolean(user)));
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    void getCurrentUser().then((user) => {
+      if (!cancelled) setCurrentUser(user);
+    });
+    return () => { cancelled = true; };
+  }, [sessionVersion]);
+
+  const onLogout = useCallback(() => {
+    logoutUser();
+    setCurrentUser(null);
   }, []);
 
-  if (isLoggedIn === null) {
+  if (currentUser === undefined) {
     return <div className="loading-state">Checking session...</div>;
   }
-  if (!isLoggedIn) {
-    return <Login onLogin={() => setIsLoggedIn(true)} />;
+  if (!currentUser) {
+    return <Login onLogin={() => { setCurrentUser(undefined); setSessionVersion((value) => value + 1); }} />;
   }
 
-  return <GroundStation onLogout={() => { logoutUser(); setIsLoggedIn(false); }} />;
+  return <GroundStation currentUser={currentUser} onLogout={onLogout} />;
 }
 
-function GroundStation({ onLogout }: { onLogout: () => void }) {
+function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: () => void }) {
   const isPhoneViewer = useIsPhoneViewer();
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [vehicles, setVehicles] = useState<Record<string, Vehicle>>({});
-  const [connected, setConnected] = useState(false);
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [trailSeconds, setTrailSeconds] = useState(45);
   const [showSettings, setShowSettings] = useState(false);
@@ -196,6 +129,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const [flightLogError, setFlightLogError] = useState<string | null>(null);
   const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
   const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
+  const [rtbAltitudeM, setRtbAltitudeM] = useState(30);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -327,9 +261,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       }
     },
   });
-  useEffect(() => {
-    setConnected(socketConnected);
-  }, [socketConnected]);
+  const connected = DEMO_MODE || socketConnected;
   const demoSimsRef = useRef<DemoVehicle[]>([]);
   const localVehicleColorsRef = useRef<Record<string, string>>({});
   const settingsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -344,21 +276,6 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const mapMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   
   const [activeTab, setActiveTab] = useState<"map" | "mission" | "planner">("map");
-
-  useEffect(() => {
-    let cancelled = false;
-    void getCurrentUser().then((user) => {
-      if (cancelled) return;
-      if (!user) {
-        onLogout();
-        return;
-      }
-      setCurrentUser(user);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [onLogout]);
 
   const updateSarMissionState = (vehicleId: string, commandType: string) => {
     setSarMissionActiveByVehicle((current) => {
@@ -405,7 +322,6 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       lastStep = now;
       const messages = demoSimsRef.current.flatMap((vehicle) => stepDemoVehicle(vehicle, dt, now, demoSimsRef.current));
       const demoVehicles = demoSimsRef.current.map(demoVehicleSnapshot);
-      setConnected(true);
       setVehicles(Object.fromEntries(demoVehicles.map((vehicle) => [vehicle.vehicle_id, vehicle])));
       setMessageLog((current) => [...messages.map(streamMessageFromPayload).reverse(), ...current].slice(0, MAX_MESSAGE_LOG));
     };
@@ -432,6 +348,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         }
         if (typeof serverSettings.rtb_stern_distance_m === "number") {
           setRtbSternDistanceM(serverSettings.rtb_stern_distance_m);
+        }
+        if (typeof serverSettings.rtb_altitude_m === "number") {
+          setRtbAltitudeM(serverSettings.rtb_altitude_m);
         }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         if (typeof serverSettings.mob_track_seconds === "number") {
@@ -481,6 +400,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
         message_retention_seconds: messageRetentionMinutes * 60,
         rtb_update_hz: rtbUpdateHz,
         rtb_stern_distance_m: rtbSternDistanceM,
+        rtb_altitude_m: rtbAltitudeM,
         mob_track_seconds: mobTrackSeconds,
         mob_swath_m: mobSwathM,
         mob_altitude_m: mobAltM,
@@ -495,7 +415,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -587,7 +507,6 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   const vehicleList = useMemo(() => Object.values(vehicles).filter((vehicle) => vehicle.position), [vehicles]);
   const yp = vehicleList.find((vehicle) => vehicle.vehicle_type === "yp");
   const ypGpsLinked = Boolean(yp?.connected);
-  const center: [number, number] = yp?.position ? [yp.position.latitude, yp.position.longitude] : USNA_CENTER;
   const filteredMessages = useMemo(() => filterMessages(messageLog, topicFilters), [messageLog, topicFilters]);
   const renderedMapSource = DEMO_MODE ? "online" : mapSource;
   const mapLayer = useMemo(() => tileLayerFor(mapBase, renderedMapSource), [mapBase, renderedMapSource]);
@@ -621,6 +540,10 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
   };
 
   const handleMobConfirm = async () => {
+    if (DEMO_MODE) {
+      setMobError("MOB dispatch requires the live ground station and vehicle connections.");
+      return;
+    }
     if (VIEW_MODE && !isSimVehicle(mobVehicleId)) {
       setMobError("View-only mode can dispatch only a simulated vehicle.");
       return;
@@ -687,9 +610,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       [vehicleId]: {
         ...current[vehicleId],
         marker_color: color,
-      } as DemoVehicleWithStyle,
+      },
     }));
-    setSelected((current) => (current?.vehicle_id === vehicleId ? ({ ...current, marker_color: color } as DemoVehicleWithStyle) : current));
+    setSelected((current) => (current?.vehicle_id === vehicleId ? ({ ...current, marker_color: color } ) : current));
   };
 
   const saveFlightLog = async () => {
@@ -738,7 +661,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               vehicleId={vehicleId}
               patternType={pattern.patternType}
               waypoints={pattern.waypoints}
-              color={(vehicles[vehicleId] as DemoVehicleWithStyle | undefined)?.marker_color ?? "#f97316"}
+              color={(vehicles[vehicleId] as Vehicle | undefined)?.marker_color ?? "#f97316"}
               onClear={() => command(vehicleId, { type: "clear_sar_pattern" })}
             />
           ))}
@@ -957,7 +880,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
             >
             <Crosshair size={19} />
           </button>
-          {!VIEW_MODE && (
+          {!VIEW_MODE && !DEMO_MODE && (
             <button
               ref={sitlButtonRef}
               className={showSITL ? "icon-button active" : "icon-button"}
@@ -987,9 +910,9 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               <Users size={19} />
             </button>
           )}
-          <button className="icon-button" title="Logout" onClick={onLogout}>
+          {!DEMO_MODE && <button className="icon-button" title="Logout" onClick={onLogout}>
             <LogOut size={19} />
-          </button>
+          </button>}
         </div>
         {flightLogError && <div className="flight-log-error" role="alert">{flightLogError}</div>}
       </div>
@@ -1245,6 +1168,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
               </p>
               <select
                 value={ypRoleVehicleId ?? ""}
+                disabled={DEMO_MODE}
                 onChange={(e) => {
                   const newId = e.target.value || null;
                   setYpRoleVehicleId(newId);
@@ -1278,6 +1202,11 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
                 <span>{rtbSternDistanceM} m</span>
               </label>
               <input min={5} max={200} step={5} type="range" value={rtbSternDistanceM} disabled={DEMO_MODE} onChange={(event) => setRtbSternDistanceM(Number(event.target.value))} />
+              <label>
+                RTB altitude
+                <span>{rtbAltitudeM} m</span>
+              </label>
+              <input min={5} max={150} step={5} type="range" value={rtbAltitudeM} disabled={DEMO_MODE} onChange={(event) => setRtbAltitudeM(Number(event.target.value))} />
             </>
           )}
           {settingsTab === "mob" && (
@@ -1405,7 +1334,7 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
       )}
 
       {streamVehicleId && (
-        <UsvVideoViewer
+        <VideoViewer
           vehicleId={streamVehicleId}
           // Prefer the dynamic streams array; otherwise turn the canonical
           // server-published playback_url into a single displayable stream.
@@ -1506,267 +1435,6 @@ function GroundStation({ onLogout }: { onLogout: () => void }) {
     </div>
   );
 }
-
-// ============================================================================
-// WAYPOINT PLANNER COMPONENTS
-// ============================================================================
-function downloadTextFile(filename: string, content: string, mimeType: string): void {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function qgcCommandIdForItemType(itemType: MissionPlannerWaypoint["itemType"]): number {
-  return {
-    waypoint: 16,
-    loiter_time: 19,
-    rtl: 20,
-    land: 21,
-    takeoff: 22,
-    do_jump: 177,
-  }[itemType];
-}
-
-function itemTypeForCommandId(commandId: number): MissionPlannerWaypoint["itemType"] {
-  if (commandId === 22) return "takeoff";
-  if (commandId === 19) return "loiter_time";
-  if (commandId === 21) return "land";
-  if (commandId === 20) return "rtl";
-  if (commandId === 177) return "do_jump";
-  return "waypoint";
-}
-
-function missionWaypointsToQgcPlan(
-  waypoints: MissionPlannerWaypoint[],
-  defaultAltitude: number,
-): Record<string, unknown> {
-  return {
-    fileType: "Plan",
-    geoFence: { polygons: [], circles: [], version: 2 },
-    rallyPoints: { points: [], version: 2 },
-    version: 1,
-    mission: {
-      cruiseSpeed: 10,
-      firmwareType: 12,
-      hoverSpeed: 5,
-      plannedHomePosition: [0, 0, 0],
-      vehicleType: 2,
-      version: 2,
-      items: waypoints.map((waypoint, index) => {
-        const commandId = waypoint.commandIdOverride ?? qgcCommandIdForItemType(waypoint.itemType);
-        const isDoJump = commandId === 177;
-        const p1 = isDoJump ? waypoint.jumpTargetIndex : waypoint.holdTimeS;
-        const p2 = isDoJump ? waypoint.jumpRepeatCount : waypoint.acceptanceRadiusM;
-        const p3 = waypoint.param3;
-        const p4 = waypoint.yawDeg ?? 0;
-        return {
-          AMSLAltAboveTerrain: null,
-          Altitude: waypoint.altitude,
-          AltitudeMode: 1,
-          autoContinue: true,
-          command: commandId,
-          doJumpId: index + 1,
-          frame: 3,
-          params: [p1, p2, p3, p4, waypoint.latitude, waypoint.longitude, waypoint.altitude],
-          type: "SimpleItem",
-        };
-      }),
-      defaultAltitude,
-    },
-  };
-}
-
-function missionWaypointsToWpl(waypoints: MissionPlannerWaypoint[]): string {
-  const lines = ["QGC WPL 110"];
-  lines.push([0, 1, 0, 16, 0, 0, 0, 0, 0, 0, 0, 1].join("\t"));
-  waypoints.forEach((waypoint, index) => {
-    const commandId = waypoint.commandIdOverride ?? qgcCommandIdForItemType(waypoint.itemType);
-    const isDoJump = commandId === 177;
-    const p1 = isDoJump ? waypoint.jumpTargetIndex : waypoint.holdTimeS;
-    const p2 = isDoJump ? waypoint.jumpRepeatCount : waypoint.acceptanceRadiusM;
-    lines.push(
-      [
-        index + 1,
-        index === 0 ? 1 : 0,
-        3,
-        commandId,
-        p1,
-        p2,
-        waypoint.param3,
-        waypoint.yawDeg ?? 0,
-        waypoint.latitude,
-        waypoint.longitude,
-        waypoint.altitude,
-        1,
-      ].join("\t"),
-    );
-  });
-  return lines.join("\n");
-}
-
-function parseQgcPlanWaypoints(raw: string): { waypoints: MissionPlannerWaypoint[]; defaultAltitude?: number } | null {
-  try {
-    const parsed = JSON.parse(raw) as { mission?: { items?: Array<{ command?: number; params?: number[] }>; defaultAltitude?: number } };
-    const items = parsed.mission?.items ?? [];
-    const waypoints = items
-      .map((item): MissionPlannerWaypoint | null => {
-        const params = Array.isArray(item.params) ? item.params : [];
-        const commandId = Number(item.command ?? 16);
-        const itemType = itemTypeForCommandId(commandId);
-        const lat = Number(params[4]);
-        const lon = Number(params[5]);
-        const alt = Number(params[6]);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-          return null;
-        }
-        return {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          latitude: lat,
-          longitude: lon,
-          altitude: Number.isFinite(alt) ? alt : 30,
-          itemType,
-          commandIdOverride: commandId,
-          param3: Number(params[2] ?? 0),
-          jumpTargetIndex: Number(params[0] ?? 1),
-          jumpRepeatCount: Number(params[1] ?? 1),
-          holdTimeS: Number(params[0] ?? 0),
-          acceptanceRadiusM: Number(params[1] ?? 8),
-          yawDeg: Number.isFinite(Number(params[3])) ? Number(params[3]) : null,
-        };
-      })
-      .filter((waypoint): waypoint is MissionPlannerWaypoint => waypoint !== null);
-    return { waypoints, defaultAltitude: parsed.mission?.defaultAltitude };
-  } catch {
-    return null;
-  }
-}
-
-function parseWplWaypoints(raw: string): MissionPlannerWaypoint[] {
-  const lines = raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
-  if (lines.length === 0 || !lines[0].toUpperCase().startsWith("QGC WPL")) {
-    return [];
-  }
-  const waypoints: MissionPlannerWaypoint[] = [];
-  for (const line of lines.slice(1)) {
-    const parts = line.split(/\s+/);
-    if (parts.length < 12) {
-      continue;
-    }
-    const seq = Number(parts[0]);
-    if (!Number.isFinite(seq) || seq === 0) {
-      continue;
-    }
-    const commandId = Number(parts[3]);
-    const p1 = Number(parts[4]);
-    const p2 = Number(parts[5]);
-    const p3 = Number(parts[6]);
-    const p4 = Number(parts[7]);
-    const lat = Number(parts[8]);
-    const lon = Number(parts[9]);
-    const alt = Number(parts[10]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      continue;
-    }
-    waypoints.push({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      latitude: lat,
-      longitude: lon,
-      altitude: Number.isFinite(alt) ? alt : 30,
-      itemType: itemTypeForCommandId(commandId),
-      commandIdOverride: Number.isFinite(commandId) ? commandId : null,
-      param3: Number.isFinite(p3) ? p3 : 0,
-      jumpTargetIndex: Number.isFinite(p1) ? p1 : 1,
-      jumpRepeatCount: Number.isFinite(p2) ? p2 : 1,
-      holdTimeS: Number.isFinite(p1) ? p1 : 0,
-      acceptanceRadiusM: Number.isFinite(p2) ? p2 : 8,
-      yawDeg: Number.isFinite(p4) ? p4 : null,
-    });
-  }
-  return waypoints;
-}
-
-function MissionWaypointMarker({
-  waypoint,
-  index,
-  isSelected,
-  onSetEditing,
-  onUpdate,
-  markerDragRef,
-}: {
-  waypoint: MissionPlannerWaypoint;
-  index: number;
-  isSelected: boolean;
-  onSetEditing: (id: string) => void;
-  onUpdate: (id: string, updates: Partial<MissionPlannerWaypoint>) => void;
-  markerDragRef: { current: boolean };
-}) {
-  const icon = useMemo(() => missionWaypointIcon(index + 1, isSelected), [index, isSelected]);
-  const position = useMemo<[number, number]>(() => [waypoint.latitude, waypoint.longitude], [waypoint.latitude, waypoint.longitude]);
-
-  return (
-    <Marker
-      position={position}
-      icon={icon}
-      draggable
-      zIndexOffset={7000 + index}
-      eventHandlers={{
-        click: (event) => {
-          L.DomEvent.stopPropagation(event.originalEvent);
-          onSetEditing(waypoint.id);
-        },
-        dragstart: () => {
-          markerDragRef.current = true;
-        },
-        dragend: (event) => {
-          markerDragRef.current = false;
-          const pos = event.target.getLatLng();
-          onUpdate(waypoint.id, { latitude: pos.lat, longitude: pos.lng });
-        },
-      }}
-    />
-  );
-}
-
-function MissionPlannerClickCapture({
-  onAdd,
-  suppressAddRef,
-}: {
-  onAdd: (lat: number, lon: number) => void;
-  suppressAddRef: { current: boolean };
-}) {
-  useMapEvents({
-    click(event) {
-      if (suppressAddRef.current) {
-        suppressAddRef.current = false;
-        return;
-      }
-      onAdd(event.latlng.lat, event.latlng.lng);
-    },
-  });
-  return null;
-}
-
-function missionWaypointIcon(index: number, selected: boolean): L.DivIcon {
-  return L.divIcon({
-    className: "",
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    html: `<div class="mission-waypoint-dot${selected ? " selected" : ""}">${index}</div>`,
-  });
-}
-
-// ============================================================================
-// OLD APP LOGIC FUNCTIONS
-// ============================================================================
 
 function streamMessageFromPayload(payload: DemoMessagePayload | {
   vehicle_id?: string;
@@ -1887,76 +1555,6 @@ function tileLayerFor(base: MapBase, source: MapSource): { url: string; attribut
   }[source];
 }
 
-function ReadoutRow({ label, heading, speed }: { label: string; heading: string; speed: string }) {
-  return <span className="readout-row"><span className="readout-label">{label}:</span><span className="readout-heading">{heading}</span><span className="readout-at">@</span><span className="readout-speed">{speed} kts</span></span>;
-}
-
-function windSamplePoints(map: L.Map): Array<{ latitude: number; longitude: number }> {
-  const size = map.getSize();
-  const points: Array<{ latitude: number; longitude: number }> = [];
-  for (let row = 0; row < WIND_SAMPLE_ROWS; row += 1) {
-    for (let column = 0; column < WIND_SAMPLE_COLUMNS; column += 1) {
-      const latLng = map.containerPointToLatLng([(column + 0.5) / WIND_SAMPLE_COLUMNS * size.x, (row + 0.5) / WIND_SAMPLE_ROWS * size.y]);
-      points.push({ latitude: latLng.lat, longitude: latLng.lng });
-    }
-  }
-  return points;
-}
-
-function projectWindSamples(map: L.Map, samples: WindSample[]): ProjectedWindSample[] {
-  return samples.map((sample) => {
-    const point = map.latLngToContainerPoint([sample.latitude, sample.longitude]);
-    return { ...sample, x: point.x, y: point.y };
-  });
-}
-
-async function fetchWindSamples(points: Array<{ latitude: number; longitude: number }>, signal: AbortSignal): Promise<WindSample[]> {
-  const results = await Promise.allSettled(points.map((point, index) => fetchWindSample(point.latitude, point.longitude, index, signal)));
-  return results.flatMap((result) => (result.status === "fulfilled" && result.value ? [result.value] : []));
-}
-
-async function fetchWindSample(latitude: number, longitude: number, index: number, signal: AbortSignal): Promise<WindSample | null> {
-  const timeoutController = new AbortController();
-  const timeout = window.setTimeout(() => timeoutController.abort(), WIND_FETCH_TIMEOUT_MS);
-  const abortListener = () => timeoutController.abort();
-  signal.addEventListener("abort", abortListener, { once: true });
-  try {
-    const params = new URLSearchParams({ latitude: latitude.toFixed(4), longitude: longitude.toFixed(4), current: "wind_speed_10m,wind_direction_10m", wind_speed_unit: "kmh", timezone: "UTC" });
-    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, { signal: timeoutController.signal });
-    if (!response.ok) return null;
-    const payload = (await response.json()) as { current?: { wind_speed_10m?: number; wind_direction_10m?: number } };
-    const speedKmh = Number(payload.current?.wind_speed_10m);
-    const directionDeg = Number(payload.current?.wind_direction_10m);
-    if (!Number.isFinite(speedKmh) || !Number.isFinite(directionDeg)) return null;
-    return { id: `${index}-${latitude.toFixed(3)}-${longitude.toFixed(3)}`, latitude, longitude, speedKmh, directionDeg };
-  } catch {
-    return null;
-  } finally {
-    window.clearTimeout(timeout);
-    signal.removeEventListener("abort", abortListener);
-  }
-}
-
-function windArrowTipY(speedKmh: number): number { return -Math.min(30, Math.max(14, 11 + speedKmh * 0.55)); }
-function windFlowDirection(directionDeg: number): number { return (directionDeg + 180) % 360; }
-function representativeWindSample(samples: WindSample[]): WindSample { return samples[Math.floor(samples.length / 2)] ?? samples[0]; }
-function readoutForYp(yp?: Vehicle): YpReadout | null {
-  if (!yp) return null;
-  const headingDeg = Number.isFinite(yp.heading) ? yp.heading : undefined;
-  const speedKts = speedKnotsFromHistory(yp.history);
-  if (headingDeg == null && speedKts == null) return null;
-  return { headingDeg, speedKts };
-}
-function speedKnotsFromHistory(history?: Vehicle["history"]): number | undefined {
-  if (!history || history.length < 2) return undefined;
-  const recent = [...history].reverse();
-  const latest = recent.find((point) => point.stamp != null);
-  const previous = latest ? recent.find((point) => point !== latest && point.stamp != null && latest.stamp! - point.stamp! > 0.1) : undefined;
-  if (!latest || !previous || latest.stamp == null || previous.stamp == null) return undefined;
-  const elapsedSeconds = latest.stamp - previous.stamp;
-  if (elapsedSeconds <= 0) return undefined;
-  return metersPerSecondToKnots(haversineMeters(previous.latitude, previous.longitude, latest.latitude, latest.longitude) / elapsedSeconds);
-}
 function useIsPhoneViewer(): boolean {
   const query = "(pointer: coarse)";
   const getMatches = () => (typeof window === "undefined" ? false : isPhoneBrowser() && window.matchMedia(query).matches);
@@ -2233,58 +1831,6 @@ function MapActionMenu({
   );
 }
 
-export function VehicleLayer({
-  vehicle,
-  trailSeconds,
-  isPhoneViewer,
-  mapZoom,
-  onClick,
-}: {
-  vehicle: Vehicle;
-  trailSeconds: number;
-  isPhoneViewer: boolean;
-  mapZoom: number;
-  onClick: () => void;
-}) {
-  const position = vehicle.position!;
-  const cutoff = Date.now() / 1000 - trailSeconds;
-  const trail = (vehicle.history ?? [])
-    .filter((point) => !point.stamp || point.stamp >= cutoff)
-    .map((point) => [point.latitude, point.longitude] as [number, number]);
-  const color = vehicleMarkerColor(vehicle);
-
-  return (
-    <>
-      {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color, weight: 3, opacity: 0.75 }} />}
-      <Marker
-        position={[position.latitude, position.longitude]}
-        icon={vehicleIcon(vehicle, isPhoneViewer, mapZoom)}
-        zIndexOffset={vehicleZIndexOffset(vehicle.vehicle_type)}
-        eventHandlers={{
-          mousedown: (event) => {
-            L.DomEvent.stopPropagation(event.originalEvent);
-            onClick();
-          },
-          click: (event) => {
-            L.DomEvent.stopPropagation(event.originalEvent);
-            onClick();
-          },
-        }}
-      >
-        <Tooltip direction="top" offset={[0, -18]}>
-          <TelemetryTooltip vehicle={vehicle} />
-        </Tooltip>
-        <Popup>
-          <TelemetryTooltip vehicle={vehicle} />
-        </Popup>
-      </Marker>
-      {vehicle.vehicle_type === "yp" && (
-        <CircleMarker center={[position.latitude, position.longitude]} radius={18} pathOptions={{ color, weight: 2, fillOpacity: 0.05 }} interactive={false} />
-      )}
-    </>
-  );
-}
-
 function MapCommander({
   onMapAction,
 }: {
@@ -2317,484 +1863,12 @@ function MapPanTracker({ onManualPan, onPan }: { onManualPan: () => void; onPan:
   return null;
 }
 
-function MissionMapPanTracker({ onPan }: { onPan: (center: [number, number]) => void }) {
-  useMapEvents({
-    dragend: (event) => {
-      const center = event.target.getCenter();
-      onPan([center.lat, center.lng]);
-    },
-    zoomend: (event) => {
-      const center = event.target.getCenter();
-      onPan([center.lat, center.lng]);
-    },
-  });
-  return null;
-}
-
 function MapZoomTracker({ onZoom }: { onZoom: (zoom: number) => void }) {
   useMapEvents({
     zoomend: (event) => onZoom(event.target.getZoom()),
   });
   return null;
 }
-
-export function FollowYpCenter({ yp, enabled, onCenterChange }: { yp?: Vehicle; enabled: boolean; onCenterChange?: (center: [number, number]) => void }) {
-  const map = useMap();
-  const latitude = yp?.position?.latitude;
-  const longitude = yp?.position?.longitude;
-
-  useEffect(() => {
-    if (!enabled || latitude == null || longitude == null) {
-      return;
-    }
-    map.setView([latitude, longitude], map.getZoom(), { animate: false });
-    onCenterChange?.([latitude, longitude]);
-  }, [enabled, latitude, longitude, map, onCenterChange]);
-
-  return null;
-}
-
-export function FitAllControl({ vehicles }: { vehicles: Vehicle[] }) {
-  const map = useMap();
-
-  return (
-    <button
-      className="fit-control"
-      title="Fit all vehicles"
-      onClick={() => {
-        if (vehicles.length === 0) {
-          return;
-        }
-        const bounds = L.latLngBounds(vehicles.map((vehicle) => [vehicle.position!.latitude, vehicle.position!.longitude]));
-        map.fitBounds(bounds.pad(0.25), { maxZoom: 17 });
-      }}
-    >
-      <LocateFixed size={18} />
-    </button>
-  );
-}
-
-export function YpRangeRings({ yp }: { yp?: Vehicle }) {
-  const position = yp?.position;
-  if (!position) {
-    return null;
-  }
-
-  return (
-    <>
-      {[50, 100, 200].map((radius) => (
-        <Circle
-          key={radius}
-          center={[position.latitude, position.longitude]}
-          radius={radius}
-          pathOptions={{
-            color: "#38bdf8",
-            dashArray: radius === 200 ? "6 8" : undefined,
-            fillColor: "#38bdf8",
-            fillOpacity: 0.035,
-            opacity: 0.6,
-            weight: 1.5,
-          }}
-          interactive={false}
-        />
-      ))}
-    </>
-  );
-}
-
-export function SarPatternOverlay({
-  vehicleId,
-  patternType,
-  waypoints,
-  color,
-  onClear,
-}: {
-  vehicleId: string;
-  patternType: string;
-  waypoints: [number, number][];
-  color: string;
-  onClear: () => void;
-}) {
-  if (waypoints.length < 2) return null;
-  const label = patternType === "mob" ? "MOB Search" : "Grid Search";
-  return (
-    <>
-      <Polyline
-        positions={waypoints}
-        pathOptions={{ color, weight: 2, opacity: 0.85, dashArray: "6 4" }}
-      />
-      <CircleMarker
-        center={waypoints[0]}
-        radius={6}
-        pathOptions={{ color, fillColor: color, fillOpacity: 1, weight: 1.5 }}
-      >
-        <Tooltip permanent direction="top" offset={[0, -8]} className="sar-label-tooltip">
-          {label} - {vehicleId}
-        </Tooltip>
-        <Popup className="sar-clear-popup">
-          <div className="sar-clear-popup-inner">
-            <span>{label}</span>
-            <span className="sar-clear-popup-vehicle">{vehicleId}</span>
-            <button className="sar-clear-btn" onClick={onClear}>Clear pattern</button>
-          </div>
-        </Popup>
-      </CircleMarker>
-      <CircleMarker
-        center={waypoints[waypoints.length - 1]}
-        radius={4}
-        pathOptions={{ color, fillColor: "#fff", fillOpacity: 1, weight: 2 }}
-      />
-    </>
-  );
-}
-
-export function WaypointCrosshair({
-  waypoint,
-  vehicle,
-  yp,
-  onClick,
-  onDragStart,
-  onDragEnd,
-  onMove,
-}: {
-  waypoint: WaypointMarker;
-  vehicle?: Vehicle;
-  yp?: Vehicle;
-  onClick: () => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onMove: (lat: number, lon: number) => void;
-}) {
-  const color = vehicle ? vehicleMarkerColor(vehicle) : "#0f172a";
-  
-  // Safely fallback to the static waypoint coordinate if the YP or its position is missing
-  const lat = waypoint.trackingYP ? (yp?.position?.latitude ?? waypoint.latitude) : waypoint.latitude;
-  const lon = waypoint.trackingYP ? (yp?.position?.longitude ?? waypoint.longitude) : waypoint.longitude;
-  
-  const position = useMemo<[number, number]>(() => [lat, lon], [lat, lon]);
-  const icon = useMemo(() => waypointIcon(color), [color]);
-  
-  return (
-    <Marker
-      position={position}
-      icon={icon}
-      zIndexOffset={6000}
-      draggable
-      eventHandlers={{
-        click: (event) => {
-          L.DomEvent.stopPropagation(event.originalEvent);
-          onClick();
-        },
-        dragstart: onDragStart,
-        dragend: (event) => {
-          const newPos = event.target.getLatLng();
-          onMove(newPos.lat, newPos.lng);
-          onDragEnd();
-        },
-      }}
-    />
-  );
-}
-
-function waypointIcon(color: string) {
-  return L.divIcon({
-    className: "",
-    iconSize: [44, 44],
-    iconAnchor: [22, 22],
-    html: `
-      <div class="waypoint-crosshair" style="--waypoint-color: ${color}">
-        <svg viewBox="0 0 34 34" aria-hidden="true">
-          <circle cx="17" cy="17" r="7" />
-          <path d="M17 2 V11 M17 23 V32 M2 17 H11 M23 17 H32" />
-        </svg>
-      </div>
-    `,
-  });
-}
-
-/*
-  const base = { latitude: 38.984764, longitude: -76.478643 };
-  const vehicles = [
-    createDemoVehicle("yp", "yp", base.latitude, base.longitude, 2, YP_DEMO_HEADING, YP_DEMO_SPEED_MPS, 0.000002),
-    createDemoVehicle("demo-uav-1", "uav", base.latitude + 0.00072, base.longitude - 0.00058, 48, 122, 9, 0.0018, 0.82),
-    createDemoVehicle("demo-uav-2", "uav", base.latitude + 0.00042, base.longitude + 0.00075, 42, 210, 8, 0.0032, 0.32),
-    createDemoVehicle("demo-usv-1", "usv", base.latitude - 0.00048, base.longitude + 0.00046, 0, 40, 2.8, 0.0011, 0.76),
-    createDemoVehicle("demo-usv-2", "usv", base.latitude - 0.00078, base.longitude - 0.00008, 0, 275, 2.5, 0.0024, 0.44),
-    createDemoVehicle("demo-uuv-1", "uuv", base.latitude - 0.00064, base.longitude - 0.00042, -8, 255, 1.3, 0.0015, 0.68),
-  ];
-  const typeCounts: Partial<Record<VehicleType, number>> = {};
-  for (const vehicle of vehicles) {
-    const typeIndex = typeCounts[vehicle.vehicle_type] ?? 0;
-    vehicle.marker_color = assignedVehicleColor(vehicle.vehicle_type, typeIndex);
-    typeCounts[vehicle.vehicle_type] = typeIndex + 1;
-  }
-  seedForwardDemoWaypoints(vehicles);
-  return vehicles;
-}
-
-function createDemoVehicle(
-  vehicle_id: string,
-  vehicle_type: VehicleType,
-  lat: number,
-  lon: number,
-  alt: number,
-  heading: number,
-  speed: number,
-  batteryDrainPerSecond: number,
-  battery = 0.86,
-): DemoVehicle {
-  return {
-    vehicle_id,
-    vehicle_type,
-
-  // Removed the createDemoVehicle function as it is no longer needed.
-
-    vehicle.heading = YP_DEMO_HEADING;
-    const next = destinationPoint(vehicle.lat, vehicle.lon, vehicle.heading, YP_DEMO_SPEED_MPS * dt);
-    vehicle.lat = next.latitude;
-    vehicle.lon = next.longitude;
-    vehicle.localX += Math.sin((vehicle.heading * Math.PI) / 180) * YP_DEMO_SPEED_MPS * dt;
-    vehicle.localY += Math.cos((vehicle.heading * Math.PI) / 180) * YP_DEMO_SPEED_MPS * dt;
-    vehicle.history = [...(vehicle.history ?? []), { stamp, latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt }].slice(-500);
-    return recordDemoMessages(vehicle, stamp);
-  }
-
-  const yp = vehicles.find((candidate) => candidate.vehicle_type === "yp");
-  if (vehicle.mode === "rtb" && yp) {
-    vehicle.target = sternTargetForYp(yp, vehicle);
-  } else if (!vehicle.manualWaypoint && yp) {
-    const rangeFromYp = haversineMeters(vehicle.lat, vehicle.lon, yp.lat, yp.lon);
-    const targetRange = haversineMeters(vehicle.target.latitude, vehicle.target.longitude, yp.lat, yp.lon);
-    if (rangeFromYp > DEMO_KEEP_IN_RANGE_M || targetRange > DEMO_KEEP_IN_RANGE_M) {
-      vehicle.target = randomDemoTargetNearYp(yp, vehicle);
-    }
-  }
-
-  const distance = haversineMeters(vehicle.lat, vehicle.lon, vehicle.target.latitude, vehicle.target.longitude);
-  if (distance < Math.max(3, vehicle.speed * dt * 2)) {
-    if (vehicle.mode === "rtb") {
-      vehicle.target = yp ? sternTargetForYp(yp, vehicle) : vehicle.target;
-    } else if (vehicle.mode === "mission_plan") {
-      if (vehicle.missionWaypoints.length > 0) {
-        const nextWaypoint = vehicle.missionWaypoints.shift();
-        if (nextWaypoint) {
-          vehicle.target = nextWaypoint;
-        }
-      } else {
-        vehicle.mode = "hold";
-      }
-    } else if (vehicle.manualWaypoint) {
-      vehicle.mode = "hold";
-    } else {
-      vehicle.target = yp ? randomDemoTargetNearYp(yp, vehicle) : randomDemoTarget(vehicle.lat, vehicle.lon, vehicle.alt);
-    }
-  } else {
-    const bearing = bearingDegrees(vehicle.lat, vehicle.lon, vehicle.target.latitude, vehicle.target.longitude);
-    vehicle.heading = smoothDegrees(vehicle.heading, bearing, Math.min(1, dt * 1.6));
-    const travel = Math.min(distance, vehicle.speed * dt);
-    const next = destinationPoint(vehicle.lat, vehicle.lon, vehicle.heading, travel);
-    vehicle.lat = next.latitude;
-    vehicle.lon = next.longitude;
-    vehicle.alt += Math.max(-1, Math.min(1, vehicle.target.altitude - vehicle.alt)) * Math.min(1, dt);
-    if (vehicle.vehicle_type === "usv") {
-      vehicle.alt = 0;
-    }
-    if (vehicle.vehicle_type === "uuv") {
-      vehicle.alt = Math.min(-1, vehicle.alt);
-    }
-    vehicle.localX += Math.sin((vehicle.heading * Math.PI) / 180) * travel;
-    vehicle.localY += Math.cos((vehicle.heading * Math.PI) / 180) * travel;
-  }
-  vehicle.battery = Math.max(0.05, vehicle.battery - dt * vehicle.batteryDrainPerSecond);
-  vehicle.history = [...(vehicle.history ?? []), { stamp, latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt }].slice(-500);
-  return recordDemoMessages(vehicle, stamp);
-}
-
-function recordDemoMessages(vehicle: DemoVehicle, stamp: number): Array<Parameters<typeof streamMessageFromPayload>[0]> {
-  const messages = demoMessages(vehicle, stamp);
-  for (const message of messages) {
-    vehicle.messages[message.topic ?? ""] = { type: message.type ?? "unknown", stamp, msg: message.msg ?? {} };
-  }
-  return messages;
-}
-
-function demoVehicleSnapshot(vehicle: DemoVehicle): Vehicle {
-  return {
-    vehicle_id: vehicle.vehicle_id,
-    vehicle_type: vehicle.vehicle_type,
-    connected: true,
-    last_seen: Date.now() / 1000,
-    last_seen_age: 0,
-    position: { latitude: vehicle.lat, longitude: vehicle.lon, altitude: vehicle.alt },
-    history: vehicle.history,
-    heading: vehicle.heading,
-    battery: { percentage: vehicle.battery, voltage: 22.2 * vehicle.battery, current: -4 },
-    messages: vehicle.messages,
-    marker_color: vehicle.marker_color,
-  } as DemoVehicleWithStyle;
-}
-
-function demoMessages(vehicle: DemoVehicle, stamp: number): Array<Parameters<typeof streamMessageFromPayload>[0]> {
-  const topic = (suffix: string) => `/vehicles/${vehicle.vehicle_id}/${suffix}`;
-  const quat = yawToQuaternion(vehicle.heading);
-  return [
-    wrapDemoMessage(vehicle, topic("heartbeat"), "yp_ground_station/msg/Heartbeat", stamp, { mode: vehicle.mode, armed: true }),
-    wrapDemoMessage(vehicle, topic("navsatfix"), "sensor_msgs/msg/NavSatFix", stamp, {
-      latitude: vehicle.lat,
-      longitude: vehicle.lon,
-      altitude: vehicle.alt,
-      heading: vehicle.heading,
-      status: { status: 0, service: 1 },
-    }),
-    wrapDemoMessage(vehicle, topic("pose"), "geometry_msgs/msg/Pose", stamp, {
-      position: { x: vehicle.localX, y: vehicle.localY, z: vehicle.alt },
-      orientation: quat,
-      heading: vehicle.heading,
-    }),
-    wrapDemoMessage(vehicle, topic("battery"), "sensor_msgs/msg/BatteryState", stamp, {
-      voltage: 22.2 * vehicle.battery,
-      current: -4,
-      percentage: vehicle.battery,
-      present: true,
-    }),
-    wrapDemoMessage(vehicle, topic("trajectory"), "trajectory_msgs/msg/MultiDOFJointTrajectory", stamp, {
-      points: [{ transforms: [{ translation: { x: vehicle.localX, y: vehicle.localY, z: vehicle.alt }, rotation: quat }] }],
-    }),
-  ];
-}
-
-function wrapDemoMessage(vehicle: DemoVehicle, topic: string, type: string, stamp: number, msg: Record<string, unknown>): Parameters<typeof streamMessageFromPayload>[0] {
-  return { vehicle_id: vehicle.vehicle_id, vehicle_type: vehicle.vehicle_type, topic, type, stamp, msg };
-}
-
-function handleDemoCommand(vehicles: DemoVehicle[], vehicleId: string, command: Command): void {
-  const vehicle = vehicles.find((candidate) => candidate.vehicle_id === vehicleId);
-  if (!vehicle) {
-    return;
-  }
-  const yp = vehicles.find((candidate) => candidate.vehicle_id === command.ship_vehicle_id)
-    ?? vehicles.find((candidate) => candidate.vehicle_type === "yp");
-  const ypPosition = yp ? { latitude: yp.lat, longitude: yp.lon, altitude: yp.alt } : null;
-  if (command.type === "rtb") {
-    vehicle.mode = "rtb";
-    vehicle.manualWaypoint = false;
-    vehicle.missionWaypoints = [];
-    vehicle.target = yp ? sternTargetForYp(yp, vehicle) : { latitude: 38.984764, longitude: -76.478643, altitude: vehicle.vehicle_type === "uuv" ? -4 : vehicle.vehicle_type === "uav" ? 45 : 0 };
-  }
-  if (command.type === "waypoint" && command.target) {
-    vehicle.mode = "waypoint";
-    vehicle.manualWaypoint = true;
-    vehicle.missionWaypoints = [];
-    vehicle.target = command.target;
-  }
-  if (command.type === "mission_plan" && command.waypoints && command.waypoints.length > 0) {
-    const missionWaypoints = command.waypoints.map((waypoint) => ({
-      latitude: waypoint.latitude,
-      longitude: waypoint.longitude,
-      altitude: waypoint.altitude,
-    }));
-    const [firstWaypoint, ...remainingWaypoints] = missionWaypoints;
-    if (firstWaypoint) {
-      vehicle.mode = "mission_plan";
-      vehicle.manualWaypoint = true;
-      vehicle.target = firstWaypoint;
-      vehicle.missionWaypoints = remainingWaypoints;
-    }
-  }
-  if (command.type === "ship_relative_trajectory" && yp && ypPosition && command.local_waypoints?.length) {
-    const firstWaypoint = command.local_waypoints[0];
-    vehicle.mode = "waypoint";
-    vehicle.manualWaypoint = true;
-    vehicle.missionWaypoints = [];
-    vehicle.target = localToGlobalWaypoint(
-      ypPosition.latitude,
-      ypPosition.longitude,
-      yp.heading,
-      ypPosition.altitude,
-      firstWaypoint.x,
-      firstWaypoint.y,
-      firstWaypoint.z,
-    );
-  }
-}
-
-function updateDemoVehicleColor(vehicles: DemoVehicle[], vehicleId: string, color: string): void {
-  const vehicle = vehicles.find((candidate) => candidate.vehicle_id === vehicleId);
-  if (vehicle) {
-    vehicle.marker_color = color;
-  }
-}
-
-function seedForwardDemoWaypoints(vehicles: DemoVehicle[]): void {
-  const yp = vehicles.find((vehicle) => vehicle.vehicle_type === "yp");
-  if (!yp) {
-    return;
-  }
-  const forwardOffsets = [
-    { distance: 120, lateral: -65 },
-    { distance: 175, lateral: 55 },
-  ];
-  const aftOffsets = [
-    { distance: 80, lateral: -45 },
-    { distance: 115, lateral: 45 },
-    { distance: 150, lateral: 0 },
-  ];
-  let forwardIndex = 0;
-  let aftIndex = 0;
-  vehicles
-    .filter((vehicle) => vehicle.vehicle_type !== "yp")
-    .forEach((vehicle) => {
-      const useForwardTarget = vehicle.vehicle_type === "uav";
-      const offset = useForwardTarget ? forwardOffsets[forwardIndex % forwardOffsets.length] : aftOffsets[aftIndex % aftOffsets.length];
-      if (useForwardTarget) {
-        forwardIndex += 1;
-      } else {
-        aftIndex += 1;
-      }
-      const axisBearing = useForwardTarget ? yp.heading : yp.heading + 180;
-      const axisPoint = destinationPoint(yp.lat, yp.lon, axisBearing, offset.distance);
-      const target = destinationPoint(axisPoint.latitude, axisPoint.longitude, yp.heading + 90, offset.lateral);
-      vehicle.target = {
-        latitude: target.latitude,
-        longitude: target.longitude,
-        altitude: vehicle.vehicle_type === "uuv" ? -7 : vehicle.vehicle_type === "uav" ? vehicle.alt : 0,
-      };
-      vehicle.mode = "waypoint";
-      vehicle.manualWaypoint = true;
-    });
-}
-
-function randomDemoTarget(lat: number, lon: number, alt: number): DemoVehicle["target"] {
-  return {
-    latitude: lat + (Math.random() - 0.5) * 0.002,
-    longitude: lon + (Math.random() - 0.5) * 0.002,
-    altitude: alt,
-  };
-}
-
-function randomDemoTargetNearYp(yp: DemoVehicle, vehicle: DemoVehicle): DemoVehicle["target"] {
-  const bearing = Math.random() * 360;
-  const distance = 50 + Math.random() * 130;
-  const target = destinationPoint(yp.lat, yp.lon, bearing, distance);
-  return {
-    latitude: target.latitude,
-    longitude: target.longitude,
-    altitude: vehicle.vehicle_type === "uuv" ? -6 - Math.random() * 8 : vehicle.vehicle_type === "uav" ? 35 + Math.random() * 25 : 0,
-  };
-}
-
-function sternTargetForYp(yp: DemoVehicle, vehicle: DemoVehicle): DemoVehicle["target"] {
-  const stern = destinationPoint(yp.lat, yp.lon, yp.heading + 180, 35);
-  const lateralOffset = vehicle.vehicle_type === "uav" ? 12 : vehicle.vehicle_type === "uuv" ? -12 : 0;
-  const target = lateralOffset === 0 ? stern : destinationPoint(stern.latitude, stern.longitude, yp.heading + 90, lateralOffset);
-  return {
-    latitude: target.latitude,
-    longitude: target.longitude,
-    altitude: vehicle.vehicle_type === "uuv" ? -5 : vehicle.vehicle_type === "uav" ? 35 : 0,
-  };
-}
-
-*/
 
 function waypointOffset(lat: number, lon: number, index: number, total: number): { latitude: number; longitude: number } {
   if (total <= 1) {
@@ -2805,332 +1879,7 @@ function waypointOffset(lat: number, lon: number, index: number, total: number):
   return destinationPoint(lat, lon, bearing, radius);
 }
 
-function smoothDegrees(current: number, target: number, ratio: number): number {
-  const delta = ((((target - current) % 360) + 540) % 360) - 180;
-  return (current + delta * ratio + 360) % 360;
-}
-
-function yawToQuaternion(yawDeg: number): Record<string, number> {
-  const half = (yawDeg * Math.PI) / 360;
-  return { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) };
-}
-
-function vehicleIcon(vehicle: Vehicle, isPhoneViewer: boolean, zoom: number) {
-  const type = vehicle.vehicle_type;
-  const heading = vehicle.heading ?? 0;
-  const altitude = vehicle.position?.altitude ?? 0;
-  const color = vehicleMarkerColor(vehicle);
-  const lowBattery = vehicle.vehicle_type !== "yp" && (vehicle.battery?.percentage ?? 1) <= LOW_BATTERY_THRESHOLD;
-  const hasVideo = Boolean(
-    vehicle.video?.enabled && 
-    ((Array.isArray(vehicle.video?.streams) && vehicle.video.streams.length > 0) ||
-      Boolean(vehicle.video?.playback_url))
-  );
-  
-  const baseSizes: Record<string, [number, number]> = {
-    yp:  [120, 60],
-    usv: [70, 35],
-    ugv: [70, 35],
-    uuv: [60, 30],
-    uav: [50, 50],
-  };
-
-  const baseSize = baseSizes[type] ?? [60, 30];
-
-  const scale = Math.pow(2, Math.min(zoom, 17) - 17);
-  const phoneScale = isPhoneViewer ? 0.6 : 1;
-  
-  const finalWidth = Math.round(baseSize[0] * scale * phoneScale);
-  const finalHeight = Math.round(baseSize[1] * scale * phoneScale);
-  const iconSize: [number, number] = [finalWidth, finalHeight];
-
-  return L.divIcon({
-    className: "", 
-    iconSize,
-    iconAnchor: [Math.round(finalWidth / 2), Math.round(finalHeight / 2)], 
-    html: `
-      <div class="marker-wrap${isPhoneViewer ? " phone" : ""}" style="position: absolute; top: 0; left: 0; margin: 0; padding: 0; width: ${finalWidth}px; height: ${finalHeight}px;">
-        
-        <div class="vehicle-marker ${type}" title="${vehicle.vehicle_id}" style="position: absolute; top: 0; left: 0; margin: 0; padding: 0; width: 100%; height: 100%; --vehicle-color: ${color}; transform: rotate(${heading}deg); transform-origin: center center; display: flex; align-items: center; justify-content: center;">
-          ${vehicleGlyph(type)}
-        </div>
-        
-        <div class="alt-label" style="position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%); white-space: nowrap; margin: 0; padding: 0;">
-          ${altitude.toFixed(0)} m
-          ${
-            hasVideo
-              ? `<span class="video-stream-mark" title="Video stream available"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10.5v3L21 17V7z"/><rect x="3" y="6" width="12" height="12" rx="2"/></svg></span>`
-              : ""
-          }
-          ${
-            lowBattery
-              ? `<span class="low-battery-mark" title="Low battery"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h15v8H3z"/><path d="M20 10v4"/><path d="M6 11v2"/></svg></span>`
-              : ""
-          }
-        </div>
-      </div>
-    `,
-  });
-}
-
-function vehicleGlyph(type: VehicleType): string {
-  const baseUrl = import.meta.env.BASE_URL;
-  
-  const iconPaths: Record<string, string> = {
-    yp: `${baseUrl}logos/YP.png`,
-    uav: `${baseUrl}logos/MultiRotor.png`,
-    uavf: `${baseUrl}logos/fixedWing.png`,
-    usv: `${baseUrl}logos/USV_orange.png`,
-    ugv: `${baseUrl}logos/UGV.png`,
-    uuv: `${baseUrl}logos/UUV.png`,
-  };
-
-  const src = iconPaths[type] ?? iconPaths.uav;
-
-  return `<img src="${src}" alt="${type}" style="display: block; margin: 0; padding: 0; max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; pointer-events: none;" />`;
-}
-
-function vehicleColor(type: VehicleType): string {
-  return {
-    uav: "#dc2626",
-    uavf: "#b91c1c",
-    usv: "#16a34a",
-    ugv: "#b45309",
-    uuv: "#eab308",
-    yp: "#6b7280",
-  }[type];
-}
-
-function vehicleMarkerColor(vehicle: Vehicle): string {
-  return (vehicle as DemoVehicleWithStyle).marker_color ?? vehicleColor(vehicle.vehicle_type);
-}
-
 function withLocalVehicleColor(vehicle: Vehicle, localColors: Record<string, string>): Vehicle {
   const color = localColors[vehicle.vehicle_id];
-  return color ? ({ ...vehicle, marker_color: color } as DemoVehicleWithStyle) : vehicle;
-}
-
-function vehicleZIndexOffset(type: VehicleType): number {
-  return {
-    uav: 1500,
-    uavf: 1500,
-    yp: 4000,
-    usv: 2000,
-    ugv: 1800,
-    uuv: 1000,
-  }[type];
-}
-
-function assignedVehicleColor(type: VehicleType, typeIndex: number): string {
-  return lightenHex(vehicleColor(type), Math.min(typeIndex * 0.18, 0.5));
-}
-
-function lightenHex(hex: string, amount: number): string {
-  const clean = hex.replace("#", "");
-  const red = parseInt(clean.slice(0, 2), 16);
-  const green = parseInt(clean.slice(2, 4), 16);
-  const blue = parseInt(clean.slice(4, 6), 16);
-  const mix = (value: number) => Math.round(value + (255 - value) * amount);
-  return `#${[mix(red), mix(green), mix(blue)].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
-}
-
-// ============================================================================
-// MISSING UI COMPONENTS (VehicleModal, UsvVideoViewer, Tooltips)
-// ============================================================================
-
-function UsvVideoViewer({
-  vehicleId,
-  streams,
-  onClose,
-}: {
-  vehicleId: string;
-  streams: { label: string; url: string }[];
-  onClose: () => void;
-}) {
-  const [frame, setFrame] = useState(() => ({
-    x: Math.max(16, window.innerWidth - 456),
-    y: 120,
-    width: Math.min(420, window.innerWidth - 32),
-    height: 320,
-  }));
-  
-  // Track which camera URL is currently selected. Defaults to the first camera in the array.
-  const [activeUrl, setActiveUrl] = useState<string>(streams[0]?.url || "");
-
-  const dragRef = useRef<{
-    mode: "move" | "resize";
-    pointerId: number;
-    startX: number;
-    startY: number;
-    frame: typeof frame;
-  } | null>(null);
-  
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  // The WebRTC logic watches 'activeUrl' so it automatically re-negotiates when the user switches cameras
-  useEffect(() => {
-    const node = videoRef.current;
-    if (!node || !activeUrl) return;
-
-    let pc: RTCPeerConnection | null = new RTCPeerConnection();
-    let isActive = true;
-    const controller = new AbortController();
-
-    const startWebRTC = async () => {
-      try {
-        pc!.addTransceiver('video', { direction: 'recvonly' });
-
-        pc!.ontrack = (event) => {
-          if (node.srcObject !== event.streams[0]) {
-            node.srcObject = event.streams[0];
-          }
-        };
-
-        const offer = await pc!.createOffer();
-        await pc!.setLocalDescription(offer);
-
-        const response = await fetch(activeUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/sdp' },
-          body: offer.sdp,
-          signal: controller.signal,
-        });
-
-        if (!response.ok) throw new Error(`WHEP stream failed: ${response.status}`);
-        
-        const answerSdp = await response.text();
-
-        if (isActive && pc) {
-          await pc!.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-        }
-      } catch (error) {
-        if (isActive && !(error instanceof DOMException && error.name === "AbortError")) {
-          console.error(`WebRTC Error on ${activeUrl}:`, error);
-        }
-      }
-    };
-
-    startWebRTC();
-
-    return () => {
-      isActive = false;
-      controller.abort();
-      if (pc) {
-        pc.close();
-        pc = null;
-      }
-      if (node) node.srcObject = null;
-    };
-  }, [activeUrl]);
-
-  const updateFrame = (next: typeof frame) => {
-    const maxWidth = Math.max(280, window.innerWidth - 24);
-    const maxHeight = Math.max(220, window.innerHeight - 24);
-    const width = Math.min(maxWidth, Math.max(280, next.width));
-    const height = Math.min(maxHeight, Math.max(220, next.height));
-    setFrame({
-      width, height,
-      x: Math.min(Math.max(12, next.x), Math.max(12, window.innerWidth - width - 12)),
-      y: Math.min(Math.max(12, next.y), Math.max(12, window.innerHeight - height - 12)),
-    });
-  };
-
-  const startDrag = (mode: "move" | "resize", event: ReactPointerEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { mode, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, frame };
-  };
-
-  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
-    if (drag.mode === "move") {
-      updateFrame({ ...drag.frame, x: drag.frame.x + dx, y: drag.frame.y + dy });
-      return;
-    }
-    updateFrame({ ...drag.frame, width: drag.frame.width + dx, height: drag.frame.height + dy });
-  };
-
-  const endDrag = (event: ReactPointerEvent<HTMLElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
-  };
-
-  return (
-    <section
-      className="video-viewer"
-      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
-      onMouseDown={(event) => event.stopPropagation()}
-    >
-      <header className="video-viewer-header" onPointerDown={(event) => startDrag("move", event)} onPointerMove={moveDrag} onPointerUp={endDrag}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <Video size={16} />
-          <strong>{vehicleId}</strong>
-          
-          {/* Render the dropdown if the vehicle provided more than 1 camera feed */}
-          {streams.length > 1 && (
-            <select 
-              value={activeUrl} 
-              onChange={(e) => setActiveUrl(e.target.value)}
-              onPointerDown={(e) => e.stopPropagation()} // Prevents dropdown click from dragging the window
-              style={{
-                background: '#1e293b', 
-                color: 'white', 
-                border: '1px solid #475569', 
-                borderRadius: '4px', 
-                padding: '2px 6px',
-                fontSize: '12px',
-                outline: 'none',
-                cursor: 'pointer'
-              }}
-            >
-              {streams.map((stream, index) => (
-                <option key={index} value={stream.url}>{stream.label}</option>
-              ))}
-            </select>
-          )}
-        </div>
-        <button className="icon-button" title="Close stream" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}>
-          <X size={17} />
-        </button>
-      </header>
-      <video ref={videoRef} className="video-viewer-media" autoPlay muted playsInline />
-      <button
-        className="video-resize-handle"
-        title="Resize stream"
-        onPointerDown={(event) => startDrag("resize", event)}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-      >
-        <Maximize2 size={15} />
-      </button>
-    </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function TelemetryTooltip({ vehicle }: { vehicle: Vehicle }) {
-  return (
-    <div className="tooltip-data">
-      <strong>{vehicle.vehicle_id}</strong>
-      <span>{vehicle.vehicle_type.toUpperCase()}</span>
-      <span>Alt {(vehicle.position?.altitude ?? 0).toFixed(1)} m</span>
-      <span>Hdg {(vehicle.heading ?? 0).toFixed(0)} deg</span>
-      {vehicle.battery?.percentage != null && (
-        <span className="battery-line">
-          <Battery size={13} /> {Math.round(vehicle.battery.percentage * 100)}%
-        </span>
-      )}
-    </div>
-  );
+  return color ? ({ ...vehicle, marker_color: color } ) : vehicle;
 }

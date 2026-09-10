@@ -7,6 +7,7 @@ export interface ServerSettings {
   tile_max_cache_age_seconds: number;
   rtb_update_hz?: number;
   rtb_stern_distance_m?: number;
+  rtb_altitude_m?: number;
   yp_role_vehicle_id?: string | null;
   trail_seconds?: number;
   show_yp_range_rings?: boolean;
@@ -26,6 +27,15 @@ export interface ServerSettings {
 
 function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   return fetch(input, { credentials: "include", ...init });
+}
+
+async function settingsRequest<T>(path: string, error: string, settings?: object): Promise<T> {
+  const response = await apiFetch(path, {
+    headers: getAuthHeaders(),
+    ...(settings === undefined ? {} : { method: "PUT", body: JSON.stringify(settings) }),
+  });
+  if (!response.ok) throw new Error(`${error}: ${response.status}`);
+  return response.json();
 }
 
 export function logout(): void {
@@ -84,13 +94,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
 
 export type PermissionLevel = "view_only" | "waypoint_command" | "mission_planning" | "man_overboard" | "admin";
 
-export interface ManagedUser {
-  username: string;
-  active: boolean;
-  permissions: string[];
-  created_at: string | null;
-  last_login: string | null;
-}
+export type ManagedUser = CurrentUser;
 
 async function authApiResponse(response: Response): Promise<void> {
   if (response.ok) {
@@ -153,26 +157,12 @@ export async function deleteUser(username: string): Promise<void> {
 
 // ===== Settings and configuration =====
 
-export async function fetchSettings(): Promise<ServerSettings> {
-  const response = await apiFetch("/api/settings", {
-    headers: getAuthHeaders(),
-  });
-  if (!response.ok) {
-    throw new Error(`settings fetch failed: ${response.status}`);
-  }
-  return response.json();
+export function fetchSettings(): Promise<ServerSettings> {
+  return settingsRequest("/api/settings", "settings fetch failed");
 }
 
-export async function updateSettings(settings: Partial<ServerSettings>): Promise<ServerSettings> {
-  const response = await apiFetch("/api/settings", {
-    method: "PUT",
-    headers: getAuthHeaders(),
-    body: JSON.stringify(settings),
-  });
-  if (!response.ok) {
-    throw new Error(`settings update failed: ${response.status}`);
-  }
-  return response.json();
+export function updateSettings(settings: Partial<ServerSettings>): Promise<ServerSettings> {
+  return settingsRequest("/api/settings", "settings update failed", settings);
 }
 
 export async function exportFlightLog(lastHours: number): Promise<Response> {
@@ -203,26 +193,12 @@ export interface DeconflictionSettings {
   max_pause_duration_s: number;
 }
 
-export async function fetchDeconflictionSettings(): Promise<DeconflictionSettings> {
-  const response = await apiFetch("/api/deconfliction/settings", {
-    headers: getAuthHeaders(),
-  });
-  if (!response.ok) {
-    throw new Error(`deconfliction settings fetch failed: ${response.status}`);
-  }
-  return response.json();
+export function fetchDeconflictionSettings(): Promise<DeconflictionSettings> {
+  return settingsRequest("/api/deconfliction/settings", "deconfliction settings fetch failed");
 }
 
-export async function updateDeconflictionSettings(settings: Partial<DeconflictionSettings>): Promise<DeconflictionSettings> {
-  const response = await apiFetch("/api/deconfliction/settings", {
-    method: "PUT",
-    headers: getAuthHeaders(),
-    body: JSON.stringify(settings),
-  });
-  if (!response.ok) {
-    throw new Error(`deconfliction settings update failed: ${response.status}`);
-  }
-  return response.json();
+export function updateDeconflictionSettings(settings: Partial<DeconflictionSettings>): Promise<DeconflictionSettings> {
+  return settingsRequest("/api/deconfliction/settings", "deconfliction settings update failed", settings);
 }
 
 export async function fetchDeconflictionConflicts(): Promise<{ enabled: boolean; conflicts: Array<{ low_priority_vehicle: string; high_priority_vehicle: string }> }> {

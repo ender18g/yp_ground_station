@@ -14,6 +14,12 @@ from pymavlink import mavutil
 import websockets
 
 import sar_missions
+from yp_common.geometry import (
+    destination_point as _destination_point,
+    relative_waypoint_to_global as _relative_waypoint_to_global,
+    distance_m as _distance_m,
+    north_east_delta_m as _north_east_delta_m,
+)
 
 CONFIG_PATH = Path("config.json")
 
@@ -78,7 +84,6 @@ _sar_latest_nav = {"lat": None, "lon": None, "alt": None, "heading": None, "stam
 SHIP_STATE_TIMEOUT_S = float(os.getenv("SHIP_STATE_TIMEOUT_S", "2.0"))
 SHIP_RELATIVE_DEFAULT_UPDATE_HZ = float(os.getenv("SHIP_RELATIVE_UPDATE_HZ", "10.0"))
 SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M = float(os.getenv("SHIP_RELATIVE_ARRIVAL_RADIUS_M", "6.0"))
-EARTH_RADIUS_M = 6_378_137.0
 
 _vehicle_state_lock = threading.Lock()
 _vehicle_state = {"lat": None, "lon": None, "alt": None, "heading_deg": None, "stamp": 0.0}
@@ -323,31 +328,6 @@ def _ui_ws_url(base_url: str) -> str:
         return f"{base.split(marker, 1)[0]}/ws/ui"
     return base
 
-def _destination_point(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
-    lat_rad = math.radians(lat)
-    lon_rad = math.radians(lon)
-    bearing_rad = math.radians(bearing_deg)
-    angular = distance_m / EARTH_RADIUS_M
-    lat2 = math.asin(math.sin(lat_rad) * math.cos(angular) + math.cos(lat_rad) * math.sin(angular) * math.cos(bearing_rad))
-    lon2 = lon_rad + math.atan2(math.sin(bearing_rad) * math.sin(angular) * math.cos(lat_rad), math.cos(angular) - math.sin(lat_rad) * math.sin(lat2))
-    return math.degrees(lat2), math.degrees(lon2)
-
-def _relative_waypoint_to_global(ship_lat: float, ship_lon: float, ship_heading: float, ship_alt: float, waypoint: dict) -> tuple[float, float, float]:
-    local_x, local_y, local_z = float(waypoint.get("x", 0.0)), float(waypoint.get("y", 0.0)), float(waypoint.get("z", 0.0))
-    distance_m = math.hypot(local_x, local_y)
-    relative_bearing_deg = math.degrees(math.atan2(local_x, local_y))
-    bearing_deg = (ship_heading + relative_bearing_deg + 360.0) % 360.0
-    target_lat, target_lon = _destination_point(ship_lat, ship_lon, bearing_deg, distance_m)
-    return target_lat, target_lon, ship_alt + local_z
-
-def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
-    a = math.sin((lat2_rad - lat1_rad) / 2.0) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(math.radians(lon2 - lon1) / 2.0) ** 2
-    return EARTH_RADIUS_M * 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
-
-def _north_east_delta_m(lat_ref: float, lon_ref: float, lat: float, lon: float) -> tuple[float, float]:
-    lat_avg = math.radians((lat_ref + lat) / 2.0)
-    return math.radians(lat - lat_ref) * EARTH_RADIUS_M, math.radians(lon - lon_ref) * EARTH_RADIUS_M * math.cos(lat_avg)
 
 def _update_vehicle_state(lat: float, lon: float, alt: float, heading: float | None) -> None:
     with _vehicle_state_lock:
@@ -539,14 +519,16 @@ def _run_mob_search(master, track_points: list, corridor_half_width_m: float, sw
 def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guided_on_complete: bool) -> None:
     with _sar_mission_lock:
         try:
-            item_type_to_cmd = {"waypoint": int(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT), "takeoff": int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF), "loiter_time": int(mavutil.mavlink.MAV_CMD_NAV_LOITER_TIME), "land": int(mavutil.mavlink.MAV_CMD_NAV_LAND), "rtl": int(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH), "do_jump": int(mavutil.mavlink.MAV_CMD_DO_JUMP)}
-            mission_items = []
-            for wp in waypoints:
-                if not isinstance(wp, dict) or wp.get("latitude") is None or wp.get("longitude") is None: continue
-                command_id = int(wp.get("command_id") or item_type_to_cmd.get(str(wp.get("item_type") or "waypoint").lower(), item_type_to_cmd["waypoint"]))
-                mission_items.append((float(wp.get("latitude")), float(wp.get("longitude")), 0.0 if VEHICLE_TYPE in ["usv", "ugv"] else float(wp.get("altitude", 30.0)), command_id, float(wp.get("hold_time_s", 0.0)), float(wp.get("acceptance_radius_m", 8.0)), 0.0, float(wp.get("yaw_deg", 0.0) or 0.0)))
-            if not mission_items: return
-            if force_guided_on_complete: mission_items.append((float(mission_items[-1][0]), float(mission_items[-1][1]), float(mission_items[-1][2]), int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE), 1.0, 0.0, 0.0, 0.0))
+            mission_items = sar_missions.build_mission_items(
+                waypoints,
+                force_guided_on_complete=force_guided_on_complete,
+                surface_vehicle=VEHICLE_TYPE in ("usv", "ugv"),
+                parameter_overrides=False,
+            )
+            if not mission_items:
+                print("[MISSION] mission_plan has no valid waypoints.")
+                return
+
             if not sar_missions.upload_mission(master, mission_items): return
             if auto_arm_start:
                 sar_missions.set_mode(master, "AUTO", wait_for_ack=False)

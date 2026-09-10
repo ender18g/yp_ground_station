@@ -15,16 +15,14 @@ services:
 
   yp-server:
     build:
-      context: ./services/server
+      context: .
+      dockerfile: services/server/Dockerfile
       network: host
     ports:
       - "8000:8000"
-      # MAVLink UDP ingress from BlueOS / external radios
       # MAVLink UDP ingress from external radios / BlueOS endpoints
       - "14550:14550/udp"
       - "14551:14551/udp"
-#    devices:
-#      - /dev/ttyACM0:/dev/ttyACM0
     environment:
       INFLUX_URL: http://influxdb:8086
       INFLUX_ORG: yp
@@ -89,22 +87,6 @@ services:
     # For a real serial GPS, switch GPS_MODE to serial and uncomment:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
-
-  # sim-uav:
-  #   build:
-  #     context: ./services/sim_vehicle
-  #   environment:
-  #     SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
-  #     VEHICLE_TYPE: uav
-  #     VEHICLE_ID: sim-uav
-  #     HOME_LAT: "38.989639"
-  #     HOME_LON: "-76.483322"
-  #     HOME_ALT: "45.0"
-  #     SPAWN_JITTER_DEG: "0.0003"
-  #     TARGET_JITTER_DEG: "0.0010"
-  #     SEND_HZ: "5"
-  #   depends_on:
-  #     - yp-server
 
   sim-uav1:
     build:
@@ -187,23 +169,23 @@ services:
     depends_on:
       - yp-server
 
-  # px4-sitl-uav:
-  #   profiles: ["px4"]
-  #   build:
-  #     context: ./services/px4_sitl
-  #   environment:
-  #     PX4_HOME_LAT: "38.98490"
-  #     PX4_HOME_LON: "-76.47880"
-  #     PX4_HOME_ALT: "45.0"
-  #     PX4_SYS_AUTOSTART: "4001"
-  #     PX4_SIM_MODEL: gz_x500
-  #     PX4_GZ_MODEL: gz_x500
-  #     HEADLESS: "1"
-  #   ports:
-  #     - "14580:14580/udp"
-  #     - "18570:18570/udp"
-  #   depends_on:
-      # - yp-server
+  px4-sitl-uav:
+    profiles: ["px4"]
+    build:
+      context: ./services/px4_sitl
+    environment:
+      PX4_HOME_LAT: "38.98490"
+      PX4_HOME_LON: "-76.47880"
+      PX4_HOME_ALT: "45.0"
+      PX4_SYS_AUTOSTART: "4001"
+      PX4_SIM_MODEL: gz_x500
+      PX4_GZ_MODEL: gz_x500
+      HEADLESS: "1"
+    ports:
+      - "14580:14580/udp"
+      - "18570:18570/udp"
+    depends_on:
+      - yp-server
 
   ros-master:
     profiles: ["px4"]
@@ -266,13 +248,17 @@ services:
   arducopter-bridge:
     profiles: ["arducopter"]
     build:
-      context: ./services/arducopter_ws_bridge
+      context: .
+      dockerfile: services/arducopter_ws_bridge/Dockerfile
     environment:
       VEHICLE_ID: arducopter-uav
       VEHICLE_TYPE: uav
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       MAVLINK_URL: udpin:0.0.0.0:14600
       SEND_HZ: "5"
+    # Connect external ArduPilot SITL or hardware MAVLink output to this port.
+    ports:
+      - "14600:14600/udp"
     depends_on:
       - yp-server
 
@@ -297,20 +283,6 @@ services:
       RTI_HEARTBEAT_TOPIC: ""
     depends_on:
       - yp-server
-
-  arducopter-sitl:
-    profiles: ["arducopter"]
-    build:
-      context: ./services/arducopter_sitl
-    environment:
-      HOME_LAT: "38.9851"
-      HOME_LON: "-76.47880"
-      HOME_ALT: "45.0"
-      SITL_MODEL: "ArduCopter"
-      SITL_FRAME: "quad"
-      MAVLINK_OUTPUT: "udpclient:arducopter-bridge:14600"
-    depends_on:
-      - arducopter-bridge
 
 volumes:
   influx-data:

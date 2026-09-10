@@ -42,6 +42,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 | --- | --- |
 | `web/` | React frontend and production Nginx image |
 | `services/server/` | FastAPI backend and authorization/database code |
+| `yp_common/` | Shared SAR geometry and MAVLink mission serialization/upload |
 | `services/sim_vehicle/` | Lightweight simulated vehicles |
 | `services/umaa_bridge/` | UMAA loopback and RTI adapter |
 | `services/arducopter_ws_bridge/` | ArduPilot WebSocket bridge |
@@ -108,7 +109,7 @@ Click a vehicle marker to open its draggable modal. It provides real-time positi
 The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, Vessel, and RTK Correction.
 
 - **Display:** trail window, YP range rings, and database message retention.
-- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate and stern distance.
+- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate, stern distance, and altitude.
 - **Deconfliction:** enable the feature, configure global and per-type safety radii, avoidance orbit radius, and maximum pause duration.
 - **Man Overboard:** configure track length, swath width, search altitude, corridor width, takeoff altitude, and climb speed.
 - **RTK Correction:** select a serial, TCP, UDP, or disabled RTCM3 source and configure its device or host, network port, and serial baud rate. Raw correction frames are fragmented into MAVLink `GPS_RTCM_DATA` messages and distributed to connected vehicles.
@@ -127,7 +128,18 @@ Exports do not modify InfluxDB and include only data still retained there. The `
 
 ### Demo and view-only modes
 
-Static demo mode renders local vehicles without a live server. Use `/demo`, `?demo=true`, or build with `VITE_STATIC_DEMO=true`.
+Static demo mode renders local vehicles without a live server or login. Use `/demo`, `?demo=true`, or `npm run build:demo` in `web/`. The demo uses the same map, mission planners, messages, and display controls as the live application. Hardware connections, account administration, flight-log export, and MOB dispatch require the live stack. Demo settings and vehicles reset on reload.
+
+To preview the current code without Docker or vehicles:
+
+```bash
+cd web
+npm ci
+npm run build:demo
+npm run preview
+```
+
+Open the local URL printed by Vite. The GitHub Pages workflow builds with the `/yp_ground_station/` base path and checks the demo in a browser before deploying pushes to `main`.
 
 View-only mode uses `/view` or `?view=true`:
 
@@ -219,6 +231,14 @@ The standalone `services/telemetry_radio_bridge.py` can also forward a serial ra
 - `companion_vehicle_software/blueboat_piScripts/` contains BlueBoat bridge variants.
 - `companion_vehicle_software/Hunter_YPEmulator/` contains the YP emulator.
 
+SAR mission code is shared in `yp_common/`; existing bridge script names remain valid. For a Pi deployment that copies only a bridge directory, use the [companion bundle instructions](companion_vehicle_software/README.md) to include its shared code.
+
+The optional `arducopter` profile starts the WebSocket bridge and exposes UDP port `14600` for an external ArduPilot SITL or MAVLink vehicle. This repository does not include an ArduPilot SITL image:
+
+```bash
+docker compose --profile arducopter up --build arducopter-bridge
+```
+
 The other standalone bridge utilities are:
 
 - `services/server/app/main.py`: FastAPI SITL bridge with waypoint, RTB, SAR, mission-upload, and flight-mode support.
@@ -243,7 +263,7 @@ Click a vehicle, choose **Waypoint**, and click the map. The browser sends a com
 }
 ```
 
-`latitude` and `longitude` are WGS84 decimal degrees; altitude is metres. RTB sends `{ "type": "rtb" }` and starts persistent stern-follow mode. The server targets the configured distance aft of the YP heading and updates it at `rtb_update_hz` until canceled or retasked. Vehicles approaching from the bow or beam are routed around an aft quarter rather than across the YP safety envelope.
+`latitude` and `longitude` are WGS84 decimal degrees; altitude is metres. RTB sends `{ "type": "rtb" }` and starts persistent stern-follow mode. The server targets the configured distance aft of the YP heading, holds the configured `rtb_altitude_m` transit altitude, and updates at `rtb_update_hz` until canceled or retasked. Vehicles approaching from the bow or beam are routed around an aft quarter rather than across the YP safety envelope.
 
 For PX4, waypoint commands are translated to `/mavros/setpoint_raw/global` using `mavros_msgs/GlobalPositionTarget`, frame `6` (`MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`), and a default stream rate of 5 Hz. `AUTO_ARM_OFFBOARD=true` also requests `/mavros/cmd/arming true` and `/mavros/set_mode OFFBOARD`. PX4 may reject commands when sensors, EKF, preflight, or failsafe state are not ready; inspect the PX4, MAVROS, and bridge logs.
 
@@ -385,7 +405,7 @@ Canonical aliases are published at `/vehicles/px4-uav/navsatfix`, `/vehicles/px4
 
 ### Scaling simulators
 
-The compose file defines `sim-uav1` and `sim-uav2` with fixed IDs, so scaling those services without overriding `VEHICLE_ID` would create duplicate vehicle IDs. For additional vehicles, add services or run `sim_vehicle.py` instances with unique IDs. The older `sim-uav` service is commented out and should not be used as a scaling target.
+The compose file defines `sim-uav1` and `sim-uav2` with fixed IDs, so scaling those services without overriding `VEHICLE_ID` would create duplicate vehicle IDs. For additional vehicles, add services or run `sim_vehicle.py` instances with unique IDs.
 
 ## Message transport
 
@@ -475,7 +495,7 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 | `yp-server` | `MESSAGE_RETENTION_SECONDS` | `600` | Message retention |
 | `yp-server` | `MESSAGE_CLEANUP_INTERVAL_SECONDS` | `600` | Message cleanup interval |
 | `yp-server` | `INFLUX_MAX_WRITE_HZ` | `5` | Influx write limit |
-| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` | `35.0` / `2.0` | RTB target and update rate |
+| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` | `35.0` / `2.0` / `30.0` | RTB target, update rate, and transit altitude |
 | `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Stable vehicle ID |
@@ -493,25 +513,59 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 
 ## Development
 
-Backend:
+Backend (Python 3.12, from the repository root):
 
 ```bash
-cd services/server
-python3 -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+pip install -r services/server/requirements.txt
+AUTH_DB_PATH=data/auth/auth.db TILE_CACHE_DIR=data/tile-cache \
+  uvicorn app.main:app --app-dir services/server --reload --host 0.0.0.0 --port 8000
 ```
 
 Frontend:
 
 ```bash
 cd web
-npm install
+npm ci
 npm run dev
 ```
 
 Production frontend commands are `npm run build`, `npm run build:demo`, and `npm run preview`.
+
+### Code organization
+
+`services/server/app/main.py` coordinates vehicle state, transport, and commands. Authentication endpoints live in `auth_routes.py`, permission rules in `auth.py`, persistent settings in `settings.py`, and map tile routes in `tiles.py`. Shared mission behavior lives in `yp_common/sar_missions.py`; the small legacy `sar_missions.py` modules preserve imports for existing deployments.
+
+`web/src/App.tsx` coordinates the UI. Map layers, video, and planners live under `components/`; mission file conversions and the local demo simulator live under `services/`. Three.js loads when the local planner opens. Install frontend packages in `web/`.
+
+Compose handles the shared package automatically. If building server or ArduPilot bridge images directly, use the repository root as the build context:
+
+```bash
+docker build -f services/server/Dockerfile .
+docker build -f services/arducopter_ws_bridge/Dockerfile .
+```
+
+### Validation
+
+With the Python environment above active, run from the repository root:
+
+```bash
+PYTHONPATH=services/server python -m unittest discover -s services/server/tests -v
+python -m unittest discover -s tests -v
+docker compose --profile px4 --profile arducopter --profile umaa-real config --quiet
+```
+
+Run frontend checks from `web/`:
+
+```bash
+npm test
+npm run build
+npx playwright install chromium
+npm run test:demo
+```
+
+The browser check builds the production demo at the GitHub Pages subdirectory, verifies telemetry, settings, mission import/export, and the 3D planner, and rejects accidental backend requests or JavaScript errors. It substitutes public weather/map responses so CI does not depend on those providers. Backend tests use temporary databases and simulated transports; hardware, ROS/PX4, real RTI DDS, and real InfluxDB still require integration testing with their services.
 
 ## Notes for real vehicles
 
