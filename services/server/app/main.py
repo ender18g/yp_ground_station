@@ -118,6 +118,7 @@ shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
 sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
 _rtb_follow_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running return to boat (RTB) and follow boat task
+_rtb_follow_state: dict[str, bool] = {} # vehicle_id -> True once RTB-follow is issuing velocity-based station-keeping (not still maneuvering into position)
 _land_on_boat_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running land on boat task
 _sitl_follow_guided_requests: dict[str, float] = {} # vehicle_id -> timestamp of last follow-guided request (to avoid spamming the vehicle with repeated requests)
 
@@ -1643,6 +1644,7 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
                 "waypoints": list(shared_waypoints.values()),
                 "sar_patterns": shared_sar_patterns,
                 "mission_plans": shared_mission_plans,
+                "rtb_follow_state": dict(_rtb_follow_state),
             })
         while True:
             payload = await websocket.receive_json()
@@ -2209,6 +2211,11 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                 await asyncio.sleep(period_s)
                 continue
 
+            is_following = approach_side is None
+            if _rtb_follow_state.get(vehicle_id) != is_following:
+                _rtb_follow_state[vehicle_id] = is_following
+                await broadcast_ui({"op": "rtb_follow_state", "vehicle_id": vehicle_id, "following": is_following})
+
             follow_command = {
                 "type": "rtb_follow" if approach_side is None else "waypoint",
                 "target": {
@@ -2240,6 +2247,8 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
         current_task = _rtb_follow_tasks.get(vehicle_id)
         if current_task is asyncio.current_task():
             _rtb_follow_tasks.pop(vehicle_id, None)
+        if _rtb_follow_state.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "rtb_follow_state", "vehicle_id": vehicle_id, "following": False})
 
 async def _stop_land_on_boat(vehicle_id: str) -> None:
     """Cancel and await a vehicle's running landing task, if any."""
