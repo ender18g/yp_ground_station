@@ -10,6 +10,7 @@ type VehicleModalProps = {
   shipVehicle?: Vehicle;
   sarMissionActive?: boolean;
   canCommand?: boolean;
+  landOnBoatReady?: boolean;
   onClose: () => void;
   onLandOnBoat: () => void;
   onRtb: () => void;
@@ -49,6 +50,7 @@ export function VehicleModal({
   shipVehicle,
   sarMissionActive = false,
   canCommand = true,
+  landOnBoatReady = false,
   onClose,
   onLandOnBoat,
   onRtb,
@@ -112,7 +114,16 @@ export function VehicleModal({
       <div className={styles.modalActions} style={{ marginTop: "15px" }}>
         {canCommand && <button className={styles.secondary} onClick={onEndSar} disabled={!sarMissionActive} title={sarMissionActive ? "Stop active SAR mission" : "No active SAR mission"}><CircleDashed size={18} />End SAR Mission</button>}
         {canCommand && <button className={styles.danger} onClick={onRtb}><RotateCcw size={18} />RTB</button>}
-        {canCommand && <button className={styles.danger} onClick={onLandOnBoat}><Anchor size={18} />Land on Boat</button>}
+        {canCommand && (
+          <button
+            className={styles.danger}
+            onClick={onLandOnBoat}
+            disabled={!landOnBoatReady}
+            title={landOnBoatReady ? "Land on the moving pad" : "Available once the vehicle is holding station on RTB (velocity-follow active)"}
+          >
+            <Anchor size={18} />Land on Boat
+          </button>
+        )}
         <button className={styles.secondary} onClick={() => setShowColorPalette((value) => !value)}><Brush size={18} />Color</button>
         {canCommand && VEHICLE_MODES[vehicle.vehicle_type]?.length > 0 && <button className={styles.secondary} onClick={() => setShowModeSelector((value) => !value)}>Settings{showModeSelector && <X size={14} aria-label="Close mode selector" />}</button>}
         {canStreamVideo && <button className={styles.stream} onClick={onStreamVideo}><Video size={18} />Stream Video</button>}

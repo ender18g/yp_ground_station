@@ -130,6 +130,7 @@ shared_mission_completion_targets: dict[str, dict[str, float]] = {}
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
 sitl_bridge_info: dict[str, dict[str, Any]] = {}  # vehicle_id -> status/metadata
 _rtb_follow_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running return to boat (RTB) and follow boat task
+_rtb_follow_state: dict[str, bool] = {} # vehicle_id -> True once RTB-follow is issuing velocity-based station-keeping (not still maneuvering into position)
 _land_on_boat_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running land on boat task
 _sitl_follow_guided_requests: dict[str, float] = {} # vehicle_id -> timestamp of last follow-guided request (to avoid spamming the vehicle with repeated requests)
 
@@ -1006,6 +1007,41 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                 0.0,
             )
 
+    elif cmd_type == "land_on_boat_step":
+        target = command.get("target", {})
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        if lat is not None and lon is not None:
+            vehicle_id = str(cmd_payload.get("vehicle_id") or "")
+            now = time.monotonic()
+            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) >= 5.0:
+                mode_mapping = master.mode_mapping()
+                if mode_mapping and "GUIDED" in mode_mapping:
+                    master.mav.set_mode_send(
+                        master.target_system,
+                        _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        mode_mapping["GUIDED"],
+                    )
+                    _sitl_follow_guided_requests[vehicle_id] = now
+            master.mav.set_position_target_global_int_send(
+                0,
+                master.target_system,
+                master.target_component,
+                _mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0b100111000000,
+                int(float(lat) * 1e7),
+                int(float(lon) * 1e7),
+                float(target.get("altitude") or 0.0),
+                float(command.get("velocity_north_ms") or 0.0),
+                float(command.get("velocity_east_ms") or 0.0),
+                float(command.get("sink_rate_ms") or 0.0),
+                0.0,
+                0.0,
+                0.0,
+                math.radians(float(command.get("heading") or 0.0)),
+                0.0,
+            )
+
     elif cmd_type == "mission_plan":
         if _sar_missions is None:
             print("[SITL] mission_plan ignored: sar_missions helpers unavailable")
@@ -1628,6 +1664,7 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
                 "sar_patterns": shared_sar_patterns,
                 "mission_plans": shared_mission_plans,
                 "rtcm_status": dict(rtcm_status),
+                "rtb_follow_state": dict(_rtb_follow_state),
             })
         while True:
             payload = await websocket.receive_json()
@@ -2194,6 +2231,11 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                 await asyncio.sleep(period_s)
                 continue
 
+            is_following = approach_side is None
+            if _rtb_follow_state.get(vehicle_id) != is_following:
+                _rtb_follow_state[vehicle_id] = is_following
+                await broadcast_ui({"op": "rtb_follow_state", "vehicle_id": vehicle_id, "following": is_following})
+
             follow_command = {
                 "type": "rtb_follow" if approach_side is None else "waypoint",
                 "target": {
@@ -2225,6 +2267,8 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
         current_task = _rtb_follow_tasks.get(vehicle_id)
         if current_task is asyncio.current_task():
             _rtb_follow_tasks.pop(vehicle_id, None)
+        if _rtb_follow_state.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "rtb_follow_state", "vehicle_id": vehicle_id, "following": False})
 
 async def _stop_land_on_boat(vehicle_id: str) -> None:
     """Cancel and await a vehicle's running landing task, if any."""

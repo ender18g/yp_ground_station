@@ -172,6 +172,29 @@ def send_radio_command(
                 0.0, 0.0, 0.0, float(command.get("heading") or 0.0) * 3.141592653589793 / 180.0, 0.0,
             )
         return
+    if cmd_type == "land_on_boat_step":
+        target = command.get("target", {})
+        lat = target.get("latitude")
+        lon = target.get("longitude")
+        alt = target.get("altitude")
+        if None not in (lat, lon, alt):
+            if time.monotonic() - _last_guided_request >= 5.0:
+                try:
+                    master.set_mode("GUIDED")
+                    _last_guided_request = time.monotonic()
+                except Exception as exc:
+                    print(f"[WARN] Could not set GUIDED mode for land-on-boat: {exc}")
+            master.mav.set_position_target_global_int_send(
+                0, master.target_system, master.target_component,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                0b100111000000,
+                int(float(lat) * 1e7), int(float(lon) * 1e7), float(alt),
+                float(command.get("velocity_north_ms") or 0.0),
+                float(command.get("velocity_east_ms") or 0.0),
+                float(command.get("sink_rate_ms") or 0.0),
+                0.0, 0.0, 0.0, float(command.get("heading") or 0.0) * 3.141592653589793 / 180.0, 0.0,
+            )
+        return
     if cmd_type == "waypoint":
         target = command.get("target", {})
         lat = target.get("latitude")

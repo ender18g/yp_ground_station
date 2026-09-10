@@ -12,6 +12,12 @@ services:
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: yp-dev-token
     volumes:
       - influx-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   yp-server:
     build:
@@ -47,7 +53,14 @@ services:
       - ./data/tiles:/data/tiles:ro
       - ./data/tile-cache:/data/tile-cache
     depends_on:
-      - influxdb
+      influxdb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
     # To connect an RFD-900 (or any serial telemetry radio) via the browser UI,
     # or an RTK base station (e.g. u-blox / Here+) for RTCM correction streaming,
     # pass the USB device through to the server container. Adjust the device path
@@ -64,7 +77,8 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   yp-gps:
     build:
@@ -86,7 +100,8 @@ services:
       SERIAL_PORT: /dev/ttyUSB0
       BAUD_RATE: "9600"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
     # For a real serial GPS, switch GPS_MODE to serial and uncomment:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
@@ -106,7 +121,8 @@ services:
       TARGET_JITTER_DEG: "0.0011"
       SEND_HZ: "5"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   sim-uav2:
     build:
@@ -123,7 +139,8 @@ services:
       TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   sim-usv:
     build:
@@ -140,7 +157,8 @@ services:
       TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   sim-uuv:
     build:
@@ -157,7 +175,8 @@ services:
       TARGET_JITTER_DEG: "0.0010"
       SEND_HZ: "5"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   sim-umaa:
     build:
@@ -170,7 +189,8 @@ services:
       SEND_HZ: "5"
       UMAA_BACKEND: loopback
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   px4-sitl-uav:
     profiles: ["px4"]
@@ -188,7 +208,8 @@ services:
       - "14580:14580/udp"
       - "18570:18570/udp"
     depends_on:
-      - yp-server
+      yp-server:
+        condition: service_healthy
 
   ros-master:
     profiles: ["px4"]

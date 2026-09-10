@@ -190,6 +190,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
   const [missionPlans, setMissionPlans] = useState<Record<string, [number, number][]>>({});
   const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
+  const [rtbFollowState, setRtbFollowState] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
   const { connected: socketConnected, socketRef: wsRef } = useTelemetrySocket({
     enabled: !DEMO_MODE,
@@ -202,6 +203,19 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
         setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
         setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
+        setRtbFollowState(payload.rtb_follow_state as Record<string, boolean> ?? {});
+      }
+      if (payload.op === "rtb_follow_state") {
+        const vehicleId = payload.vehicle_id as string;
+        const following = Boolean(payload.following);
+        setRtbFollowState((current) => {
+          if (!following) {
+            const next = { ...current };
+            delete next[vehicleId];
+            return next;
+          }
+          return { ...current, [vehicleId]: true };
+        });
         if (payload.rtcm_status) setRtcmStatus(payload.rtcm_status as RtcmStatus);
       }
       if (payload.op === "rtcm_status_update") {
@@ -244,6 +258,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setVehicles((current) => { const next = { ...current }; delete next[removedId]; return next; });
         setSarMissionActiveByVehicle((current) => { const next = { ...current }; delete next[removedId]; return next; });
         setSitlBridges((current) => { const next = { ...current }; delete next[removedId]; return next; });
+        setRtbFollowState((current) => { const next = { ...current }; delete next[removedId]; return next; });
       }
       if (payload.op === "sar_pattern") {
         setSarPatterns((current) => ({ ...current, [payload.vehicle_id as string]: { patternType: payload.pattern_type as string, waypoints: payload.waypoints as [number, number][] } }));
@@ -1318,6 +1333,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           shipVehicle={yp}
           sarMissionActive={Boolean(sarMissionActiveByVehicle[selected.vehicle_id])}
           canCommand={!VIEW_MODE || isSimVehicle(selected.vehicle_id)}
+          landOnBoatReady={Boolean(rtbFollowState[selected.vehicle_id])}
           onClose={() => setSelected(null)}
           onRtb={() => {
             command(selected.vehicle_id, { type: "cancel_sar" });

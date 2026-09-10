@@ -46,6 +46,7 @@
 .modalActions .primary { background: #2563eb; }
 .modalActions .secondary { background: #475569; }
 .modalActions .stream { background: #16a34a; }
+.modalActions button:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; opacity: 0.6; }
 
 .colorPanel { display: block; padding: 0 16px 16px; }
 .colorSwatches { display: flex; flex-wrap: wrap; gap: 8px; }

@@ -68,6 +68,19 @@ class VehicleSim:
             }
             self.rtb_follow_heading = float(command_body.get("heading", self.heading)) % 360.0
             self.rtb_follow_speed_mps = max(0.0, float(command_body.get("speed_mps", SPEED_MPS)))
+        elif command_type == "land_on_boat_step":
+            self.mode = "land_on_boat"
+            self.mission_waypoints = []
+            target = command_body.get("target", {})
+            self.target = {
+                "latitude": float(target.get("latitude", self.lat)),
+                "longitude": float(target.get("longitude", self.lon)),
+                "altitude": float(target.get("altitude", self.alt)),
+            }
+            self.rtb_follow_heading = float(command_body.get("heading", self.heading)) % 360.0
+            vn = float(command_body.get("velocity_north_ms", 0.0))
+            ve = float(command_body.get("velocity_east_ms", 0.0))
+            self.rtb_follow_speed_mps = math.hypot(vn, ve)
         elif command_type == "waypoint":
             self.mode = "waypoint"
             self.mission_waypoints = []
@@ -129,7 +142,7 @@ class VehicleSim:
         if distance < max(4.0, SPEED_MPS * dt * 2.0):
             if self.mode == "rtb":
                 self.mode = "hold"
-            elif self.mode == "rtb_follow":
+            elif self.mode in ("rtb_follow", "land_on_boat"):
                 pass
             elif self.mode in ("sar_mission", "mission_plan"):
                 if self.mission_waypoints:
@@ -144,7 +157,7 @@ class VehicleSim:
                 self.mode = "loiter"
             return
 
-        if self.mode == "rtb_follow" and self.rtb_follow_heading is not None:
+        if self.mode in ("rtb_follow", "land_on_boat") and self.rtb_follow_heading is not None:
             # Station keeping combines the YP velocity with a small position
             # correction. It never caps travel at the moving target, avoiding
             # the overshoot-and-correct oscillation caused by point chasing.
