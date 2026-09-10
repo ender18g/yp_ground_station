@@ -1,9 +1,6 @@
 import L from "leaflet";
 import {
   AlertTriangle,
-  Anchor,
-  Battery,
-  Brush,
   Cable,
   Crosshair,
   EthernetPort,
