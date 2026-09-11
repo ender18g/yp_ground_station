@@ -639,6 +639,23 @@
   line-height: 1.5;
 }
 
+.settings-action-btn {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-action-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .settings-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -3,6 +3,7 @@ import { Cable, CheckCircle2, CircleDashed, Loader2, Plus, Radio, RotateCcw, Tra
 
 import { connectSITL, listSerialPorts } from "../api";
 import type { SerialPortInfo, SITLBridge } from "../api";
+import { isAgentAvailable, startAgentRelay } from "../services/relayAgent";
 
 interface SITLPanelProps {
   bridges: Record<string, SITLBridge>;
@@ -30,6 +31,9 @@ export function SITLPanel({ bridges, onConnect: _onConnect, onDisconnect }: SITL
   const [relayComPort, setRelayComPort] = useState("COM12");
   const [relayTcpPort, setRelayTcpPort] = useState("5762");
   const [relayCopied, setRelayCopied] = useState(false);
+  const [agentAvailable, setAgentAvailable] = useState(false);
+  const [relayStarting, setRelayStarting] = useState(false);
+  const [relayError, setRelayError] = useState<string | null>(null);
 
   const refreshPorts = () => {
     setPortsLoading(true);
@@ -47,6 +51,27 @@ export function SITLPanel({ bridges, onConnect: _onConnect, onDisconnect }: SITL
     if (tab === "radio" && prevTab.current !== "radio") refreshPorts();
     prevTab.current = tab;
   }, [tab]);
+
+  useEffect(() => {
+    if (tab !== "radio") return;
+    let cancelled = false;
+    isAgentAvailable().then((available) => { if (!cancelled) setAgentAvailable(available); });
+    return () => { cancelled = true; };
+  }, [tab]);
+
+  const handleStartRelay = async () => {
+    setRelayError(null);
+    setRelayStarting(true);
+    try {
+      await startAgentRelay(relayComPort, parseInt(baud, 10), parseInt(relayTcpPort, 10));
+      setUrl(`tcp:host.docker.internal:${relayTcpPort}`);
+      setTab("network");
+    } catch (error) {
+      setRelayError(String(error));
+    } finally {
+      setRelayStarting(false);
+    }
+  };
 
   const handleNetConnect = async () => {
     const trimUrl = url.trim();
@@ -112,6 +137,16 @@ export function SITLPanel({ bridges, onConnect: _onConnect, onDisconnect }: SITL
                 <button className="sitl-relay-copy-btn" onClick={() => { navigator.clipboard.writeText(`python services/com_tcp_relay.py --port ${relayComPort} --baud ${baud} --tcp-port ${relayTcpPort}`); setRelayCopied(true); setTimeout(() => setRelayCopied(false), 2000); }}>{relayCopied ? "Copied!" : "Copy command"}</button>
                 <button className="sitl-relay-use-btn" onClick={() => { setUrl(`tcp:host.docker.internal:${relayTcpPort}`); setTab("network"); }}>Connect via Network tab →</button>
               </div>
+              {agentAvailable ? (
+                <>
+                  <button className="sitl-connect-btn" onClick={handleStartRelay} disabled={relayStarting}>{relayStarting ? <Loader2 size={15} className="sitl-spin" /> : <Radio size={15} />}{relayStarting ? "Starting…" : "Start relay automatically"}</button>
+                  {relayError && <div className="sitl-error">{relayError}</div>}
+                </>
+              ) : (
+                <p className="sitl-hint">
+                  Or run <code>python services/relay_agent.py</code> once on the host so this button can start/stop the relay for you, without opening a terminal each time.
+                </p>
+              )}
             </div>
           )}
           <label className="sitl-field-label">Serial Port <button className="sitl-refresh-btn" title="Refresh port list" onClick={refreshPorts} disabled={portsLoading}>{portsLoading ? <Loader2 size={12} className="sitl-spin" /> : <RotateCcw size={12} />}</button></label>

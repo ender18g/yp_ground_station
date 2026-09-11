@@ -49,7 +49,8 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 | `services/px4_*` and `services/mavros/` | Optional PX4/MAVROS path |
 | `services/yp_gps/` | YP GPS publisher |
 | `services/telemetry_radio_bridge.py` | Standalone serial-radio bridge |
-| `services/com_tcp_relay.py` | Windows COM-to-TCP relay |
+| `services/com_tcp_relay.py` | Cross-platform serial-to-TCP relay |
+| `services/relay_agent.py` | Local HTTP agent so the UI can start/stop the relay above |
 | `companion_vehicle_software/` | Companion-computer integrations |
 | `scripts/download_tiles.py` | Optional offline tile-source helper |
 | `data/auth/` and `data/tile-cache/` | Local persistent runtime data |
@@ -223,6 +224,8 @@ GET /api/serial-ports
 ```
 
 The standalone `services/telemetry_radio_bridge.py` can also forward a serial radio directly to the YP WebSocket.
+
+To avoid opening a terminal every time you switch a port or baud rate, run `python services/relay_agent.py` once on the host (any OS). It exposes a small local control API on `http://127.0.0.1:5757` that the RFD-900 tab and the RTK Correction settings tab use to start/stop `com_tcp_relay.py` for you — the "Start relay automatically" buttons only appear once the agent is detected.
 
 ### Hardware and companion bridges
 

@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Windows COM-port → TCP relay for RFD-900 / telemetry radios.
+"""Serial (COM / /dev/tty*) → TCP relay for radios and RTK base stations.
 
-Runs on the Windows host (NOT inside Docker).  Opens a COM port and exposes
-the raw MAVLink byte stream as a TCP server so the yp-server Docker container
-can reach it at:
+Runs on the host (NOT inside Docker), on Windows, Linux, or macOS. Opens a
+local serial port (a Windows "COM3" or a Linux/macOS "/dev/ttyACM0",
+"/dev/ttyUSB0", etc.) and exposes the raw byte stream as a TCP server so a
+Docker container can reach it without ever mounting a device in
+docker-compose.yml. This lets you switch/test serial sources at runtime
+instead of editing and restarting compose.
 
-    tcp:host.docker.internal:<tcp-port>
+Works for both:
+  - RFD-900 / telemetry radios (raw MAVLink byte stream)
+  - RTK base stations (raw RTCM3 byte stream), selected via the web UI's
+    Settings -> RTK Correction tab (Source Mode: TCP)
 
 Usage
 -----
     pip install pyserial
     python services/com_tcp_relay.py --port COM12 --baud 57600 --tcp-port 5762
+    python services/com_tcp_relay.py --port /dev/ttyACM0 --baud 115200 --tcp-port 9000
 
-Then in the browser Connections panel → RFD-900 tab click
-"Connect via Network tab" (or enter manually in the Network tab):
+From the container's point of view, connect to:
 
-    tcp:host.docker.internal:5762
+    tcp:host.docker.internal:<tcp-port>
 
 Only one Docker connection is served at a time; when it disconnects the relay
 keeps the serial port open and waits for a new TCP connection automatically.
@@ -106,8 +112,8 @@ async def _serve(port: str, baud: int, tcp_port: int) -> None:
 
     print(f"[RELAY] Listening on 0.0.0.0:{tcp_port}")
     print()
-    print(f"  In the browser Connections panel → Network tab enter:")
-    print(f"    tcp:host.docker.internal:{tcp_port}")
+    print(f"  In the web UI, use host {tcp_port} as tcp:host.docker.internal:{tcp_port}")
+    print(f"  (e.g. Connections panel Network tab, or Settings -> RTK Correction -> TCP)")
     print()
     print("  Press Ctrl+C to stop.")
 
@@ -125,7 +131,7 @@ def _list_ports() -> None:
     if not ports:
         print("No serial ports found.")
         return
-    print("Available serial ports:")
+    print("Available serial ports (COM3, /dev/ttyACM0, etc.):")
     for p in ports:
         print(f"  {p.device}  —  {p.description}")
 
@@ -133,15 +139,15 @@ def _list_ports() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Windows COM-port → TCP relay for RFD-900 / telemetry radios. "
-            "Run this on the Windows host; connect from Docker via "
+            "Serial-to-TCP relay for RFD-900 radios and RTK base stations, cross-platform. "
+            "Run this on the host (Windows/Linux/macOS); connect from Docker via "
             "tcp:host.docker.internal:<tcp-port>."
         ),
     )
     parser.add_argument(
         "--port",
         default="COM12",
-        help="Windows COM port to open (default: COM12)",
+        help="Serial port to open, e.g. COM12 (Windows) or /dev/ttyACM0 (Linux/macOS)",
     )
     parser.add_argument(
         "--baud",
@@ -158,7 +164,7 @@ def main() -> None:
     parser.add_argument(
         "--list-ports",
         action="store_true",
-        help="List available COM ports and exit.",
+        help="List available serial ports and exit.",
     )
     args = parser.parse_args()
 

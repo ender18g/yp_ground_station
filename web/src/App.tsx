@@ -37,6 +37,7 @@ import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, Waypoin
 import { vehicleMarkerColor } from "./utils/vehicleStyle";
 import { WeatherRadarLayer, WindLayer } from "./components/map/OverlayLayers";
 import { createDemoVehicles, demoVehicleSnapshot, handleDemoCommand, stepDemoVehicle, updateDemoVehicleColor, type DemoMessagePayload, type DemoVehicle } from "./services/demo";
+import { isAgentAvailable, startAgentRelay } from "./services/relayAgent";
 
 const MissionPlannerMode = lazy(() => import("./components/MissionPlannerMode").then((module) => ({ default: module.MissionPlannerMode })));
 const WaypointPlanner = lazy(() => import("./components/WaypointPlanner").then((module) => ({ default: module.WaypointPlanner })));
@@ -162,6 +163,10 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [rtkHostOrPort, setRtkHostOrPort] = useState("/dev/ttyACM0");
   const [rtkNetworkPort, setRtkNetworkPort] = useState(9000);
   const [rtkBaudrate, setRtkBaudrate] = useState(115200);
+  const [rtkRelayPort, setRtkRelayPort] = useState("/dev/ttyACM0");
+  const [rtkAgentAvailable, setRtkAgentAvailable] = useState(false);
+  const [rtkRelayStarting, setRtkRelayStarting] = useState(false);
+  const [rtkRelayError, setRtkRelayError] = useState<string | null>(null);
   const [rtcmStatus, setRtcmStatus] = useState<RtcmStatus>({
     state: "disabled",
     source_type: "disabled",
@@ -443,6 +448,27 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (settingsTab !== "rtk") return;
+    let cancelled = false;
+    isAgentAvailable().then((available) => { if (!cancelled) setRtkAgentAvailable(available); });
+    return () => { cancelled = true; };
+  }, [settingsTab]);
+
+  const handleStartRtkRelay = async () => {
+    setRtkRelayError(null);
+    setRtkRelayStarting(true);
+    try {
+      await startAgentRelay(rtkRelayPort, rtkBaudrate, rtkNetworkPort);
+      setRtkSourceType("tcp");
+      setRtkHostOrPort("host.docker.internal");
+    } catch (error) {
+      setRtkRelayError(String(error));
+    } finally {
+      setRtkRelayStarting(false);
+    }
+  };
 
   useEffect(() => {
     if (DEMO_MODE || !settingsLoaded) return;
@@ -1136,6 +1162,33 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                         onChange={(e) => setRtkNetworkPort(Number(e.target.value))}
                       />
                     </label>
+                  )}
+                  {rtkSourceType === "tcp" && !DEMO_MODE && (
+                    <div className="settings-hint">
+                      <p>Have a serial RTK receiver plugged into this machine instead of a network base station?</p>
+                      <label>
+                        Local Serial Port
+                        <input
+                          type="text"
+                          value={rtkRelayPort}
+                          placeholder="/dev/ttyACM0 or COM12"
+                          onChange={(e) => setRtkRelayPort(e.target.value)}
+                        />
+                      </label>
+                      {rtkAgentAvailable ? (
+                        <>
+                          <button className="settings-action-btn" onClick={handleStartRtkRelay} disabled={rtkRelayStarting}>
+                            {rtkRelayStarting ? "Starting…" : "Start relay automatically"}
+                          </button>
+                          {rtkRelayError && <div className="sitl-error">{rtkRelayError}</div>}
+                        </>
+                      ) : (
+                        <p>
+                          Run <code>python services/relay_agent.py</code> once on the host so this button can bridge that
+                          port to TCP for you, without a separate terminal each time.
+                        </p>
+                      )}
+                    </div>
                   )}
                 </>
               )}

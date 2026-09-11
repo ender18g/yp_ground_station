@@ -61,14 +61,20 @@ services:
       timeout: 5s
       retries: 20
       start_period: 15s
-    # To connect an RFD-900 (or any serial telemetry radio) via the browser UI,
-    # or an RTK base station (e.g. u-blox / Here+) for RTCM correction streaming,
-    # pass the USB device through to the server container. Adjust the device path
-    # to match what appears on your host (check with: python -m serial.tools.list_ports
-    # or ls -l /dev/serial/by-id).
-    devices:
-      - /dev/ttyACM0:/dev/ttyACM0
-    # - /dev/ttyUSB0:/dev/ttyUSB0
+    # Recommended: connect an RFD-900 telemetry radio or RTK base station
+    # (e.g. u-blox / Here+) via `python services/com_tcp_relay.py --port <port>
+    # --tcp-port <n>` on the host, then pick "TCP" as the source in the browser
+    # UI (Connections panel / Settings -> RTK Correction) using
+    # tcp:host.docker.internal:<n>. This works identically on Windows, Linux,
+    # and macOS and needs no compose edits or container restarts to switch
+    # ports/devices.
+    #
+    # Alternative (Linux hosts only): pass the USB device straight through
+    # instead of using the relay. Requires editing this file and recreating
+    # the container whenever the device path changes.
+    # devices:
+    #   - /dev/ttyACM0:/dev/ttyACM0
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
 
   web:
     build:
