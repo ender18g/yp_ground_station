@@ -110,7 +110,7 @@ Click a vehicle marker to open its draggable modal. It provides real-time positi
 The settings tabs appear in the UI as Display, Deconfliction, Man Overboard, Vessel, and RTK Correction.
 
 - **Display:** trail window, YP range rings, and database message retention.
-- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate, stern distance, and altitude.
+- **Vessel:** choose a connected vehicle as the YP mother vessel, or use the dedicated `yp-gps` service; configure RTB update rate, stern distance, altitude, and the YP safe distance used to route RTB pathing around the YP.
 - **Deconfliction:** enable the feature, configure global and per-type safety radii, avoidance orbit radius, and maximum pause duration.
 - **Man Overboard:** configure track length, swath width, search altitude, corridor width, takeoff altitude, and climb speed.
 - **RTK Correction:** select a serial, TCP, UDP, or disabled RTCM3 source and configure its device or host, network port, and serial baud rate. Raw correction frames are fragmented into MAVLink `GPS_RTCM_DATA` messages and distributed to connected vehicles.
@@ -498,7 +498,7 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 | `yp-server` | `MESSAGE_RETENTION_SECONDS` | `600` | Message retention |
 | `yp-server` | `MESSAGE_CLEANUP_INTERVAL_SECONDS` | `600` | Message cleanup interval |
 | `yp-server` | `INFLUX_MAX_WRITE_HZ` | `5` | Influx write limit |
-| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` | `35.0` / `2.0` / `30.0` | RTB target, update rate, and transit altitude |
+| `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` / `RTB_YP_SAFE_DISTANCE_M` | `35.0` / `2.0` / `30.0` / `20.0` | RTB target, update rate, transit altitude, and the minimum distance kept from the YP while routing around it during RTB |
 | `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
 | `sim-*` | `VEHICLE_ID` | auto | Stable vehicle ID |

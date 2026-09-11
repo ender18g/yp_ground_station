@@ -65,11 +65,12 @@ SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
 LAND_ON_BOAT_HOVER_CLEARANCE_M = float(os.getenv("LAND_ON_BOAT_HOVER_CLEARANCE_M", "0.5"))
 LAND_ON_BOAT_DESCENT_RATE_MS = float(os.getenv("LAND_ON_BOAT_DESCENT_RATE_MS", "0.5"))
-LAND_ON_BOAT_PAD_OFFSET_M = float(os.getenv("LAND_ON_BOAT_PAD_OFFSET_M", "5.0"))
+LAND_ON_BOAT_PAD_OFFSET_M = float(os.getenv("LAND_ON_BOAT_PAD_OFFSET_M", "-0.4"))
 LAND_ON_BOAT_ALIGNMENT_RADIUS_M = float(os.getenv("LAND_ON_BOAT_ALIGNMENT_RADIUS_M", "1.0"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ALTITUDE_M = float(os.getenv("RTB_ALTITUDE_M", "30.0"))
+RTB_YP_SAFE_DISTANCE_M = float(os.getenv("RTB_YP_SAFE_DISTANCE_M", "20.0"))
 MISSION_ARRIVAL_RADIUS_M = float(os.getenv("MISSION_ARRIVAL_RADIUS_M", "12.0"))
 EARTH_RADIUS_M = 6_378_137.0
 
@@ -133,6 +134,7 @@ _rtb_follow_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholde
 _rtb_follow_state: dict[str, bool] = {} # vehicle_id -> True once RTB-follow is issuing velocity-based station-keeping (not still maneuvering into position)
 _land_on_boat_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running land on boat task
 _sitl_follow_guided_requests: dict[str, float] = {} # vehicle_id -> timestamp of last follow-guided request (to avoid spamming the vehicle with repeated requests)
+_sitl_guided_forced: dict[str, bool] = {} # vehicle_id -> True once GUIDED has been forced for the current streaming streak
 
 # MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
 _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
@@ -979,7 +981,15 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         if lat is not None and lon is not None:
             vehicle_id = str(cmd_payload.get("vehicle_id") or "")
             now = time.monotonic()
-            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) >= 5.0:
+            # A gap in updates means the sequence just (re)started, so force
+            # GUIDED once. While updates are continuous, never force the mode
+            # back -- if the safety pilot switches modes to take control,
+            # respect it and stop guiding.
+            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) > 1.0:
+                _sitl_guided_forced[vehicle_id] = False
+            _sitl_follow_guided_requests[vehicle_id] = now
+
+            if not _sitl_guided_forced.get(vehicle_id, False):
                 mode_mapping = master.mode_mapping()
                 if mode_mapping and "GUIDED" in mode_mapping:
                     master.mav.set_mode_send(
@@ -987,7 +997,10 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                         _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                         mode_mapping["GUIDED"],
                     )
-                    _sitl_follow_guided_requests[vehicle_id] = now
+                    _sitl_guided_forced[vehicle_id] = True
+            elif getattr(master, "flightmode", "GUIDED") != "GUIDED":
+                print(f"[RTB] Safety pilot has taken control of {vehicle_id}; halting RTB-follow guidance")
+                return
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
@@ -1014,7 +1027,12 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         if lat is not None and lon is not None:
             vehicle_id = str(cmd_payload.get("vehicle_id") or "")
             now = time.monotonic()
-            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) >= 5.0:
+            # Same force-once/respect-override behavior as rtb_follow above.
+            if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) > 1.0:
+                _sitl_guided_forced[vehicle_id] = False
+            _sitl_follow_guided_requests[vehicle_id] = now
+
+            if not _sitl_guided_forced.get(vehicle_id, False):
                 mode_mapping = master.mode_mapping()
                 if mode_mapping and "GUIDED" in mode_mapping:
                     master.mav.set_mode_send(
@@ -1022,7 +1040,10 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                         _mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                         mode_mapping["GUIDED"],
                     )
-                    _sitl_follow_guided_requests[vehicle_id] = now
+                    _sitl_guided_forced[vehicle_id] = True
+            elif getattr(master, "flightmode", "GUIDED") != "GUIDED":
+                print(f"[LAND] Safety pilot has taken control of {vehicle_id}; halting land-on-boat guidance")
+                return
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
@@ -2093,6 +2114,75 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return math.degrees(math.atan2(y, x)) % 360.0
 
 
+def _angular_diff_deg(a_deg: float, b_deg: float) -> float:
+    """Return the smallest absolute difference between two compass bearings."""
+    diff = abs((a_deg - b_deg) % 360.0)
+    return diff if diff <= 180.0 else 360.0 - diff
+
+
+def _bearing_dist_blocked_by_circle(
+    bearing_a_deg: float, dist_a_m: float, bearing_b_deg: float, dist_b_m: float, radius_m: float,
+) -> bool:
+    """Return whether the straight path from A to B passes within radius_m of the origin.
+
+    A and B are given as bearing/distance from a shared origin (the YP position); the
+    check is done in a local flat-earth projection, which is accurate at RTB ranges.
+    """
+    ax = dist_a_m * math.sin(math.radians(bearing_a_deg))
+    ay = dist_a_m * math.cos(math.radians(bearing_a_deg))
+    bx = dist_b_m * math.sin(math.radians(bearing_b_deg))
+    by = dist_b_m * math.cos(math.radians(bearing_b_deg))
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-9:
+        t = 0.0
+    else:
+        t = max(0.0, min(1.0, -(ax * dx + ay * dy) / length_sq))
+    closest_x, closest_y = ax + t * dx, ay + t * dy
+    return math.hypot(closest_x, closest_y) < radius_m
+
+
+def _tangent_point_around_yp(
+    yp_lat: float, yp_lon: float, bearing_c_to_a: float, dist_c_to_a: float, radius_m: float, side: int,
+) -> tuple[float, float]:
+    """Return the initial tangent bearing/point used to pick which side to divert around.
+
+    `side` (+1/-1) selects which of the two tangent solutions to use. This is only used to
+    lock in a direction; ongoing guidance around the circle uses `_lead_point_around_yp`,
+    since a pure tangent point degenerates to the vehicle's own position once it reaches
+    the boundary and stops providing forward progress.
+    """
+    if dist_c_to_a <= radius_m:
+        # Already inside the safe zone (shouldn't normally happen): head straight outward.
+        tangent_bearing = bearing_c_to_a
+    else:
+        alpha_deg = math.degrees(math.acos(max(-1.0, min(1.0, radius_m / dist_c_to_a))))
+        tangent_bearing = (bearing_c_to_a + alpha_deg * side) % 360.0
+    return _destination_point(yp_lat, yp_lon, tangent_bearing, radius_m)
+
+
+RTB_AVOID_LEAD_DEG = 30.0
+RTB_MAX_YAW_RATE_DEG_S = 25.0
+
+
+def _lead_point_around_yp(
+    yp_lat: float, yp_lon: float, bearing_c_to_a: float, bearing_c_to_b: float, radius_m: float, side: int,
+) -> tuple[float, float]:
+    """Return a point on the safe-distance circle a fixed arc ahead of the vehicle.
+
+    Steering toward a point that is always a fixed arc-angle ahead (rather than the exact
+    tangent/closest point) keeps the vehicle making forward progress around the YP instead
+    of stalling once it reaches the boundary. The lead is capped by the *unsigned* angular
+    distance remaining to the stern bearing (not a one-directional modulo, which wraps to
+    ~360 degrees and sends the vehicle looping around the far side once real vehicle
+    dynamics/turn radius cause it to overshoot slightly past the stern line).
+    """
+    remaining_deg = _angular_diff_deg(bearing_c_to_a, bearing_c_to_b)
+    lead_deg = min(RTB_AVOID_LEAD_DEG, remaining_deg)
+    lead_bearing = (bearing_c_to_a + lead_deg * side) % 360.0
+    return _destination_point(yp_lat, yp_lon, lead_bearing, radius_m)
+
+
 async def _stop_rtb_follow(vehicle_id: str) -> None:
     """Cancel and await a vehicle's running RTB-follow task, if any."""
     task = _rtb_follow_tasks.pop(vehicle_id, None)
@@ -2116,9 +2206,17 @@ async def _start_rtb_follow(vehicle_id: str, source: str) -> None:
 
 
 async def _rtb_follow_loop(vehicle_id: str) -> None:
-    """Continuously steer a vehicle to a moving point directly aft of the YP."""
+    """Continuously steer a vehicle to a moving point directly aft of the YP.
+
+    Vehicles head straight for the stern point whenever that direct line clears the
+    YP's safe-distance zone (the most economical route). If the direct line would pass
+    too close to the YP, the vehicle is instead steered around the near side of the
+    safe-distance circle until it can approach from the stern.
+    """
     approach_side: Optional[int] = None
     approach_stage = 0
+    smoothed_heading: Optional[float] = None
+    stern_captured = False
     try:
         while True:
             rtb_update_hz = float(settings.get("rtb_update_hz") or RTB_UPDATE_HZ)
@@ -2150,50 +2248,92 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                     approach_lat, approach_lon = stern_lat, stern_lon
                     follow_heading = yp_heading
                     if vehicle_lat is not None and vehicle_lon is not None:
-                        relative_bearing = (
-                            _bearing_deg(
-                                float(yp_pos["latitude"]),
-                                float(yp_pos["longitude"]),
-                                float(vehicle_lat),
-                                float(vehicle_lon),
-                            ) - yp_heading
-                        ) % 360.0
-                        if approach_side is None and not 165.0 <= relative_bearing <= 195.0:
-                            approach_side = -1 if relative_bearing < 180.0 else 1
-                            approach_stage = 1
-                        if approach_side is not None:
-                            safety_radius = (
-                                deconfliction_engine.get_radius(target_vehicle.get("vehicle_type", "uav"))
-                                + deconfliction_engine.get_radius("yp")
-                            )
-                            route_distance = max(
-                                float(settings.get("rtb_stern_distance_m", RTB_STERN_DISTANCE_M)) + 10.0,
-                                (safety_radius * 2.0) + 10.0,
-                            )
-                            if approach_stage == 1:
-                                approach_bearing = (yp_heading + (90.0 if approach_side < 0 else 270.0)) % 360.0
-                                approach_distance = route_distance
+                        yp_lat = float(yp_pos["latitude"])
+                        yp_lon = float(yp_pos["longitude"])
+                        safe_radius = float(settings.get("rtb_yp_safe_distance_m", RTB_YP_SAFE_DISTANCE_M))
+                        route_radius = safe_radius + max(2.0, safe_radius * 0.1)
+                        bearing_c_to_a = _bearing_deg(yp_lat, yp_lon, float(vehicle_lat), float(vehicle_lon))
+                        dist_c_to_a = _haversine_m(yp_lat, yp_lon, float(vehicle_lat), float(vehicle_lon))
+                        bearing_c_to_b = _bearing_deg(yp_lat, yp_lon, stern_lat, stern_lon)
+                        dist_c_to_b = _haversine_m(yp_lat, yp_lon, stern_lat, stern_lon)
+                        stern_distance = _haversine_m(
+                            float(vehicle_lat), float(vehicle_lon), stern_lat, stern_lon,
+                        )
+                        stern_capture_radius = max(4.0, min(8.0, dist_c_to_b * 0.2))
+                        stern_bearing_error = _angular_diff_deg(bearing_c_to_a, bearing_c_to_b)
+                        if stern_captured and (
+                            stern_distance > stern_capture_radius * 2.0 or stern_bearing_error > 45.0
+                        ):
+                            stern_captured = False
+                        blocked = _bearing_dist_blocked_by_circle(
+                            bearing_c_to_a, dist_c_to_a, bearing_c_to_b, dist_c_to_b, safe_radius,
+                        )
+                        if approach_stage == 0:
+                            if blocked:
+                                if dist_c_to_a > route_radius:
+                                    alpha_deg = math.degrees(
+                                        math.acos(max(-1.0, min(1.0, route_radius / dist_c_to_a)))
+                                    )
+                                    candidate_plus = (bearing_c_to_a + alpha_deg) % 360.0
+                                    candidate_minus = (bearing_c_to_a - alpha_deg) % 360.0
+                                    approach_side = (
+                                        1
+                                        if _angular_diff_deg(candidate_plus, bearing_c_to_b)
+                                        <= _angular_diff_deg(candidate_minus, bearing_c_to_b)
+                                        else -1
+                                    )
+                                else:
+                                    approach_side = 1
+                                approach_stage = 1
                             else:
-                                approach_bearing = (yp_heading + 180.0) % 360.0
-                                approach_distance = route_distance
-                            approach_lat, approach_lon = _destination_point(
-                                float(yp_pos["latitude"]),
-                                float(yp_pos["longitude"]),
-                                approach_bearing,
-                                approach_distance,
-                            )
-                            follow_heading = _bearing_deg(
-                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
-                            )
-                            approach_tolerance = max(5.0, min(10.0, route_distance * 0.2))
-                            if approach_stage == 1 and _haversine_m(
-                                float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
-                            ) <= approach_tolerance:
                                 approach_stage = 2
-                            elif approach_stage == 2 and _haversine_m(
+                        if approach_stage == 1 and approach_side is not None:
+                            gate_bearing = (bearing_c_to_b - approach_side * 50.0) % 360.0
+                            approach_lat, approach_lon = _destination_point(
+                                yp_lat, yp_lon, gate_bearing, route_radius,
+                            )
+                            gate_distance = _haversine_m(
                                 float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
-                            ) <= approach_tolerance:
-                                approach_side = None
+                            )
+                            if gate_distance <= max(5.0, route_radius * 0.25):
+                                approach_stage = 2
+                                approach_lat, approach_lon = stern_lat, stern_lon
+                        elif approach_stage == 2:
+                            approach_lat, approach_lon = stern_lat, stern_lon
+                        if (
+                            not stern_captured
+                            and approach_stage == 2
+                            and stern_distance <= stern_capture_radius
+                            and stern_bearing_error <= 25.0
+                        ):
+                            stern_captured = True
+                        # Point the vehicle the direction it is actually traveling. Close to the
+                        # target, blend toward the YP's own heading (its direction of travel)
+                        # instead of bearing-to-target, since GPS noise makes that bearing
+                        # unstable once the vehicle and target are nearly co-located.
+                        dist_to_target = _haversine_m(
+                            float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                        )
+                        bearing_to_target = _bearing_deg(
+                            float(vehicle_lat), float(vehicle_lon), approach_lat, approach_lon,
+                        )
+                        near_m, far_m = 3.0, 10.0
+                        if dist_to_target <= near_m:
+                            desired_heading = yp_heading
+                        elif dist_to_target >= far_m:
+                            desired_heading = bearing_to_target
+                        else:
+                            blend = (dist_to_target - near_m) / (far_m - near_m)
+                            delta = ((bearing_to_target - yp_heading + 540.0) % 360.0) - 180.0
+                            desired_heading = (yp_heading + delta * blend) % 360.0
+                        if smoothed_heading is None:
+                            smoothed_heading = desired_heading
+                        else:
+                            max_step_deg = RTB_MAX_YAW_RATE_DEG_S * period_s
+                            delta = ((desired_heading - smoothed_heading + 540.0) % 360.0) - 180.0
+                            clamped_delta = max(-max_step_deg, min(max_step_deg, delta))
+                            smoothed_heading = (smoothed_heading + clamped_delta) % 360.0
+                        follow_heading = smoothed_heading
                     # Use the configured RTB transit altitude rather than the vehicle's
                     # live altitude; re-sampling live altitude each cycle would let any
                     # small descent become the new setpoint, causing drift.
@@ -2231,13 +2371,13 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                 await asyncio.sleep(period_s)
                 continue
 
-            is_following = approach_side is None
+            is_following = stern_captured
             if _rtb_follow_state.get(vehicle_id) != is_following:
                 _rtb_follow_state[vehicle_id] = is_following
                 await broadcast_ui({"op": "rtb_follow_state", "vehicle_id": vehicle_id, "following": is_following})
 
             follow_command = {
-                "type": "rtb_follow" if approach_side is None else "waypoint",
+                "type": "rtb_follow" if stern_captured else "waypoint",
                 "target": {
                     "latitude": target_snapshot["lat"],
                     "longitude": target_snapshot["lon"],
@@ -2245,7 +2385,7 @@ async def _rtb_follow_loop(vehicle_id: str) -> None:
                 },
             }
             if follow_command["type"] == "rtb_follow":
-                follow_command["heading"] = target_snapshot["yp_heading"]
+                follow_command["heading"] = target_snapshot["follow_heading"]
                 follow_command["speed_mps"] = target_snapshot["yp_speed_mps"]
                 follow_command["velocity_north_ms"] = target_snapshot["yp_velocity_north_ms"]
                 follow_command["velocity_east_ms"] = target_snapshot["yp_velocity_east_ms"]
@@ -2338,13 +2478,16 @@ async def _land_on_boat_loop(vehicle_id: str) -> None:
                         float(yp_pos["latitude"]),
                         float(yp_pos["longitude"]),
                         yp_heading + 180.0,
-                        LAND_ON_BOAT_PAD_OFFSET_M,
+                        float(settings.get("land_on_boat_pad_offset_m", LAND_ON_BOAT_PAD_OFFSET_M)),
                     )
                     horiz_dist_m = _haversine_m(
                         float(target_pos["latitude"]), float(target_pos["longitude"]),
                         pad_lat, pad_lon,
                     )
-                    pad_hover_alt_m = float(yp_pos.get("altitude") or 0.0) + LAND_ON_BOAT_HOVER_CLEARANCE_M
+                    hover_clearance_m = float(settings.get("land_on_boat_hover_clearance_m", LAND_ON_BOAT_HOVER_CLEARANCE_M))
+                    descent_rate_ms = float(settings.get("land_on_boat_descent_rate_ms", LAND_ON_BOAT_DESCENT_RATE_MS))
+                    alignment_radius_m = float(settings.get("land_on_boat_alignment_radius_m", LAND_ON_BOAT_ALIGNMENT_RADIUS_M))
+                    pad_hover_alt_m = float(yp_pos.get("altitude") or 0.0) + hover_clearance_m
                     vehicle_alt_m = float(target_pos.get("altitude") or 0.0)
 
                     # Avoid an abrupt first altitude command; descend from the
@@ -2353,21 +2496,21 @@ async def _land_on_boat_loop(vehicle_id: str) -> None:
                         target_alt_m = max(vehicle_alt_m, pad_hover_alt_m)
 
                     sink_rate_ms = 0.0
-                    if current_state == STATE_APPROACH and horiz_dist_m <= LAND_ON_BOAT_ALIGNMENT_RADIUS_M:
+                    if current_state == STATE_APPROACH and horiz_dist_m <= alignment_radius_m:
                         current_state = STATE_DESCENT
-                        print(f"[LAND] Aligned with pad; descending to {LAND_ON_BOAT_HOVER_CLEARANCE_M:.2f}m hover on {vehicle_id}")
+                        print(f"[LAND] Aligned with pad; descending to {hover_clearance_m:.2f}m hover on {vehicle_id}")
 
                     if current_state == STATE_DESCENT:
                         target_alt_m = max(
                             pad_hover_alt_m,
-                            target_alt_m - LAND_ON_BOAT_DESCENT_RATE_MS * period_s,
+                            target_alt_m - descent_rate_ms * period_s,
                         )
                         if target_alt_m <= pad_hover_alt_m:
                             target_alt_m = pad_hover_alt_m
                             current_state = STATE_HOVER
                             print(f"[LAND] Hover clearance reached on {vehicle_id}; holding above pad")
                         else:
-                            sink_rate_ms = LAND_ON_BOAT_DESCENT_RATE_MS
+                            sink_rate_ms = descent_rate_ms
 
                     if current_state == STATE_HOVER:
                         target_alt_m = pad_hover_alt_m

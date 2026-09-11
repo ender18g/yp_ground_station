@@ -95,7 +95,8 @@ _ship_state_lock = threading.Lock()
 _ship_state = {"vehicle_id": None, "lat": None, "lon": None, "alt": 0.0, "heading_deg": None, "vn_ms": 0.0, "ve_ms": 0.0, "stamp": 0.0}
 _ship_relative_thread: threading.Thread | None = None
 _ship_relative_stop_event = threading.Event()
-_last_guided_request = 0.0
+_last_rtb_step_time = 0.0
+_rtb_guided_forced = False
 
 
 # --- RC OVERRIDE GUIDANCE STATE & CONTROLLER VARIABLES --- USE ONLY IF APACHE DOES NOT ALLOW GUIDED MODE!
@@ -538,18 +539,30 @@ def goto_waypoint(master, target_lat: float, target_lon: float, force_guided: bo
     )
 
 def send_steering_and_speed(master, command_data: dict) -> None:
-    global _last_guided_request
+    global _last_rtb_step_time, _rtb_guided_forced
     target = command_data.get("target", {})
     lat, lon = target.get("latitude"), target.get("longitude")
     if lat is None or lon is None:
         return
-    if time.monotonic() - _last_guided_request >= 5.0:
-        try:
+
+    # A gap in updates means the sequence just (re)started, so force GUIDED
+    # once. While updates are continuous, never force the mode back -- if the
+    # safety pilot switches modes to take control, respect it and stop guiding.
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+
+    try:
+        if not _rtb_guided_forced:
             master.set_mode("GUIDED")
-            _last_guided_request = time.monotonic()
-        except Exception as exc:
-            print(f"[WARN] Could not set GUIDED mode: {exc}")
-            
+            _rtb_guided_forced = True
+        elif master.flightmode != "GUIDED":
+            print("[RTB] Safety pilot has taken control; halting RTB-follow guidance")
+            return
+    except Exception as exc:
+        print(f"[WARN] Could not set GUIDED mode: {exc}")
+
     vn = float(command_data.get("velocity_north_ms", 0.0))
     ve = float(command_data.get("velocity_east_ms", 0.0))
     heading_rad = math.radians(float(command_data.get("heading", 0.0)))

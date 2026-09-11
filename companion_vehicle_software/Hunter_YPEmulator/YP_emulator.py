@@ -69,6 +69,27 @@ async def send_telemetry(ws: websockets.WebSocketClientProtocol, lat: float, lon
     for msg in messages:
         await ws.send(json.dumps(msg))
 
+async def command_loop(ws: websockets.WebSocketClientProtocol, master) -> None:
+    # Listen for server commands (e.g. RTCM corrections) and forward them to the Cube
+    async for raw in ws:
+        try:
+            server_msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if server_msg.get("op") != "command" or server_msg.get("vehicle_id") != VEHICLE_ID:
+            continue
+        command_data = server_msg.get("command", {})
+        if command_data.get("type") == "rtcm_data":
+            flags = command_data.get("flags", 0)
+            data_len = command_data.get("len", 0)
+            raw_data = command_data.get("data", [])
+            if data_len > 0:
+                padded_payload = bytearray(raw_data + [0] * (180 - len(raw_data)))
+                try:
+                    master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
+                except Exception as e:
+                    print(f"[RTCM] MAVLink send error: {e}")
+
 async def mavlink_loop(ws: websockets.WebSocketClientProtocol):
     print(f"Connecting to Cube on {SERIAL_PORT} at {BAUD_RATE} baud...")
     master = mavutil.mavlink_connection(SERIAL_PORT, baud=BAUD_RATE)
@@ -83,6 +104,8 @@ async def mavlink_loop(ws: websockets.WebSocketClientProtocol):
         int(SEND_HZ),
         1
     )
+
+    asyncio.create_task(command_loop(ws, master))
 
     last_send = 0.0
     while True:

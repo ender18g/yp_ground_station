@@ -143,6 +143,11 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [rtbUpdateHz, setRtbUpdateHz] = useState(2.0);
   const [rtbSternDistanceM, setRtbSternDistanceM] = useState(35);
   const [rtbAltitudeM, setRtbAltitudeM] = useState(30);
+  const [rtbYpSafeDistanceM, setRtbYpSafeDistanceM] = useState(20);
+  const [landOnBoatHoverClearanceM, setLandOnBoatHoverClearanceM] = useState(0.5);
+  const [landOnBoatDescentRateMs, setLandOnBoatDescentRateMs] = useState(0.5);
+  const [landOnBoatPadOffsetM, setLandOnBoatPadOffsetM] = useState(-0.4);
+  const [landOnBoatAlignmentRadiusM, setLandOnBoatAlignmentRadiusM] = useState(1.0);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -397,6 +402,21 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         if (typeof serverSettings.rtb_altitude_m === "number") {
           setRtbAltitudeM(serverSettings.rtb_altitude_m);
         }
+        if (typeof serverSettings.rtb_yp_safe_distance_m === "number") {
+          setRtbYpSafeDistanceM(serverSettings.rtb_yp_safe_distance_m);
+        }
+        if (typeof serverSettings.land_on_boat_hover_clearance_m === "number") {
+          setLandOnBoatHoverClearanceM(serverSettings.land_on_boat_hover_clearance_m);
+        }
+        if (typeof serverSettings.land_on_boat_descent_rate_ms === "number") {
+          setLandOnBoatDescentRateMs(serverSettings.land_on_boat_descent_rate_ms);
+        }
+        if (typeof serverSettings.land_on_boat_pad_offset_m === "number") {
+          setLandOnBoatPadOffsetM(serverSettings.land_on_boat_pad_offset_m);
+        }
+        if (typeof serverSettings.land_on_boat_alignment_radius_m === "number") {
+          setLandOnBoatAlignmentRadiusM(serverSettings.land_on_boat_alignment_radius_m);
+        }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         if (typeof serverSettings.mob_track_seconds === "number") {
           setMobTrackSeconds(serverSettings.mob_track_seconds);
@@ -480,6 +500,11 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         rtb_update_hz: rtbUpdateHz,
         rtb_stern_distance_m: rtbSternDistanceM,
         rtb_altitude_m: rtbAltitudeM,
+        rtb_yp_safe_distance_m: rtbYpSafeDistanceM,
+        land_on_boat_hover_clearance_m: landOnBoatHoverClearanceM,
+        land_on_boat_descent_rate_ms: landOnBoatDescentRateMs,
+        land_on_boat_pad_offset_m: landOnBoatPadOffsetM,
+        land_on_boat_alignment_radius_m: landOnBoatAlignmentRadiusM,
         mob_track_seconds: mobTrackSeconds,
         mob_swath_m: mobSwathM,
         mob_altitude_m: mobAltM,
@@ -494,7 +519,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, rtbYpSafeDistanceM, landOnBoatHoverClearanceM, landOnBoatDescentRateMs, landOnBoatPadOffsetM, landOnBoatAlignmentRadiusM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -1326,6 +1351,31 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                 <span>{rtbAltitudeM} m</span>
               </label>
               <input min={5} max={150} step={5} type="range" value={rtbAltitudeM} disabled={DEMO_MODE} onChange={(event) => setRtbAltitudeM(Number(event.target.value))} />
+              <label>
+                RTB YP safe distance
+                <span>{rtbYpSafeDistanceM} m</span>
+              </label>
+              <input min={5} max={100} step={5} type="range" value={rtbYpSafeDistanceM} disabled={DEMO_MODE} onChange={(event) => setRtbYpSafeDistanceM(Number(event.target.value))} />
+              <label>
+                Landing hover clearance
+                <span>{landOnBoatHoverClearanceM.toFixed(1)} m</span>
+              </label>
+              <input min={0.1} max={5} step={0.1} type="range" value={landOnBoatHoverClearanceM} disabled={DEMO_MODE} onChange={(event) => setLandOnBoatHoverClearanceM(Number(event.target.value))} />
+              <label>
+                Landing descent rate
+                <span>{landOnBoatDescentRateMs.toFixed(1)} m/s</span>
+              </label>
+              <input min={0.1} max={3} step={0.1} type="range" value={landOnBoatDescentRateMs} disabled={DEMO_MODE} onChange={(event) => setLandOnBoatDescentRateMs(Number(event.target.value))} />
+              <label>
+                Landing pad offset
+                <span>{landOnBoatPadOffsetM.toFixed(1)} m</span>
+              </label>
+              <input min={-5} max={5} step={0.1} type="range" value={landOnBoatPadOffsetM} disabled={DEMO_MODE} onChange={(event) => setLandOnBoatPadOffsetM(Number(event.target.value))} />
+              <label>
+                Landing alignment radius
+                <span>{landOnBoatAlignmentRadiusM.toFixed(1)} m</span>
+              </label>
+              <input min={0.2} max={10} step={0.1} type="range" value={landOnBoatAlignmentRadiusM} disabled={DEMO_MODE} onChange={(event) => setLandOnBoatAlignmentRadiusM(Number(event.target.value))} />
             </>
           )}
           {settingsTab === "mob" && (

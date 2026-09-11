@@ -73,7 +73,10 @@ _ship_state = {
 }
 _ship_relative_thread: threading.Thread | None = None
 _ship_relative_stop_event = threading.Event()
-_last_guided_request = 0.0
+_last_rtb_step_time = 0.0
+_rtb_guided_forced = False
+_last_land_step_time = 0.0
+_land_step_guided_forced = False
 
 
 def create_navsatfix_message(lat: float, lon: float, alt: float, heading: float | None = None) -> dict:
@@ -265,6 +268,7 @@ def _launch_ship_relative_mission(master, command_data: dict) -> None:
 
 def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
     update_period_s = 1.0 / max(update_hz, 1.0)
+    guided_forced = False
     print(f"[SHIP-REL] Starting mission with {len(local_waypoints)} waypoints relative to {ship_vehicle_id}")
 
     for index, waypoint in enumerate(local_waypoints, start=1):
@@ -298,7 +302,14 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
                 target_alt = 0.0
                 frame = mavutil.mavlink.MAV_FRAME_GLOBAL_INT
                 try:
-                    master.set_mode('GUIDED')
+                    # Force GUIDED once for the mission; never force it back if
+                    # the safety pilot switches modes to take control.
+                    if not guided_forced:
+                        master.set_mode('GUIDED')
+                        guided_forced = True
+                    elif master.flightmode != 'GUIDED':
+                        print("[SHIP-REL] Safety pilot has taken control; halting ship-relative guidance")
+                        return
                 except Exception:
                     pass
 
@@ -375,19 +386,31 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
 
 
 def follow_yp_velocity(master, command: dict) -> None:
-    """Stream a YP-relative velocity and heading while holding the aft target."""
-    global _last_guided_request
+    """Stream the post-capture YP velocity, position target, and heading."""
+    global _last_rtb_step_time, _rtb_guided_forced
     target = command.get("target", {})
     lat, lon = target.get("latitude"), target.get("longitude")
     alt = float(target.get("altitude") or 0.0)
     if lat is None or lon is None:
         return
-    if time.monotonic() - _last_guided_request >= 5.0:
-        try:
+
+    # A gap in updates means the sequence just (re)started, so force GUIDED
+    # once. While updates are continuous, never force the mode back -- if the
+    # safety pilot switches modes to take control, respect it and stop guiding.
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+
+    try:
+        if not _rtb_guided_forced:
             master.set_mode("GUIDED")
-            _last_guided_request = time.monotonic()
-        except Exception as exc:
-            print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
+            _rtb_guided_forced = True
+        elif master.flightmode != "GUIDED":
+            print("[RTB] Safety pilot has taken control; halting RTB-follow guidance")
+            return
+    except Exception as exc:
+        print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
     master.mav.set_position_target_global_int_send(
         0, master.target_system, master.target_component,
         mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
@@ -401,6 +424,7 @@ def follow_yp_velocity(master, command: dict) -> None:
 
 def execute_land_step(master, command: dict) -> None:
     """Stream a moving pad target, including descent or hover velocity."""
+    global _last_land_step_time, _land_step_guided_forced
     target = command.get("target", {})
     lat = target.get("latitude")
     lon = target.get("longitude")
@@ -414,9 +438,21 @@ def execute_land_step(master, command: dict) -> None:
     vd = float(command.get("sink_rate_ms", 0.0))  # Positive = downward velocity
     yaw_rad = math.radians(float(command.get("heading", 0.0)))
 
+    # A gap in steps means the sequence just (re)started, so force GUIDED once.
+    # While steps are continuous, never force the mode back -- if the safety
+    # pilot switches modes to take control, respect it and stop guiding.
+    now = time.monotonic()
+    if now - _last_land_step_time > 1.0:
+        _land_step_guided_forced = False
+    _last_land_step_time = now
+
     try:
-        if master.flightmode != "GUIDED":
+        if not _land_step_guided_forced:
             master.set_mode("GUIDED")
+            _land_step_guided_forced = True
+        elif master.flightmode != "GUIDED":
+            print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
+            return
     except Exception:
         pass
 

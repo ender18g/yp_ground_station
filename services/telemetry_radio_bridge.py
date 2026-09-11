@@ -141,7 +141,10 @@ def build_mavlink_connection(port: str, baud: int) -> mavutil.mavlink_connection
     return mavutil.mavlink_connection(f"serial:{port}:{baud}", source_system=255, autoreconnect=False)
 
 
-_last_guided_request = 0.0
+_last_rtb_step_time = 0.0
+_rtb_guided_forced = False
+_last_land_step_time = 0.0
+_land_step_guided_forced = False
 
 
 def send_radio_command(
@@ -149,19 +152,31 @@ def send_radio_command(
     command: dict[str, object],
     source: Optional[str] = None,
 ) -> None:
-    global _last_guided_request
+    global _last_rtb_step_time, _rtb_guided_forced, _last_land_step_time, _land_step_guided_forced
     cmd_type = command.get("type")
     if cmd_type == "rtb_follow":
         target = command.get("target", {})
         lat = target.get("latitude")
         lon = target.get("longitude")
         if lat is not None and lon is not None:
-            if time.monotonic() - _last_guided_request >= 5.0:
-                try:
+            # A gap in updates means the sequence just (re)started, so force
+            # GUIDED once. While updates are continuous, never force the mode
+            # back -- if the safety pilot switches modes to take control,
+            # respect it and stop guiding.
+            now = time.monotonic()
+            if now - _last_rtb_step_time > 1.0:
+                _rtb_guided_forced = False
+            _last_rtb_step_time = now
+
+            try:
+                if not _rtb_guided_forced:
                     master.set_mode("GUIDED")
-                    _last_guided_request = time.monotonic()
-                except Exception as exc:
-                    print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
+                    _rtb_guided_forced = True
+                elif master.flightmode != "GUIDED":
+                    print("[RTB] Safety pilot has taken control; halting RTB-follow guidance")
+                    return
+            except Exception as exc:
+                print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
             master.mav.set_position_target_global_int_send(
                 0, master.target_system, master.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
@@ -178,12 +193,24 @@ def send_radio_command(
         lon = target.get("longitude")
         alt = target.get("altitude")
         if None not in (lat, lon, alt):
-            if time.monotonic() - _last_guided_request >= 5.0:
-                try:
+            # A gap in steps means the sequence just (re)started, so force
+            # GUIDED once. While steps are continuous, never force the mode
+            # back -- if the safety pilot switches modes to take control,
+            # respect it and stop guiding.
+            now = time.monotonic()
+            if now - _last_land_step_time > 1.0:
+                _land_step_guided_forced = False
+            _last_land_step_time = now
+
+            try:
+                if not _land_step_guided_forced:
                     master.set_mode("GUIDED")
-                    _last_guided_request = time.monotonic()
-                except Exception as exc:
-                    print(f"[WARN] Could not set GUIDED mode for land-on-boat: {exc}")
+                    _land_step_guided_forced = True
+                elif master.flightmode != "GUIDED":
+                    print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
+                    return
+            except Exception as exc:
+                print(f"[WARN] Could not set GUIDED mode for land-on-boat: {exc}")
             master.mav.set_position_target_global_int_send(
                 0, master.target_system, master.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,

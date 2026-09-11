@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
 config = {}
 reconnect_event = asyncio.Event()
 telemetry_queue = asyncio.Queue(maxsize=50)
+rtcm_queue = asyncio.Queue(maxsize=200)  # inbound RTCM correction commands awaiting forward to the Cube
 
 # Shared Live Telemetry & Connection Status
 system_status = {
@@ -258,6 +259,28 @@ def queue_telemetry(vehicle_id: str, lat: float, lon: float, alt: float, heading
         except asyncio.QueueFull:
             pass # Drop oldest messages if WebSocket is down and queue is full
 
+async def _ws_send_loop(ws):
+    # Continuously pull from the telemetry queue and send
+    while True:
+        msg = await telemetry_queue.get()
+        await ws.send(json.dumps(msg))
+
+async def _ws_recv_loop(ws, vehicle_id: str):
+    # Listen for server commands (e.g. RTCM corrections) and hand them off to the mavlink loop
+    async for raw in ws:
+        try:
+            server_msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if server_msg.get("op") != "command" or server_msg.get("vehicle_id") != vehicle_id:
+            continue
+        command_data = server_msg.get("command", {})
+        if command_data.get("type") == "rtcm_data":
+            try:
+                rtcm_queue.put_nowait(command_data)
+            except asyncio.QueueFull:
+                pass
+
 async def ws_loop(current_config: dict):
     base_url = current_config["server_ws_url"].rstrip("/")
     vehicle_id = current_config["vehicle_id"]
@@ -271,12 +294,19 @@ async def ws_loop(current_config: dict):
                 system_status["ws_connected"] = True
                 system_status["ws_status"] = "Connected"
                 print(f"WebSocket Connected to {uri}!")
-                
-                # Continuously pull from the queue and send
-                while not reconnect_event.is_set():
-                    msg = await telemetry_queue.get()
-                    await ws.send(json.dumps(msg))
-                    
+
+                send_task = asyncio.create_task(_ws_send_loop(ws))
+                recv_task = asyncio.create_task(_ws_recv_loop(ws, vehicle_id))
+                try:
+                    done, pending = await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    for task in done:
+                        task.result()
+                finally:
+                    send_task.cancel()
+                    recv_task.cancel()
+
         except Exception as exc:
             system_status["ws_connected"] = False
             system_status["ws_status"] = "Disconnected"
@@ -339,6 +369,19 @@ async def mavlink_loop(current_config: dict):
 
             last_send = 0.0
             while not reconnect_event.is_set():
+                # Forward any pending RTCM correction data received from the server to the Cube
+                while not rtcm_queue.empty():
+                    command_data = rtcm_queue.get_nowait()
+                    flags = command_data.get("flags", 0)
+                    data_len = command_data.get("len", 0)
+                    raw_data = command_data.get("data", [])
+                    if data_len > 0:
+                        padded_payload = bytearray(raw_data + [0] * (180 - len(raw_data)))
+                        try:
+                            master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
+                        except Exception as e:
+                            print(f"[RTCM] MAVLink send error: {e}")
+
                 msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
                 if msg:
                     msg_type = msg.get_type()
@@ -389,7 +432,9 @@ async def main():
 
         while not telemetry_queue.empty():
             telemetry_queue.get_nowait()
-            
+        while not rtcm_queue.empty():
+            rtcm_queue.get_nowait()
+
         mav_task = asyncio.create_task(mavlink_loop(current_config))
         ws_task = asyncio.create_task(ws_loop(current_config))
 
