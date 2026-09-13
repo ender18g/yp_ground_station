@@ -1,5 +1,12 @@
 import L from "leaflet";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   MapContainer,
   Marker,
@@ -228,6 +235,54 @@ export function MissionPlannerMode({
   const fileRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef(false);
   const editing = waypoints.find((item) => item.id === editingId) ?? null;
+
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelPos, setPanelPos] = useState({ x: 16, y: 132 });
+  const clampPanelPos = (candidate: { x: number; y: number }) => {
+    const padding = 8;
+    const width = panelRef.current?.offsetWidth ?? 340;
+    const height = panelRef.current?.offsetHeight ?? 400;
+    const maxX = Math.max(padding, window.innerWidth - width - padding);
+    const maxY = Math.max(padding, window.innerHeight - height - padding);
+    return {
+      x: Math.min(Math.max(padding, candidate.x), maxX),
+      y: Math.min(Math.max(padding, candidate.y), maxY),
+    };
+  };
+  useEffect(() => {
+    const onResize = () => setPanelPos((current) => clampPanelPos(current));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const panelDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    pos: { x: number; y: number };
+  } | null>(null);
+  const startPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panelDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      pos: panelPos,
+    };
+  };
+  const movePanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = panelDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    setPanelPos(
+      clampPanelPos({ x: drag.pos.x + dx, y: drag.pos.y + dy }),
+    );
+  };
+  const endPanelDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (panelDragRef.current?.pointerId === event.pointerId)
+      panelDragRef.current = null;
+  };
   useEffect(() => {
     if (!commandable.some((vehicle) => vehicle.vehicle_id === vehicleId))
       setVehicleId(commandable[0]?.vehicle_id ?? "");
@@ -532,10 +587,22 @@ export function MissionPlannerMode({
         ))}
       </MapContainer>
       <div
+        ref={panelRef}
         className="mission-planner-panel"
+        style={{
+          left: panelPos.x,
+          top: panelPos.y,
+          maxHeight: `calc(100vh - ${panelPos.y + 12}px)`,
+        }}
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mission-planner-panel-title">
+        <div
+          className="mission-planner-panel-title"
+          onPointerDown={startPanelDrag}
+          onPointerMove={movePanelDrag}
+          onPointerUp={endPanelDrag}
+          onPointerCancel={endPanelDrag}
+        >
           <strong>Mission Planner</strong>
         </div>
         <div className="mission-planner-help">

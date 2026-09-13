@@ -380,7 +380,7 @@
 
 .settings-panel {
   position: absolute;
-  z-index: 900;
+  z-index: 960;
   top: 72px;
   right: 16px;
   width: min(300px, calc(100vw - 32px));
@@ -393,7 +393,7 @@
 
 .flight-log-panel {
   position: absolute;
-  z-index: 900;
+  z-index: 960;
   top: 48px;
   right: 0;
   width: min(280px, calc(100vw - 32px));

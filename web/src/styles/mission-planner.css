@@ -10,9 +10,7 @@
 
 .mission-planner-panel {
   position: absolute;
-  top: 132px;
-  left: 16px;
-  z-index: 940;
+  z-index: 1010;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -24,9 +22,8 @@
   box-shadow: 0 10px 30px rgba(17, 24, 39, 0.18);
   backdrop-filter: blur(10px);
   box-sizing: border-box;
-  height: calc(100% - 228px);
   min-height: 320px;
-  max-height: calc(100% - 228px);
+  max-height: calc(100vh - 24px);
   overflow-y: auto;
 }
 
@@ -38,6 +35,7 @@
   justify-content: space-between;
   gap: 10px;
   cursor: grab;
+  touch-action: none;
   user-select: none;
 }
 
