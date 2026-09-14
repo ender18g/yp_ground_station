@@ -171,12 +171,12 @@ Administrators open **User Management** from the users icon. The panel creates a
 | Role | Capabilities |
 | --- | --- |
 | `view_only` | Read telemetry and vehicle status |
-| `waypoint_command` | View permissions plus waypoints, RTB, mode changes, and SAR cancellation |
+| `waypoint_command` | View permissions plus waypoints, RTB, mode changes, arm/disarm/takeoff, and SAR cancellation |
 | `mission_planning` | Waypoint permissions plus mission creation, upload, and search grids |
 | `man_overboard` | Mission planning plus MOB dispatch |
 | `admin` | All operational permissions plus settings, connections, video streams, and user management |
 
-Custom permissions: `read_telemetry`, `read_vehicle_status`, `send_waypoint`, `send_rtb`, `set_vehicle_mode`, `cancel_sar`, `create_mission`, `upload_mission`, `search_grid`, `trigger_mob`, `manage_sitl`, `manage_settings`, `manage_video_streams`, and `manage_users`.
+Custom permissions: `read_telemetry`, `read_vehicle_status`, `send_waypoint`, `send_rtb`, `set_vehicle_mode`, `cancel_sar`, `arm_disarm`, `create_mission`, `upload_mission`, `search_grid`, `trigger_mob`, `manage_sitl`, `manage_settings`, `manage_video_streams`, and `manage_users`.
 
 Accounts are stored in SQLite at `data/auth/auth.db`, mounted into `yp-server` as `/data/auth/auth.db`. They persist across rebuilds and container recreation. Deleting the database intentionally resets the store to `admin` / `admin`; the database contains password hashes and is excluded from Git.
 
@@ -281,6 +281,9 @@ All bridge types support these command types where the vehicle can execute them:
 | `cancel_sar` | Cancel an active streaming SAR mission |
 | `mission_plan` | Upload a waypoint sequence and optionally arm/start AUTO |
 | `set_mode` | Change the vehicle flight mode |
+| `arm` | Arm the vehicle |
+| `disarm` | Disarm the vehicle |
+| `takeoff` | Arm (in GUIDED) and take off to `altitude_m` — UAV/UAVF only |
 
 Available mode lists are vehicle-specific. ArduPilot UAVs support `STABILIZE`, `ACRO`, `ALT_HOLD`, `AUTO`, `GUIDED`, `LOITER`, `RTL`, `CIRCLE`, `LAND`, `DRIFT`, `SPORT`, `FLIP`, `AUTOTUNE`, and `POSHOLD`; ArduPilot USV/UGV support `MANUAL`, `GUIDED`, `AUTO`, `RTL`, `LOITER`, and `CIRCLE`; PX4 UAVF supports `MANUAL`, `ALTITUDE_CONTROL`, `POSITION_CONTROL`, `AUTO`, `OFFBOARD`, and `EMERGENCY`.
 

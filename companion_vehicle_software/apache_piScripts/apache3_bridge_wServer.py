@@ -783,9 +783,12 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
             if force_guided_on_complete: mission_items.append((float(mission_items[-1][0]), float(mission_items[-1][1]), 0.0, int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE), 1.0, 0.0, 0.0, 0.0))
             if not sar_missions.upload_mission(master, mission_items): return
             if auto_arm_start:
-                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+                # Arm in GUIDED first: ArduPilot refuses to arm from a disarmed AUTO mode.
+                sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.arm_vehicle(master)
+                time.sleep(0.2)
+                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.start_mission(master)
         except Exception as exc: pass
@@ -857,6 +860,10 @@ async def telemetry_loop(current_config: dict) -> None:
                                 threading.Thread(target=_run_mob_search, args=(master, command_data["track_points"], float(command_data.get("corridor_half_width_m", 50.0)), float(command_data.get("swath_m", 20.0))), daemon=True).start()
                             elif cmd_type == "cancel_sar":
                                 _sar_stop_event.set()
+                            elif cmd_type == "arm":
+                                sar_missions.arm_vehicle(master)
+                            elif cmd_type == "disarm":
+                                master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0)
                             elif cmd_type == "rtcm_data":
                                 flags = command_data.get("flags", 0)
                                 data_len = command_data.get("len", 0)

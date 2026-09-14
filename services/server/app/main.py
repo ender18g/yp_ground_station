@@ -67,6 +67,8 @@ LAND_ON_BOAT_HOVER_CLEARANCE_M = float(os.getenv("LAND_ON_BOAT_HOVER_CLEARANCE_M
 LAND_ON_BOAT_DESCENT_RATE_MS = float(os.getenv("LAND_ON_BOAT_DESCENT_RATE_MS", "0.5"))
 LAND_ON_BOAT_PAD_OFFSET_M = float(os.getenv("LAND_ON_BOAT_PAD_OFFSET_M", "-0.4"))
 LAND_ON_BOAT_ALIGNMENT_RADIUS_M = float(os.getenv("LAND_ON_BOAT_ALIGNMENT_RADIUS_M", "1.0"))
+LAND_ON_BOAT_AUTO_DISARM = os.getenv("LAND_ON_BOAT_AUTO_DISARM", "true").lower() not in ("0", "false", "no")
+LAND_ON_BOAT_TOUCHDOWN_DWELL_S = float(os.getenv("LAND_ON_BOAT_TOUCHDOWN_DWELL_S", "1.5"))
 RTB_STERN_DISTANCE_M = float(os.getenv("RTB_STERN_DISTANCE_M", "20.0"))
 RTB_UPDATE_HZ = float(os.getenv("RTB_UPDATE_HZ", "2.0"))
 RTB_ALTITUDE_M = float(os.getenv("RTB_ALTITUDE_M", "30.0"))
@@ -135,6 +137,9 @@ _rtb_follow_state: dict[str, bool] = {} # vehicle_id -> True once RTB-follow is 
 _land_on_boat_tasks: dict[str, asyncio.Task[None]] = {} # vehicle_id -> placeholder for running land on boat task
 _sitl_follow_guided_requests: dict[str, float] = {} # vehicle_id -> timestamp of last follow-guided request (to avoid spamming the vehicle with repeated requests)
 _sitl_guided_forced: dict[str, bool] = {} # vehicle_id -> True once GUIDED has been forced for the current streaming streak
+_sitl_landed_state: dict[str, int] = {} # vehicle_id -> last EXTENDED_SYS_STATE.landed_state seen (real ground-contact detection)
+_sitl_land_touchdown_since: dict[str, float] = {} # vehicle_id -> monotonic time landed_state first read ON_GROUND for the current attempt
+_sitl_land_touchdown_sent: dict[str, bool] = {} # vehicle_id -> True once auto-disarm has fired for the current attempt
 
 # MAVLink MAV_TYPE -> (vehicle_type, human-readable frame name)
 _MAV_TYPE_MAP: dict[int, tuple[str, str]] = {
@@ -670,6 +675,14 @@ async def _run_mavlink_bridge(
                     master.target_system, master.target_component, sid, h, 1
                 )
             )
+        # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
+        await asyncio.to_thread(
+            lambda: master.mav.command_long_send(
+                master.target_system, master.target_component,
+                _mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                _mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0,
+            )
+        )
 
         # ------------------------------------------------------------------ #
         # Dedicated MAVLink I/O thread                                        #
@@ -684,7 +697,12 @@ async def _run_mavlink_bridge(
                 # Forward any outbound commands queued by the asyncio side
                 while True:
                     try:
-                        _handle_sitl_command(m, _outbound.get_nowait())
+                        touched_down = _handle_sitl_command(m, _outbound.get_nowait())
+                        if touched_down:
+                            try:
+                                _inbound.put_nowait(("LAND_TOUCHDOWN", None, time.time()))
+                            except _stdlib_queue.Full:
+                                pass
                     except _stdlib_queue.Empty:
                         break
 
@@ -696,7 +714,7 @@ async def _run_mavlink_bridge(
 
                 # Blocking read — wakes up as soon as a message arrives
                 msg = m.recv_match(
-                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS"],
+                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS", "EXTENDED_SYS_STATE"],
                     blocking=True,
                     timeout=0.1,
                 )
@@ -705,6 +723,10 @@ async def _run_mavlink_bridge(
 
                 msg_type = msg.get_type()
                 now = time.time()
+
+                if msg_type == "EXTENDED_SYS_STATE":
+                    _sitl_landed_state[vehicle_id] = msg.landed_state
+                    continue
 
                 # Rate-limit position messages to avoid overwhelming the UI
                 if msg_type == "GLOBAL_POSITION_INT":
@@ -790,6 +812,18 @@ async def _run_mavlink_bridge(
                 elif msg_type == "BATTERY_STATUS":
                     if msg.battery_remaining >= 0:
                         last_battery_pct = msg.battery_remaining / 100.0
+
+                elif msg_type == "LAND_TOUCHDOWN":
+                    # The IO thread confirmed real ground contact and disarmed
+                    # locally; stop our guidance loop and tell the UI.
+                    await ingest_vehicle_message({
+                        "vehicle_id": vehicle_id,
+                        "vehicle_type": info["vehicle_type"],
+                        "topic": f"/vehicles/{vehicle_id}/land_on_boat",
+                        "type": "yp_ground_station/LandOnBoatTouchdown",
+                        "stamp": now,
+                        "msg": {"landed": True},
+                    })
 
                 elif msg_type == "GLOBAL_POSITION_INT":
                     lat = msg.lat / 1e7
@@ -924,10 +958,15 @@ def _execute_sar_command(
         print(f"[SITL][SAR] MOB search mission (streaming) {'COMPLETE' if ok else 'FAILED'}")
 
 
-def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
-    """Blocking: translate a ground-station command into MAVLink and send it."""
+def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> bool:
+    """Blocking: translate a ground-station command into MAVLink and send it.
+
+    Returns True once real ground contact (EXTENDED_SYS_STATE.landed_state)
+    has been confirmed during a land_on_boat_step sequence and this call has
+    disarmed the vehicle.
+    """
     if _mavutil is None:
-        return
+        return False
     command = cmd_payload.get("command", {})
     cmd_type = command.get("type")
     source = cmd_payload.get("source")
@@ -1027,10 +1066,32 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         if lat is not None and lon is not None:
             vehicle_id = str(cmd_payload.get("vehicle_id") or "")
             now = time.monotonic()
-            # Same force-once/respect-override behavior as rtb_follow above.
+            # Same force-once/respect-override behavior as rtb_follow above,
+            # plus reset touchdown tracking for the new attempt.
             if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) > 1.0:
                 _sitl_guided_forced[vehicle_id] = False
+                _sitl_land_touchdown_since.pop(vehicle_id, None)
+                _sitl_land_touchdown_sent[vehicle_id] = False
             _sitl_follow_guided_requests[vehicle_id] = now
+
+            # Real ground contact, reported by ArduCopter's own IMU/throttle-based
+            # landing detector -- not a preset altitude the boat deck may not match.
+            if _sitl_landed_state.get(vehicle_id) == _mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND:
+                if vehicle_id not in _sitl_land_touchdown_since:
+                    _sitl_land_touchdown_since[vehicle_id] = now
+                if bool(command.get("auto_disarm", True)) and not _sitl_land_touchdown_sent.get(vehicle_id, False):
+                    dwell_s = float(command.get("touchdown_dwell_s", 1.5))
+                    if now - _sitl_land_touchdown_since[vehicle_id] >= dwell_s:
+                        master.mav.command_long_send(
+                            master.target_system, master.target_component,
+                            _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                            0, 0, 21196, 0, 0, 0, 0, 0,
+                        )
+                        _sitl_land_touchdown_sent[vehicle_id] = True
+                        print(f"[LAND] Onboard landing detector confirms touchdown on {vehicle_id}; disarmed.")
+                        return True
+                return False
+            _sitl_land_touchdown_since.pop(vehicle_id, None)
 
             if not _sitl_guided_forced.get(vehicle_id, False):
                 mode_mapping = master.mode_mapping()
@@ -1043,7 +1104,7 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
                     _sitl_guided_forced[vehicle_id] = True
             elif getattr(master, "flightmode", "GUIDED") != "GUIDED":
                 print(f"[LAND] Safety pilot has taken control of {vehicle_id}; halting land-on-boat guidance")
-                return
+                return False
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
@@ -1076,6 +1137,7 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
         mission_items = _sar_missions.build_mission_items(
             waypoints,
             force_guided_on_complete=bool(command.get("force_guided_on_complete", False)),
+            surface_vehicle=sitl_bridge_info.get(str(cmd_payload.get("vehicle_id") or ""), {}).get("vehicle_type") in ("usv", "ugv"),
         )
         if not mission_items:
             print("[SITL] mission_plan ignored: no valid waypoint entries")
@@ -1086,9 +1148,13 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             return
 
         if bool(command.get("auto_arm_start", True)):
-            _sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+            # Arm in GUIDED first (ArduCopter refuses to arm from a disarmed
+            # AUTO mode unless already flying); then switch to AUTO and start.
+            _sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
             time.sleep(0.2)
             _sar_missions.arm_vehicle(master)
+            time.sleep(0.2)
+            _sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
             time.sleep(0.2)
             _sar_missions.start_mission(master)
 
@@ -1111,6 +1177,34 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> None:
             0,
             21196,
             0, 0, 0, 0, 0,
+        )
+
+    elif cmd_type == "arm":
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            _mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            1,
+            0,
+            0, 0, 0, 0, 0,
+        )
+
+    elif cmd_type == "takeoff":
+        if _sar_missions is None:
+            print("[SITL] takeoff ignored: sar_missions helpers unavailable")
+            return
+        altitude_m = float(command.get("altitude_m") or 15.0)
+        # ArduPilot only accepts NAV_TAKEOFF while armed in GUIDED.
+        _sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+        time.sleep(0.3)
+        _sar_missions.arm_vehicle(master)
+        time.sleep(0.3)
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            _mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0, 0, 0, 0, float("nan"), 0, 0, altitude_m,
         )
 
     elif cmd_type == "rtcm_data":
@@ -1723,6 +1817,9 @@ def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
         "mission_plan": "upload_mission",
         "ship_relative_trajectory": "upload_mission",
         "trajectory": "send_waypoint",
+        "arm": "arm_disarm",
+        "disarm": "arm_disarm",
+        "takeoff": "arm_disarm",
     }
     
     required_permission = command_permissions.get(cmd_type)
@@ -1775,6 +1872,12 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         shared_mission_completion_targets.pop(vehicle_id, None)
         if shared_mission_plans.pop(vehicle_id, None) is not None:
             await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
+
+    if msg_type == "yp_ground_station/LandOnBoatTouchdown":
+        # The bridge confirmed real ground contact (onboard landing detector)
+        # and already disarmed locally; just stop our guidance loop and tell the UI.
+        await _stop_land_on_boat(vehicle_id)
+        await broadcast_ui({"op": "land_on_boat_touchdown", "vehicle_id": vehicle_id})
 
     update: dict[str, Any] = {
         "vehicle_id": vehicle_id,
@@ -2434,7 +2537,12 @@ async def _start_land_on_boat(vehicle_id: str, source: str) -> None:
 
 
 async def _land_on_boat_loop(vehicle_id: str) -> None:
-    """Track the moving pad, descend to a hover clearance, and hold there."""
+    """Track the moving pad, descend to a hover clearance, and hold there.
+
+    The vehicle bridge (not this loop) confirms actual ground contact via
+    ArduCopter's onboard landing detector and disarms locally, then reports
+    a touchdown event that stops this loop -- no altitude guess is involved.
+    """
     STATE_APPROACH = 0
     STATE_DESCENT = 1
     STATE_HOVER = 2
@@ -2526,10 +2634,15 @@ async def _land_on_boat_loop(vehicle_id: str) -> None:
                         "velocity_north_ms": yp_speed_mps * math.cos(math.radians(yp_heading)),
                         "velocity_east_ms": yp_speed_mps * math.sin(math.radians(yp_heading)),
                         "sink_rate_ms": sink_rate_ms,
+                        # Let the bridge disarm the instant its own onboard
+                        # landing detector confirms ground contact.
+                        "auto_disarm": bool(settings.get("land_on_boat_auto_disarm", LAND_ON_BOAT_AUTO_DISARM)),
+                        "touchdown_dwell_s": float(settings.get("land_on_boat_touchdown_dwell_s", LAND_ON_BOAT_TOUCHDOWN_DWELL_S)),
                     }
 
             if step_command is not None:
                 await _dispatch_vehicle_command(vehicle_id, step_command, source="land_on_boat", emit_ack=False, write_log=False)
+
             await asyncio.sleep(period_s)
 
     except asyncio.CancelledError:

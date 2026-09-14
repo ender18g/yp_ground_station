@@ -48,7 +48,7 @@ export interface Vehicle {
 }
 
 export interface Command {
-  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar" | "clear_sar_pattern" | "mission_plan" | "set_mode" | "land_on_boat";
+  type: "rtb" | "waypoint" | "trajectory" | "search_grid" | "ship_relative_trajectory" | "cancel_sar" | "clear_sar_pattern" | "mission_plan" | "set_mode" | "land_on_boat" | "arm" | "disarm" | "takeoff";
   target?: {
     latitude: number;
     longitude: number;
@@ -56,7 +56,7 @@ export interface Command {
   };
   // set_mode fields
   mode?: string;
-  // search_grid fields
+  // search_grid fields, also reused by takeoff for target altitude
   lat?: number;
   lon?: number;
   grid_size_m?: number;

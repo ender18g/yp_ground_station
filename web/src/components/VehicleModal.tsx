@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Anchor, Brush, CircleDashed, Maximize2, RotateCcw, Route, Video, X } from "lucide-react";
+import { Anchor, Brush, CircleDashed, Maximize2, PlaneTakeoff, Power, PowerOff, RotateCcw, Route, Video, X } from "lucide-react";
 
 import type { Vehicle, VehicleType } from "../types";
 import { calculateRelativePosition } from "../utils/geo";
@@ -19,6 +19,9 @@ type VehicleModalProps = {
   onStreamVideo: () => void;
   onColorSave: (color: string) => void;
   onSetMode: (mode: string) => void;
+  onArm: () => void;
+  onDisarm: () => void;
+  onTakeoff: (altitudeM: number) => void;
 };
 
 const VEHICLE_MODES: Record<VehicleType, string[]> = {
@@ -29,6 +32,9 @@ const VEHICLE_MODES: Record<VehicleType, string[]> = {
   uuv: ["MANUAL", "GUIDED", "AUTO", "RTL", "LOITER"],
   yp: [],
 };
+
+// Only vehicles that fly need a takeoff control.
+const TAKEOFF_CAPABLE_TYPES: VehicleType[] = ["uav", "uavf"];
 
 const VEHICLE_COLOR_PALETTE = [
   "#dc2626", "#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16",
@@ -59,10 +65,15 @@ export function VehicleModal({
   onStreamVideo,
   onColorSave,
   onSetMode,
+  onArm,
+  onDisarm,
+  onTakeoff,
 }: VehicleModalProps) {
   const position = vehicle.position;
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [showModeSelector, setShowModeSelector] = useState(false);
+  const [showTakeoffPanel, setShowTakeoffPanel] = useState(false);
+  const [takeoffAltitudeM, setTakeoffAltitudeM] = useState(15);
   const [draftColor, setDraftColor] = useState(vehicleMarkerColor(vehicle));
   const canStreamVideo = Boolean(vehicle.video?.enabled && ((Array.isArray(vehicle.video?.streams) && vehicle.video.streams.length > 0) || Boolean(vehicle.video?.playback_url)));
   const modalRef = useRef<HTMLDivElement | null>(null);
@@ -79,7 +90,7 @@ export function VehicleModal({
     return { width, x: Math.min(Math.max(padding, candidate.x), maxX), y: Math.min(Math.max(padding, candidate.y), maxY) };
   };
 
-  useEffect(() => { setFrame((current) => clampFrameToViewport(current)); }, [vehicle.vehicle_id, showColorPalette, showModeSelector]);
+  useEffect(() => { setFrame((current) => clampFrameToViewport(current)); }, [vehicle.vehicle_id, showColorPalette, showModeSelector, showTakeoffPanel]);
   useEffect(() => {
     const onResize = () => setFrame((current) => clampFrameToViewport(current));
     window.addEventListener("resize", onResize);
@@ -125,11 +136,38 @@ export function VehicleModal({
           </button>
         )}
         <button className={styles.secondary} onClick={() => setShowColorPalette((value) => !value)}><Brush size={18} />Color</button>
+        {canCommand && <button className={styles.stream} onClick={onArm}><Power size={18} />Arm</button>}
+        {canCommand && <button className={styles.danger} onClick={onDisarm}><PowerOff size={18} />Disarm</button>}
+        {canCommand && TAKEOFF_CAPABLE_TYPES.includes(vehicle.vehicle_type) && (
+          <button className={styles.primary} onClick={() => setShowTakeoffPanel((value) => !value)}><PlaneTakeoff size={18} />Takeoff{showTakeoffPanel && <X size={14} aria-label="Close takeoff panel" />}</button>
+        )}
         {canCommand && VEHICLE_MODES[vehicle.vehicle_type]?.length > 0 && <button className={styles.secondary} onClick={() => setShowModeSelector((value) => !value)}>Settings{showModeSelector && <X size={14} aria-label="Close mode selector" />}</button>}
         {canStreamVideo && <button className={styles.stream} onClick={onStreamVideo}><Video size={18} />Stream Video</button>}
         {canCommand && <button className={styles.primary} onClick={onWaypoint}><Route size={18} />Waypoint</button>}
       </div>
       {showColorPalette && <div className={styles.colorPanel}><div className={styles.colorSwatches}>{VEHICLE_COLOR_PALETTE.map((color) => <button key={color} className={`${styles.colorSwatch} ${draftColor === color ? styles.selected : ""}`} style={{ backgroundColor: color }} title={color} onClick={() => { setDraftColor(color); onColorSave(color); }} />)}</div></div>}
+      {showTakeoffPanel && TAKEOFF_CAPABLE_TYPES.includes(vehicle.vehicle_type) && (
+        <div className={styles.colorPanel}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <label style={{ fontSize: "12px", color: "#64748b" }}>Altitude (m)</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={takeoffAltitudeM}
+              onChange={(event) => setTakeoffAltitudeM(Number(event.target.value))}
+              style={{ width: "70px", padding: "4px 6px", border: "1px solid #cbd5e1", borderRadius: "6px" }}
+            />
+            <button
+              className={styles.primary}
+              style={{ minHeight: "32px", padding: "0 12px" }}
+              onClick={() => { onTakeoff(takeoffAltitudeM); setShowTakeoffPanel(false); }}
+            >
+              Confirm Takeoff
+            </button>
+          </div>
+        </div>
+      )}
       {showModeSelector && VEHICLE_MODES[vehicle.vehicle_type]?.length > 0 && <div className={styles.colorPanel}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>{VEHICLE_MODES[vehicle.vehicle_type].map((mode) => <button key={mode} className={styles.secondary} style={{ fontSize: "13px", padding: "6px 8px" }} onClick={() => { onSetMode(mode); setShowModeSelector(false); }}>{mode}</button>)}</div></div>}
       <div style={{ position: "absolute", bottom: 0, right: 0, width: "24px", height: "24px", cursor: "nwse-resize", display: "flex", alignItems: "flex-end", justifyContent: "flex-end", padding: "4px" }} onPointerDown={(event) => startDrag("resize", event)} onPointerMove={moveDrag} onPointerUp={endDrag}><Maximize2 size={14} color="#64748b" style={{ transform: "rotate(90deg)" }} /></div>
     </div>

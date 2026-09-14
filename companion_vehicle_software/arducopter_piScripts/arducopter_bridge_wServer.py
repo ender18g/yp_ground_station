@@ -95,6 +95,9 @@ _last_rtb_step_time = 0.0
 _rtb_guided_forced = False
 _last_land_step_time = 0.0
 _land_step_guided_forced = False
+_landed_state = 0  # MAV_LANDED_STATE_UNDEFINED until EXTENDED_SYS_STATE arrives
+_land_touchdown_since: float | None = None
+_land_touchdown_sent = False
 
 # --- CONFIG MANAGEMENT & WEB SERVER ---
 
@@ -465,29 +468,52 @@ def follow_yp_velocity(master, command_data: dict) -> None:
         print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
 
-def execute_land_step(master, command_data: dict) -> None:
-    """Stream a moving pad target, including descent or hover velocity."""
-    global _last_land_step_time, _land_step_guided_forced
+def execute_land_step(master, command_data: dict) -> bool:
+    """Stream a moving pad target, including descent or hover velocity.
+
+    Returns True once ArduCopter's own onboard landing detector
+    (EXTENDED_SYS_STATE.landed_state) confirms real ground contact and this
+    call has disarmed the vehicle -- independent of any preset altitude.
+    """
+    global _last_land_step_time, _land_step_guided_forced, _land_touchdown_since, _land_touchdown_sent
     target = command_data.get("target", {})
     lat = target.get("latitude")
     lon = target.get("longitude")
     alt = target.get("altitude")
 
     if None in (lat, lon, alt):
-        return
+        return False
 
     vn = float(command_data.get("velocity_north_ms", 0.0))
     ve = float(command_data.get("velocity_east_ms", 0.0))
     vd = float(command_data.get("sink_rate_ms", 0.0))  # Positive = downward velocity
     yaw_rad = math.radians(float(command_data.get("heading", 0.0)))
 
-    # A gap in steps means the sequence just (re)started, so force GUIDED once.
-    # While steps are continuous, never force the mode back -- if the safety
-    # pilot switches modes to take control, respect it and stop guiding.
+    # A gap in steps means the sequence just (re)started, so force GUIDED once
+    # and reset touchdown tracking for the new attempt. While steps are
+    # continuous, never force the mode back -- if the safety pilot switches
+    # modes to take control, respect it and stop guiding.
     now = time.monotonic()
     if now - _last_land_step_time > 1.0:
         _land_step_guided_forced = False
+        _land_touchdown_since = None
+        _land_touchdown_sent = False
     _last_land_step_time = now
+
+    # Real ground contact, reported by ArduCopter's own IMU/throttle-based
+    # landing detector -- not a preset altitude the boat deck may not match.
+    if _landed_state == mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND:
+        if _land_touchdown_since is None:
+            _land_touchdown_since = now
+        if bool(command_data.get("auto_disarm", True)) and not _land_touchdown_sent:
+            dwell_s = float(command_data.get("touchdown_dwell_s", 1.5))
+            if now - _land_touchdown_since >= dwell_s:
+                master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 21196, 0, 0, 0, 0, 0)
+                _land_touchdown_sent = True
+                print("[LAND] Onboard landing detector confirms touchdown; disarmed.")
+                return True
+        return False
+    _land_touchdown_since = None
 
     try:
         if not _land_step_guided_forced:
@@ -495,7 +521,7 @@ def execute_land_step(master, command_data: dict) -> None:
             _land_step_guided_forced = True
         elif master.flightmode != "GUIDED":
             print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
-            return
+            return False
     except Exception:
         pass
 
@@ -513,6 +539,7 @@ def execute_land_step(master, command_data: dict) -> None:
         0, 0, 0,                                            # Acceleration
         yaw_rad, 0                                          # Yaw angle
     )
+    return False
 
 
 def disarm_vehicle(master) -> None:
@@ -543,6 +570,20 @@ def _run_mob_search(master, track_points: list, corridor_half_width_m: float, sw
             sar_missions.execute_mob_search_streaming(master, track_points, corridor_half_width_m=corridor_half_width_m, swath_m=swath_m, altitude_m=altitude_m, takeoff_altitude_m=takeoff_altitude_m, climb_speed_ms=climb_speed_ms, include_takeoff=SAR_INCLUDE_TAKEOFF, arrival_radius_m=SAR_ARRIVAL_RADIUS_M, stop_event=_sar_stop_event, telemetry_callback=_capture_sar_telemetry)
         except Exception as exc: pass
 
+def _run_takeoff(master, altitude_m: float) -> None:
+    with _sar_mission_lock:
+        try:
+            sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+            time.sleep(0.3)
+            if not sar_missions.arm_vehicle(master):
+                print("[MISSION] Takeoff arm failed")
+                return
+            time.sleep(0.3)
+            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, float("nan"), 0, 0, altitude_m)
+            print(f"[MISSION] Takeoff command sent to {altitude_m}m")
+        except Exception as exc:
+            print(f"[MISSION] takeoff error: {exc}")
+
 def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guided_on_complete: bool) -> None:
     with _sar_mission_lock:
         try:
@@ -558,9 +599,12 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
 
             if not sar_missions.upload_mission(master, mission_items): return
             if auto_arm_start:
-                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+                # Arm in GUIDED first: ArduPilot refuses to arm from a disarmed AUTO mode.
+                sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.arm_vehicle(master)
+                time.sleep(0.2)
+                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.start_mission(master)
         except Exception as exc: pass
@@ -568,7 +612,7 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
 # --- MAIN TELEMETRY LOOP ---
 
 async def telemetry_loop(current_config: dict) -> None:
-    global VEHICLE_TYPE, SAR_INCLUDE_TAKEOFF
+    global VEHICLE_TYPE, SAR_INCLUDE_TAKEOFF, _landed_state
 
     vehicle_id = current_config["vehicle_id"]
     server_ws_url = current_config["server_ws_url"]
@@ -602,6 +646,8 @@ async def telemetry_loop(current_config: dict) -> None:
         
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_POSITION, int(send_hz), 1)
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
+        # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
 
         async with websockets.connect(f"{server_ws_url.rstrip('/')}/{vehicle_id}", ping_interval=10, ping_timeout=10) as ws:
             system_status["ws_connected"] = True
@@ -621,7 +667,13 @@ async def telemetry_loop(current_config: dict) -> None:
                             if cmd_type == "rtb_follow":
                                 follow_yp_velocity(master, command_data)
                             elif cmd_type == "land_on_boat_step":
-                                execute_land_step(master, command_data)
+                                if execute_land_step(master, command_data):
+                                    await ws.send(json.dumps({
+                                        "vehicle_id": vehicle_id,
+                                        "type": "yp_ground_station/LandOnBoatTouchdown",
+                                        "msg": {"landed": True},
+                                        "stamp": time.time(),
+                                    }))
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
                                 goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
@@ -631,8 +683,11 @@ async def telemetry_loop(current_config: dict) -> None:
                             elif cmd_type == "cancel_sar":
                                 _sar_stop_event.set()
                             elif cmd_type == "disarm":
-                                #disarm_vehicle(master)
-                                print("[INFO] Disarm command received, but disarming is disabled for safety.")
+                                master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0)
+                            elif cmd_type == "arm":
+                                sar_missions.arm_vehicle(master)
+                            elif cmd_type == "takeoff" and VEHICLE_TYPE not in ("usv", "ugv"):
+                                threading.Thread(target=_run_takeoff, args=(master, float(command_data.get("altitude_m", 15.0))), daemon=True).start()
                             elif cmd_type == "rtcm_data":
                                 flags = command_data.get("flags", 0)
                                 data_len = command_data.get("len", 0)
@@ -654,7 +709,7 @@ async def telemetry_loop(current_config: dict) -> None:
 
                 msg = None
                 if not _sar_mission_lock.locked():
-                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
+                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "EXTENDED_SYS_STATE"], blocking=False)
                
                 now = time.time()
                 if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
@@ -678,6 +733,8 @@ async def telemetry_loop(current_config: dict) -> None:
                         heading = (heading_raw / 100.0) if heading_raw is not None and heading_raw != 65535 else None
                         _update_vehicle_state(lat, lon, alt, heading)
                         telemetry_sample = (lat, lon, alt, heading)
+                    elif msg_type == "EXTENDED_SYS_STATE":
+                        _landed_state = msg.landed_state
                 else:
                     telemetry_sample = _snapshot_sar_telemetry()
                     if telemetry_sample is not None: _update_vehicle_state(*telemetry_sample)

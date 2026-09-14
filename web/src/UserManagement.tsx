@@ -27,6 +27,7 @@ const permissions = [
   ["send_rtb", "Return to base"],
   ["set_vehicle_mode", "Set vehicle mode"],
   ["cancel_sar", "Cancel SAR"],
+  ["arm_disarm", "Arm/disarm/takeoff"],
   ["create_mission", "Create missions"],
   ["upload_mission", "Upload missions"],
   ["search_grid", "Search grids"],

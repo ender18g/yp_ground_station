@@ -13,6 +13,8 @@ export interface ServerSettings {
   land_on_boat_descent_rate_ms?: number;
   land_on_boat_pad_offset_m?: number;
   land_on_boat_alignment_radius_m?: number;
+  land_on_boat_auto_disarm?: boolean;
+  land_on_boat_touchdown_dwell_s?: number;
   yp_role_vehicle_id?: string | null;
   trail_seconds?: number;
   show_yp_range_rings?: boolean;

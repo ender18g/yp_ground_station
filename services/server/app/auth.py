@@ -27,7 +27,7 @@ JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))  # 24 
 # Each successive level includes the permissions granted to the previous one.
 _PERMISSION_ADDITIONS = {
     "view_only": ["read_telemetry", "read_vehicle_status"],
-    "waypoint_command": ["send_waypoint", "send_rtb", "set_vehicle_mode", "cancel_sar"],
+    "waypoint_command": ["send_waypoint", "send_rtb", "set_vehicle_mode", "cancel_sar", "arm_disarm"],
     "mission_planning": ["create_mission", "upload_mission", "search_grid"],
     "man_overboard": ["trigger_mob"],
     "admin": ["manage_sitl", "manage_users", "manage_settings", "manage_video_streams"],
@@ -116,6 +116,16 @@ def init_database() -> None:
             
             session.commit()
             print("[AUTH] Created default admin user (username=admin, password=admin). CHANGE THIS IMMEDIATELY!")
+
+        # Backfill: users provisioned before `arm_disarm` existed already have
+        # waypoint_command-tier access (send_waypoint) but are missing the new
+        # permission since it was never granted retroactively.
+        for user in session.query(User).options(selectinload(User.permissions)).all():
+            granted = {p.permission for p in user.permissions}
+            if "send_waypoint" in granted and "arm_disarm" not in granted:
+                session.add(UserPermission(user_id=user.id, permission="arm_disarm"))
+                print(f"[AUTH] Backfilled 'arm_disarm' permission for existing user '{user.username}'")
+        session.commit()
     finally:
         session.close()
 

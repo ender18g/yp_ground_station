@@ -54,6 +54,8 @@ APPLICATION_SETTING_DEFAULTS: dict[str, Any] = {
     "land_on_boat_descent_rate_ms": 0.5,
     "land_on_boat_pad_offset_m": -0.4,
     "land_on_boat_alignment_radius_m": 1.0,
+    "land_on_boat_auto_disarm": True,
+    "land_on_boat_touchdown_dwell_s": 1.5,
     "mob_track_seconds": 120.0,
     "mob_swath_m": 20.0,
     "mob_altitude_m": 30.0,
@@ -91,11 +93,12 @@ def normalize_application_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "message_retention_seconds": (60, 30 * 24 * 60 * 60),
         "rtb_update_hz": (0.2, 20.0),
         "rtk_network_port": (1, 65535),
+        "land_on_boat_touchdown_dwell_s": (0.5, 10.0),
     }
     for key, value in payload.items():
         if key not in APPLICATION_SETTING_DEFAULTS:
             continue
-        if key == "show_yp_range_rings":
+        if key in ("show_yp_range_rings", "land_on_boat_auto_disarm"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
         elif key == "yp_role_vehicle_id":

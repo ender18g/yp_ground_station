@@ -119,6 +119,18 @@ class Bridge:
                 await self.handle_mission_plan(command)
             elif command.get("type") == "set_mode":
                 await self.handle_set_mode(command)
+            elif command.get("type") == "arm":
+                await self.call_service("/mavros/cmd/arming", "mavros_msgs/CommandBool", {"value": True})
+            elif command.get("type") == "disarm":
+                await self.call_service("/mavros/cmd/arming", "mavros_msgs/CommandBool", {"value": False})
+            elif command.get("type") == "takeoff":
+                altitude_m = float(command.get("altitude_m") or 15.0)
+                await self.call_service("/mavros/cmd/arming", "mavros_msgs/CommandBool", {"value": True})
+                await self.call_service(
+                    "/mavros/cmd/takeoff",
+                    "mavros_msgs/CommandTOL",
+                    {"min_pitch": 0.0, "yaw": 0.0, "latitude": 0.0, "longitude": 0.0, "altitude": altitude_m},
+                )
 
     async def handle_waypoint(self, command: dict[str, Any]) -> None:
         target = command.get("target") or {}

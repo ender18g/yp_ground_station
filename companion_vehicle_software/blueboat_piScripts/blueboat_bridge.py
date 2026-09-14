@@ -531,6 +531,12 @@ async def telemetry_loop() -> None:
                                 _sar_stop_event.set()
                                 print("[SAR] Cancel requested by operator.")
 
+                            elif cmd_type == "arm":
+                                sar_missions.arm_vehicle(master)
+
+                            elif cmd_type == "disarm":
+                                master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0)
+
                             elif cmd_type == "rtcm_data":
                                 flags = command_data.get("flags", 0)
                                 data_len = command_data.get("len", 0)
@@ -717,9 +723,12 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
                 return
 
             if auto_arm_start:
-                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+                # Arm in GUIDED first: ArduPilot refuses to arm from a disarmed AUTO mode.
+                sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.arm_vehicle(master)
+                time.sleep(0.2)
+                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
                 time.sleep(0.2)
                 sar_missions.start_mission(master)
                 print("[MISSION] Mission armed and started")

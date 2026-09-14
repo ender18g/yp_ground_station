@@ -127,6 +127,7 @@ export function handleDemoCommand(vehicles: DemoVehicle[], vehicleId: string, co
     vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = [];
     vehicle.target = localToGlobalWaypoint(ypPosition.latitude, ypPosition.longitude, yp.heading, ypPosition.altitude, firstWaypoint.x, firstWaypoint.y, firstWaypoint.z);
   }
+  if (command.type === "takeoff") { vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = []; vehicle.target = { latitude: vehicle.lat, longitude: vehicle.lon, altitude: command.altitude_m ?? 15 }; }
 }
 
 export function updateDemoVehicleColor(vehicles: DemoVehicle[], vehicleId: string, color: string): void {

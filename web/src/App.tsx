@@ -148,6 +148,8 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [landOnBoatDescentRateMs, setLandOnBoatDescentRateMs] = useState(0.5);
   const [landOnBoatPadOffsetM, setLandOnBoatPadOffsetM] = useState(-0.4);
   const [landOnBoatAlignmentRadiusM, setLandOnBoatAlignmentRadiusM] = useState(1.0);
+  const [landOnBoatAutoDisarm, setLandOnBoatAutoDisarm] = useState(true);
+  const [landOnBoatTouchdownDwellS, setLandOnBoatTouchdownDwellS] = useState(1.5);
   const [settingsLoaded, setSettingsLoaded] = useState(DEMO_MODE);
   const [mapActionMenu, setMapActionMenu] = useState<MapActionMenuState | null>(null);
   const [streamVehicleId, setStreamVehicleId] = useState<string | null>(null);
@@ -206,6 +208,9 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
     enabled: !DEMO_MODE,
     onAuthenticationExpired: onLogout,
     onPayload: (payload) => {
+      if (payload.error && !payload.op) {
+        console.warn("[YP] command rejected:", payload.error, payload.command_type ? `(${payload.command_type})` : "");
+      }
       if (payload.op === "snapshot") {
         const snapshotVehicles = payload.vehicles as Vehicle[];
         setVehicles(Object.fromEntries(snapshotVehicles.map((vehicle) => [vehicle.vehicle_id, withLocalVehicleColor(vehicle, localVehicleColorsRef.current)])));
@@ -417,6 +422,12 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         if (typeof serverSettings.land_on_boat_alignment_radius_m === "number") {
           setLandOnBoatAlignmentRadiusM(serverSettings.land_on_boat_alignment_radius_m);
         }
+        if (typeof serverSettings.land_on_boat_auto_disarm === "boolean") {
+          setLandOnBoatAutoDisarm(serverSettings.land_on_boat_auto_disarm);
+        }
+        if (typeof serverSettings.land_on_boat_touchdown_dwell_s === "number") {
+          setLandOnBoatTouchdownDwellS(serverSettings.land_on_boat_touchdown_dwell_s);
+        }
         setYpRoleVehicleId(serverSettings.yp_role_vehicle_id ?? null);
         if (typeof serverSettings.mob_track_seconds === "number") {
           setMobTrackSeconds(serverSettings.mob_track_seconds);
@@ -505,6 +516,8 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         land_on_boat_descent_rate_ms: landOnBoatDescentRateMs,
         land_on_boat_pad_offset_m: landOnBoatPadOffsetM,
         land_on_boat_alignment_radius_m: landOnBoatAlignmentRadiusM,
+        land_on_boat_auto_disarm: landOnBoatAutoDisarm,
+        land_on_boat_touchdown_dwell_s: landOnBoatTouchdownDwellS,
         mob_track_seconds: mobTrackSeconds,
         mob_swath_m: mobSwathM,
         mob_altitude_m: mobAltM,
@@ -519,7 +532,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
       }).catch(() => undefined);
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, rtbYpSafeDistanceM, landOnBoatHoverClearanceM, landOnBoatDescentRateMs, landOnBoatPadOffsetM, landOnBoatAlignmentRadiusM, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
+  }, [trailSeconds, showYpRangeRings, messageRetentionMinutes, rtbUpdateHz, rtbSternDistanceM, rtbAltitudeM, rtbYpSafeDistanceM, landOnBoatHoverClearanceM, landOnBoatDescentRateMs, landOnBoatPadOffsetM, landOnBoatAlignmentRadiusM, landOnBoatAutoDisarm, landOnBoatTouchdownDwellS, mobTrackSeconds, mobSwathM, mobAltM, mobCorridorHalfWidthM, mobTakeoffAltitudeM, mobClimbSpeedMs, ypRoleVehicleId, rtkSourceType, rtkHostOrPort, rtkNetworkPort, rtkBaudrate, settingsLoaded]);
 
   useEffect(() => {
     if (DEMO_MODE) return;
@@ -1376,6 +1389,28 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                 <span>{landOnBoatAlignmentRadiusM.toFixed(1)} m</span>
               </label>
               <input min={0.2} max={10} step={0.1} type="range" value={landOnBoatAlignmentRadiusM} disabled={DEMO_MODE} onChange={(event) => setLandOnBoatAlignmentRadiusM(Number(event.target.value))} />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={landOnBoatAutoDisarm}
+                  disabled={DEMO_MODE}
+                  onChange={(event) => setLandOnBoatAutoDisarm(event.target.checked)}
+                />
+                {" "}Auto-disarm on touchdown
+              </label>
+              <label>
+                Touchdown dwell time
+                <span>{landOnBoatTouchdownDwellS.toFixed(1)} s</span>
+              </label>
+              <input
+                min={0.5}
+                max={10}
+                step={0.1}
+                type="range"
+                value={landOnBoatTouchdownDwellS}
+                disabled={DEMO_MODE || !landOnBoatAutoDisarm}
+                onChange={(event) => setLandOnBoatTouchdownDwellS(Number(event.target.value))}
+              />
             </>
           )}
           {settingsTab === "mob" && (
@@ -1498,6 +1533,16 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           onColorSave={(color) => setVehicleColor(selected.vehicle_id, color)}
           onSetMode={(mode) => {
             command(selected.vehicle_id, { type: "set_mode", mode });
+            setSelected(null);
+          }}
+          onArm={() => {
+            command(selected.vehicle_id, { type: "arm" });
+          }}
+          onDisarm={() => {
+            command(selected.vehicle_id, { type: "disarm" });
+          }}
+          onTakeoff={(altitudeM) => {
+            command(selected.vehicle_id, { type: "takeoff", altitude_m: altitudeM });
             setSelected(null);
           }}
         />

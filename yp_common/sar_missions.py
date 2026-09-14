@@ -250,6 +250,17 @@ def build_mission_items(
 
     if items and force_guided_on_complete:
         items.append((*items[-1][:3], int(mavutil.mavlink.MAV_CMD_NAV_GUIDED_ENABLE), 1.0, 0.0, 0.0, 0.0))
+
+    # ArduCopter refuses to switch to AUTO from a disarmed/landed state unless
+    # the first mission command is a takeoff; auto-insert one so any uploaded
+    # flight mission is armable, mirroring the search-grid mission builder.
+    if items and not surface_vehicle and int(items[0][3]) != int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF):
+        takeoff_alt = items[0][2] if items[0][2] > 0 else 15.0
+        items.insert(0, (
+            items[0][0], items[0][1], takeoff_alt,
+            int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF),
+            0.0, 0.0, 0.0, float("nan"),
+        ))
     return items
 
 

@@ -145,14 +145,19 @@ _last_rtb_step_time = 0.0
 _rtb_guided_forced = False
 _last_land_step_time = 0.0
 _land_step_guided_forced = False
+_landed_state = 0  # MAV_LANDED_STATE_UNDEFINED until EXTENDED_SYS_STATE arrives
+_land_touchdown_since: Optional[float] = None
+_land_touchdown_sent = False
 
 
 def send_radio_command(
     master: mavutil.mavlink_connection,
     command: dict[str, object],
     source: Optional[str] = None,
-) -> None:
+) -> bool:
+    """Execute a server command; returns True once touchdown is confirmed and disarmed."""
     global _last_rtb_step_time, _rtb_guided_forced, _last_land_step_time, _land_step_guided_forced
+    global _land_touchdown_since, _land_touchdown_sent
     cmd_type = command.get("type")
     if cmd_type == "rtb_follow":
         target = command.get("target", {})
@@ -194,13 +199,30 @@ def send_radio_command(
         alt = target.get("altitude")
         if None not in (lat, lon, alt):
             # A gap in steps means the sequence just (re)started, so force
-            # GUIDED once. While steps are continuous, never force the mode
-            # back -- if the safety pilot switches modes to take control,
-            # respect it and stop guiding.
+            # GUIDED once and reset touchdown tracking for the new attempt.
+            # While steps are continuous, never force the mode back -- if the
+            # safety pilot switches modes to take control, respect it and stop guiding.
             now = time.monotonic()
             if now - _last_land_step_time > 1.0:
                 _land_step_guided_forced = False
+                _land_touchdown_since = None
+                _land_touchdown_sent = False
             _last_land_step_time = now
+
+            # Real ground contact, reported by ArduCopter's own IMU/throttle-based
+            # landing detector -- not a preset altitude the boat deck may not match.
+            if _landed_state == mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND:
+                if _land_touchdown_since is None:
+                    _land_touchdown_since = now
+                if bool(command.get("auto_disarm", True)) and not _land_touchdown_sent:
+                    dwell_s = float(command.get("touchdown_dwell_s", 1.5))
+                    if now - _land_touchdown_since >= dwell_s:
+                        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 21196, 0, 0, 0, 0, 0)
+                        _land_touchdown_sent = True
+                        print("[LAND] Onboard landing detector confirms touchdown; disarmed.")
+                        return True
+                return False
+            _land_touchdown_since = None
 
             try:
                 if not _land_step_guided_forced:
@@ -208,7 +230,7 @@ def send_radio_command(
                     _land_step_guided_forced = True
                 elif master.flightmode != "GUIDED":
                     print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
-                    return
+                    return False
             except Exception as exc:
                 print(f"[WARN] Could not set GUIDED mode for land-on-boat: {exc}")
             master.mav.set_position_target_global_int_send(
@@ -221,7 +243,7 @@ def send_radio_command(
                 float(command.get("sink_rate_ms") or 0.0),
                 0.0, 0.0, 0.0, float(command.get("heading") or 0.0) * 3.141592653589793 / 180.0, 0.0,
             )
-        return
+        return False
     if cmd_type == "waypoint":
         target = command.get("target", {})
         lat = target.get("latitude")
@@ -345,6 +367,31 @@ def send_radio_command(
         except Exception as exc:
             print(f"[COMMAND] failed to disarm: {exc}")
 
+    elif cmd_type == "takeoff":
+        altitude_m = float(command.get("altitude_m") or 15.0)
+        try:
+            if sar_missions is not None:
+                sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+            else:
+                master.set_mode("GUIDED")
+            time.sleep(0.3)
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0, 1, 0, 0, 0, 0, 0, 0,
+            )
+            time.sleep(0.3)
+            master.mav.command_long_send(
+                master.target_system,
+                master.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0, 0, 0, 0, float("nan"), 0, 0, altitude_m,
+            )
+            print(f"[COMMAND] takeoff command sent to {altitude_m}m")
+        except Exception as exc:
+            print(f"[COMMAND] failed to send takeoff: {exc}")
+
     elif cmd_type == "mode":
         mode_name = str(command.get("mode", "")).upper()
         if not mode_name:
@@ -387,9 +434,12 @@ def send_radio_command(
             return
 
         if bool(command.get("auto_arm_start", True)):
-            sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+            # Arm in GUIDED first: ArduPilot refuses to arm from a disarmed AUTO mode.
+            sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
             time.sleep(0.2)
             sar_missions.arm_vehicle(master)
+            time.sleep(0.2)
+            sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
             time.sleep(0.2)
             sar_missions.start_mission(master)
             print("[COMMAND] mission_plan uploaded and started")
@@ -432,7 +482,14 @@ async def handle_server_messages(
             continue
 
         print(f"[WEBSOCKET] received command: {command}")
-        await asyncio.to_thread(send_radio_command, master, command, payload.get("source"))
+        touched_down = await asyncio.to_thread(send_radio_command, master, command, payload.get("source"))
+        if touched_down:
+            await websocket.send(json.dumps({
+                "vehicle_id": vehicle_id,
+                "type": "yp_ground_station/LandOnBoatTouchdown",
+                "msg": {"landed": True},
+                "stamp": time.time(),
+            }))
 
 
 async def read_mavlink_telemetry(
@@ -440,6 +497,7 @@ async def read_mavlink_telemetry(
     master: mavutil.mavlink_connection,
     vehicle_id: str,
 ) -> None:
+    global _landed_state
     print("[INFO] requesting telemetry stream from vehicle")
     master.mav.request_data_stream_send(
         master.target_system,
@@ -448,16 +506,22 @@ async def read_mavlink_telemetry(
         int(DEFAULT_SEND_HZ),
         1,
     )
+    # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
 
     while True:
         msg = await asyncio.to_thread(
             master.recv_match,
-            type="GLOBAL_POSITION_INT",
+            type=["GLOBAL_POSITION_INT", "EXTENDED_SYS_STATE"],
             blocking=True,
             timeout=5,
         )
         if msg is None:
             print("[WARN] no GLOBAL_POSITION_INT message received")
+            continue
+
+        if msg.get_type() == "EXTENDED_SYS_STATE":
+            _landed_state = msg.landed_state
             continue
 
         lat = msg.lat / 1e7
