@@ -1969,7 +1969,7 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
 
         gps_fix = extract_gps_fix(topic, msg_type, msg)
         if gps_fix:
-            vehicle["gps_fix"] = gps_fix
+            vehicle["gps_fix"] = {**gps_fix, "stamp": now}
 
         vehicle_snapshot = public_vehicle(vehicle)
         # Strip history from the per-message update — it grows to thousands of entries

@@ -809,6 +809,7 @@
 .gps-fix-row.gps-fix-good { border-left-color: #16a34a; }
 .gps-fix-row.gps-fix-warn { border-left-color: #f59e0b; }
 .gps-fix-row.gps-fix-bad { border-left-color: #dc2626; }
+.gps-fix-row.gps-fix-stale { border-left-color: #94a3b8; opacity: 0.65; }
 
 .gps-fix-vehicle {
   font-weight: 700;
@@ -822,10 +823,17 @@
 .gps-fix-row.gps-fix-good .gps-fix-type { color: #16a34a; }
 .gps-fix-row.gps-fix-warn .gps-fix-type { color: #b45309; }
 .gps-fix-row.gps-fix-bad .gps-fix-type { color: #dc2626; }
+.gps-fix-row.gps-fix-stale .gps-fix-type { color: #64748b; }
 
 .gps-fix-accuracy,
-.gps-fix-sats {
+.gps-fix-sats,
+.gps-fix-age {
   color: #64748b;
+}
+
+.gps-fix-age {
+  margin-left: auto;
+  font-size: 11px;
 }
 
 .deconfliction-radius-row {

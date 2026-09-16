@@ -67,6 +67,11 @@ function gpsFixQuality(fixType: number): "good" | "warn" | "bad" {
   if (fixType >= 4) return "warn"; // DGPS / RTK Float
   return "bad"; // No GPS / No Fix / 2D / 3D only
 }
+/** A GPS fix reading older than this is likely leftover from before a link drop or config change. */
+const GPS_FIX_STALE_AFTER_S = 10;
+function isGpsFixStale(stamp: number | undefined): boolean {
+  return stamp == null || Date.now() / 1000 - stamp > GPS_FIX_STALE_AFTER_S;
+}
 /** Renders elapsed time since a unix-seconds timestamp as a short human string. */
 function formatSecondsAgo(epochSeconds: number | null): string {
   if (epochSeconds == null) return "never";
@@ -1186,8 +1191,12 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                     .filter((vehicle) => vehicle.gps_fix)
                     .map((vehicle) => {
                       const fix = vehicle.gps_fix!;
+                      const stale = isGpsFixStale(fix.stamp);
                       return (
-                        <div key={vehicle.vehicle_id} className={`gps-fix-row gps-fix-${gpsFixQuality(fix.fix_type)}`}>
+                        <div
+                          key={vehicle.vehicle_id}
+                          className={`gps-fix-row ${stale ? "gps-fix-stale" : `gps-fix-${gpsFixQuality(fix.fix_type)}`}`}
+                        >
                           <span className="gps-fix-vehicle">{vehicle.vehicle_id}</span>
                           <span className="gps-fix-type">{fix.fix_type_label}</span>
                           <span className="gps-fix-accuracy">
@@ -1197,6 +1206,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                           {fix.satellites_visible != null && (
                             <span className="gps-fix-sats">{fix.satellites_visible} sats</span>
                           )}
+                          <span className="gps-fix-age">{stale ? `stale · ${formatSecondsAgo(fix.stamp ?? null)}` : formatSecondsAgo(fix.stamp ?? null)}</span>
                         </div>
                       );
                     })}

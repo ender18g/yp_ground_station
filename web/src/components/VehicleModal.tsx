@@ -59,6 +59,12 @@ function gpsFixQuality(fixType: number): "good" | "warn" | "bad" {
   return "bad"; // No GPS / No Fix / 2D / 3D only
 }
 
+/** A GPS fix reading older than this is likely leftover from before a link drop or config change. */
+const GPS_FIX_STALE_AFTER_S = 10;
+function isGpsFixStale(stamp: number | undefined): boolean {
+  return stamp == null || Date.now() / 1000 - stamp > GPS_FIX_STALE_AFTER_S;
+}
+
 export function VehicleModal({
   vehicle,
   shipVehicle,
@@ -128,16 +134,20 @@ export function VehicleModal({
       </div>
       <div className={styles.metrics}>
         <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} /><Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} /><Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} /><Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} /><Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} /><Metric label="SAR Mission" value={sarMissionActive ? "Running" : "Idle"} />
-        {vehicle.gps_fix && (
-          <>
-            <Metric label="GPS Fix" value={vehicle.gps_fix.fix_type_label} tone={gpsFixQuality(vehicle.gps_fix.fix_type)} />
-            <Metric
-              label="GPS Accuracy"
-              value={vehicle.gps_fix.horizontal_accuracy_m != null ? `±${vehicle.gps_fix.horizontal_accuracy_m.toFixed(2)} m` : "--"}
-              tone={gpsFixQuality(vehicle.gps_fix.fix_type)}
-            />
-          </>
-        )}
+        {vehicle.gps_fix && (() => {
+          const stale = isGpsFixStale(vehicle.gps_fix!.stamp);
+          const tone = stale ? undefined : gpsFixQuality(vehicle.gps_fix!.fix_type);
+          return (
+            <>
+              <Metric label="GPS Fix" value={stale ? `${vehicle.gps_fix!.fix_type_label} (stale)` : vehicle.gps_fix!.fix_type_label} tone={tone} />
+              <Metric
+                label="GPS Accuracy"
+                value={vehicle.gps_fix!.horizontal_accuracy_m != null ? `±${vehicle.gps_fix!.horizontal_accuracy_m.toFixed(2)} m` : "--"}
+                tone={tone}
+              />
+            </>
+          );
+        })()}
       </div>
       {relativePos && <div style={{ marginTop: "15px", paddingTop: "15px", borderTop: "1px solid #334155" }}><div style={{ fontSize: "12px", fontWeight: "bold", color: "#94a3b8", marginBottom: "8px", textTransform: "uppercase" }}>Ship Reference Frame (FLU)</div><div className={styles.metrics}><Metric label="X (Forward)" value={`${relativePos.x > 0 ? "+" : ""}${relativePos.x.toFixed(1)} m`} /><Metric label="Y (Left/Port)" value={`${relativePos.y > 0 ? "+" : ""}${relativePos.y.toFixed(1)} m`} /><Metric label="Z (Up)" value={`${relativePos.z > 0 ? "+" : ""}${relativePos.z.toFixed(1)} m`} /><Metric label="Radial Dist." value={`${relativePos.distance.toFixed(1)} m`} /></div></div>}
       <div className={styles.modalActions} style={{ marginTop: "15px" }}>

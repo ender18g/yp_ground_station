@@ -50,6 +50,7 @@ export interface Vehicle {
     satellites_visible?: number | null;
     horizontal_accuracy_m?: number | null;
     vertical_accuracy_m?: number | null;
+    stamp?: number;
   };
   messages: Record<string, VehicleMessage>;
 }
