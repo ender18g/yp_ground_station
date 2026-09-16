@@ -364,6 +364,29 @@ curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
 
 MAVLink camera discovery probes `<camera-host>:8889` after bridge connection and every 60 seconds. On success it publishes `http://<camera-host>:8889/cam/whep`. The `yp-server` container must be able to reach that host and port. A failed probe does not erase an existing stream. The optional Camera Host field is sent as `camera_host`; when omitted, host-based `tcp:`, `tcpout:`, `udpout:`, and `udpbcast:` URLs can provide the host. Serial URLs, inbound/wildcard listeners, `0.0.0.0`, and `localhost` require an explicit camera host. The probe checks raw TCP reachability; the browser negotiates WHEP only when video is opened.
 
+### Axis YP cameras
+
+Configure reachable Axis camera IPs in the `yp-server` environment and
+recreate that service:
+
+```yaml
+AXIS_CAMERA_USERNAME: root
+AXIS_CAMERA_PASSWORD: "your-camera-password"
+AXIS_CAMERA_AFT_HOST: "192.168.0.50"
+AXIS_CAMERA_PORT_HOST: ""
+AXIS_CAMERA_STARBOARD_HOST: ""
+```
+
+The camera panel probes configured hosts and shows their online status. Live
+video is proxied through the server as MJPEG, keeping Axis credentials out of
+the browser. PTZ controls use `POST /api/cameras/{id}/ptz` and require the
+`control_cameras` permission, included in the admin permission level. The
+camera service polls every 15 seconds, so the remaining hosts can be added as
+those cameras are installed. The camera view supports hold-to-move directional
+buttons, click-dragging the live image to pan/tilt, and mouse-wheel zoom. The
+camera window can be dragged by its header and resized from its lower-right
+corner.
+
 ## Vehicle deconfliction
 
 When enabled, detection runs every 0.5 seconds using horizontal great-circle distance plus altitude difference. A conflict occurs below the sum of the vehicles' safety radii. The lower-priority vehicle receives a temporary avoidance waypoint; its original command is preserved and re-dispatched after the conflict clears.

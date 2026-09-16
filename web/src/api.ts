@@ -68,6 +68,31 @@ export function websocketUrl(path: string): string {
   return `${protocol}//${window.location.host}${path}`;
 }
 
+export interface AxisCamera {
+  id: string;
+  label: string;
+  online: boolean;
+  last_checked: number | null;
+  stream_url: string;
+  ptz_capable: boolean;
+}
+
+export async function listAxisCameras(): Promise<AxisCamera[]> {
+  const response = await apiFetch("/api/cameras", { headers: getAuthHeaders() });
+  if (!response.ok) return [];
+  const data = await response.json() as { cameras?: AxisCamera[] };
+  return data.cameras ?? [];
+}
+
+export async function sendAxisPtz(cameraId: string, pan: number, tilt: number, zoom = 0): Promise<void> {
+  const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/ptz`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ pan, tilt, zoom }),
+  });
+  if (!response.ok) throw new Error(`PTZ command failed: ${response.status}`);
+}
+
 // ===== Authentication API =====
 
 export interface LoginResult {

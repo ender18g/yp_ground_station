@@ -10,6 +10,9 @@ services:
       DOCKER_INFLUXDB_INIT_ORG: yp
       DOCKER_INFLUXDB_INIT_BUCKET: telemetry
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: yp-dev-token
+      # WAL replay is normal on startup; keep routine file-by-file messages out
+      # of the compose log while retaining warnings and errors.
+      INFLUXD_LOG_LEVEL: warn
     volumes:
       - influx-data:/var/lib/influxdb2
     healthcheck:
@@ -48,6 +51,14 @@ services:
       MESSAGE_CLEANUP_INTERVAL_SECONDS: "600"
       INFLUX_MAX_WRITE_HZ: "5"
       TILE_MAX_CACHE_AGE_SECONDS: "31536000"
+      # Axis VAPIX PTZ cameras mounted on the YP. Leave a HOST blank until
+      # that camera is installed/reachable on the network - it simply won't
+      # show up in the UI until a host is set and it responds.
+      AXIS_CAMERA_USERNAME: root
+      AXIS_CAMERA_PASSWORD: "usna1845"
+      AXIS_CAMERA_PORT_HOST: ""
+      AXIS_CAMERA_STARBOARD_HOST: ""
+      AXIS_CAMERA_AFT_HOST: "10.10.40.11"
     volumes:
       - ./data/auth:/data/auth
       - ./data/tiles:/data/tiles:ro

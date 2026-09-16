@@ -34,6 +34,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 from app.auth import init_database, get_current_user, require_permission
 from app.auth_routes import router as auth_router
+from app.axis_cameras import router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast
 from app.settings import get_deconfliction_settings, update_deconfliction_settings
 from app.settings import APPLICATION_SETTING_DEFAULTS, get_application_settings, update_application_settings
 from app.tiles import router as tile_router, TILE_MAX_CACHE_AGE_SECONDS
@@ -95,6 +96,7 @@ rtcm_status: dict[str, Any] = {
 app = FastAPI(title="YP Ground Station", version="0.1.0")
 app.include_router(tile_router)
 app.include_router(auth_router)
+app.include_router(axis_camera_router)
 
 
 @app.middleware("http")
@@ -430,6 +432,7 @@ async def startup() -> None:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
     load_video_streams_from_env()
+    set_axis_camera_broadcast(broadcast_ui)
     
     # Start deconfliction check task
     deconfliction_task = asyncio.create_task(_deconfliction_check_loop())

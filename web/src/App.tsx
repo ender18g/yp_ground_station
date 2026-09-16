@@ -1,6 +1,7 @@
 import L from "leaflet";
 import {
   AlertTriangle,
+  Camera,
   Cable,
   Crosshair,
   EthernetPort,
@@ -22,8 +23,8 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
-import type { CurrentUser, SITLBridge, RtcmStatus } from "./api";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listAxisCameras, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { AxisCamera, CurrentUser, SITLBridge, RtcmStatus } from "./api";
 import type { Command, Position, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
@@ -33,6 +34,7 @@ import { MessageDrawer, type StreamMessage } from "./components/MessageDrawer";
 import { SITLPanel } from "./components/SITLPanel";
 import { VehicleModal } from "./components/VehicleModal";
 import { VideoViewer } from "./components/VideoViewer";
+import { CameraPanel } from "./components/CameraPanel";
 import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, WaypointCrosshair, YpRangeRings, type WaypointMarker } from "./components/map/VehicleLayers";
 import { vehicleMarkerColor } from "./utils/vehicleStyle";
 import { WeatherRadarLayer, WindLayer } from "./components/map/OverlayLayers";
@@ -196,6 +198,8 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [deconflictionOrbitRadius, setDeconflictionOrbitRadius] = useState(50.0);
   const [deconflictionMaxPause, setDeconflictionMaxPause] = useState(300.0);
   const [showSITL, setShowSITL] = useState(false);
+  const [showCameras, setShowCameras] = useState(false);
+  const [axisCameras, setAxisCameras] = useState<AxisCamera[]>([]);
   const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
@@ -314,6 +318,12 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           return { ...current, [vehicleId]: nextVehicle };
         });
       }
+      if (payload.op === "camera_status_update") {
+        const camera = payload.camera as AxisCamera;
+        setAxisCameras((current) => current.some((item) => item.id === camera.id)
+          ? current.map((item) => item.id === camera.id ? camera : item)
+          : [...current, camera]);
+      }
     },
   });
   const connected = DEMO_MODE || socketConnected;
@@ -358,6 +368,11 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setSitlBridges(Object.fromEntries(bridges.map((b) => [b.vehicle_id, b])))
       )
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    void listAxisCameras().then(setAxisCameras).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -1007,6 +1022,15 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
               <Cable size={19} />
             </button>
           )}
+          {!DEMO_MODE && (
+            <button
+              className={showCameras ? "icon-button active" : "icon-button"}
+              title="YP Cameras"
+              onClick={() => { setShowCameras((value) => !value); setShowSettings(false); setShowSITL(false); }}
+            >
+              <Camera size={19} />
+            </button>
+          )}
           <button
             ref={settingsButtonRef}
             className={showSettings ? "icon-button active" : "icon-button"}
@@ -1059,6 +1083,8 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           />
         </div>
       )}
+
+      {showCameras && !DEMO_MODE && <CameraPanel cameras={axisCameras} onClose={() => setShowCameras(false)} />}
 
       {showUserManagement && currentUser?.permissions.includes("manage_users") && (
         <Suspense fallback={null}>

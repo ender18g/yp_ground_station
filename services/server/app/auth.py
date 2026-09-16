@@ -30,7 +30,7 @@ _PERMISSION_ADDITIONS = {
     "waypoint_command": ["send_waypoint", "send_rtb", "set_vehicle_mode", "cancel_sar", "arm_disarm"],
     "mission_planning": ["create_mission", "upload_mission", "search_grid"],
     "man_overboard": ["trigger_mob"],
-    "admin": ["manage_sitl", "manage_users", "manage_settings", "manage_video_streams"],
+    "admin": ["manage_sitl", "manage_users", "manage_settings", "manage_video_streams", "control_cameras"],
 }
 PERMISSION_LEVELS: dict[str, list[str]] = {}
 _granted_permissions: list[str] = []
@@ -125,6 +125,9 @@ def init_database() -> None:
             if "send_waypoint" in granted and "arm_disarm" not in granted:
                 session.add(UserPermission(user_id=user.id, permission="arm_disarm"))
                 print(f"[AUTH] Backfilled 'arm_disarm' permission for existing user '{user.username}'")
+            if "manage_video_streams" in granted and "control_cameras" not in granted:
+                session.add(UserPermission(user_id=user.id, permission="control_cameras"))
+                print(f"[AUTH] Backfilled 'control_cameras' permission for existing user '{user.username}'")
         session.commit()
     finally:
         session.close()

@@ -609,6 +609,55 @@
   margin-bottom: 14px;
 }
 
+.camera-panel {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  width: min(420px, calc(100vw - 32px));
+  min-width: 320px;
+  min-height: 300px;
+  box-sizing: border-box;
+  overflow: auto;
+  z-index: 1200;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24);
+}
+
+.camera-panel-header,
+.camera-selector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.camera-panel-header { cursor: grab; user-select: none; }
+.camera-panel-header:active { cursor: grabbing; }
+
+.camera-selector-row { margin: 12px 0; }
+.camera-selector-row select { flex: 1; min-width: 0; }
+.camera-status { color: #64748b; font-size: 12px; white-space: nowrap; }
+.camera-status.online { color: #15803d; font-weight: 700; }
+.camera-panel-empty { color: #64748b; font-size: 13px; margin: 16px 0 4px; }
+.camera-preview-wrap { aspect-ratio: 16 / 9; background: #0f172a; border-radius: 6px; overflow: hidden; }
+.camera-preview { display: block; width: 100%; height: 100%; object-fit: contain; cursor: crosshair; touch-action: none; }
+.camera-offline { display: flex; height: 100%; align-items: center; justify-content: center; gap: 8px; color: #cbd5e1; font-size: 13px; }
+.camera-panel-error { margin-top: 10px; color: #b91c1c; font-size: 12px; }
+.camera-ptz-controls { display: grid; grid-template: repeat(3, 34px) / repeat(5, 34px); gap: 5px; justify-content: center; margin: 12px auto 2px; }
+.camera-ptz-controls button { display: grid; place-items: center; padding: 0; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 5px; cursor: pointer; }
+.camera-ptz-controls button:hover { background: #cbd5e1; }
+.camera-ptz-up { grid-area: 1 / 3; }
+.camera-ptz-left { grid-area: 2 / 2; }
+.camera-ptz-stop { grid-area: 2 / 3; }
+.camera-ptz-right { grid-area: 2 / 4; }
+.camera-ptz-down { grid-area: 3 / 3; }
+.camera-ptz-zoom-out { grid-area: 2 / 1; }
+.camera-ptz-zoom-in { grid-area: 2 / 5; }
+.camera-resize-handle { position: absolute; right: 3px; bottom: 3px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; color: #475569; background: transparent; border: 0; cursor: nwse-resize; }
+
 .settings-panel label {
   display: flex;
   justify-content: space-between;

@@ -35,6 +35,7 @@ const permissions = [
   ["manage_sitl", "Manage connections"],
   ["manage_settings", "Manage settings"],
   ["manage_video_streams", "Manage video streams"],
+  ["control_cameras", "Control PTZ cameras"],
   ["manage_users", "Manage users"],
 ] as const;
 
