@@ -27,6 +27,11 @@ services:
       context: .
       dockerfile: services/server/Dockerfile
       network: host
+    extra_hosts:
+      # Docker Desktop (Mac/Windows) resolves this automatically; plain Linux
+      # Docker Engine needs it mapped explicitly to reach the host machine
+      # (e.g. the RTK relay agent listening on host.docker.internal:<port>).
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
       # MAVLink UDP ingress from external radios / BlueOS endpoints

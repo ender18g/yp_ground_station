@@ -61,6 +61,12 @@ const RTCM_STATUS_LABELS: Record<RtcmStatus["state"], string> = {
   stale: "No Data Received",
   error: "Connection Error",
 };
+/** Buckets a MAV_GPS_FIX_TYPE value into a quality tier used for RTK tab styling. */
+function gpsFixQuality(fixType: number): "good" | "warn" | "bad" {
+  if (fixType >= 6) return "good"; // RTK Fixed / Static / PPP
+  if (fixType >= 4) return "warn"; // DGPS / RTK Float
+  return "bad"; // No GPS / No Fix / 2D / 3D only
+}
 /** Renders elapsed time since a unix-seconds timestamp as a short human string. */
 function formatSecondsAgo(epochSeconds: number | null): string {
   if (epochSeconds == null) return "never";
@@ -504,6 +510,10 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
 
   const handleStartRtkRelay = async () => {
     setRtkRelayError(null);
+    if (rtkNetworkPort < 1024) {
+      setRtkRelayError("Network port must be 1024 or higher (ports below 1024 require root and will fail to bind).");
+      return;
+    }
     setRtkRelayStarting(true);
     try {
       await startAgentRelay(rtkRelayPort, rtkBaudrate, rtkNetworkPort);
@@ -1170,6 +1180,28 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                     : `${rtcmStatus.frame_count} frames received · last frame ${formatSecondsAgo(rtcmStatus.last_frame_at)}`}
                 </p>
               )}
+              {Object.values(vehicles).some((vehicle) => vehicle.gps_fix) && (
+                <div className="gps-fix-list">
+                  {Object.values(vehicles)
+                    .filter((vehicle) => vehicle.gps_fix)
+                    .map((vehicle) => {
+                      const fix = vehicle.gps_fix!;
+                      return (
+                        <div key={vehicle.vehicle_id} className={`gps-fix-row gps-fix-${gpsFixQuality(fix.fix_type)}`}>
+                          <span className="gps-fix-vehicle">{vehicle.vehicle_id}</span>
+                          <span className="gps-fix-type">{fix.fix_type_label}</span>
+                          <span className="gps-fix-accuracy">
+                            {fix.horizontal_accuracy_m != null ? `±${fix.horizontal_accuracy_m.toFixed(2)}m H` : "—"}
+                            {fix.vertical_accuracy_m != null ? ` / ±${fix.vertical_accuracy_m.toFixed(2)}m V` : ""}
+                          </span>
+                          {fix.satellites_visible != null && (
+                            <span className="gps-fix-sats">{fix.satellites_visible} sats</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
               <label>
                 Source Mode
                 <select
@@ -1219,7 +1251,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                       Network Port
                       <input
                         type="number"
-                        min={1}
+                        min={1024}
                         max={65535}
                         value={rtkNetworkPort}
                         disabled={DEMO_MODE}

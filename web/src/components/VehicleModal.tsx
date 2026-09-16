@@ -47,8 +47,16 @@ function vehicleMarkerColor(vehicle: Vehicle): string {
   return vehicleWithColor.marker_color ?? "#0ea5e9";
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className={styles.metric}><span>{label}</span><strong>{value}</strong></div>;
+function Metric({ label, value, tone }: { label: string; value: string; tone?: "good" | "warn" | "bad" }) {
+  const toneColor = tone === "good" ? "#16a34a" : tone === "warn" ? "#b45309" : tone === "bad" ? "#dc2626" : undefined;
+  return <div className={styles.metric}><span>{label}</span><strong style={toneColor ? { color: toneColor } : undefined}>{value}</strong></div>;
+}
+
+/** Buckets a MAV_GPS_FIX_TYPE value into a quality tier for GPS fix coloring. */
+function gpsFixQuality(fixType: number): "good" | "warn" | "bad" {
+  if (fixType >= 6) return "good"; // RTK Fixed / Static / PPP
+  if (fixType >= 4) return "warn"; // DGPS / RTK Float
+  return "bad"; // No GPS / No Fix / 2D / 3D only
 }
 
 export function VehicleModal({
@@ -120,6 +128,16 @@ export function VehicleModal({
       </div>
       <div className={styles.metrics}>
         <Metric label="Latitude" value={position?.latitude.toFixed(6) ?? "--"} /><Metric label="Longitude" value={position?.longitude.toFixed(6) ?? "--"} /><Metric label="Altitude" value={`${(position?.altitude ?? 0).toFixed(1)} m`} /><Metric label="Heading" value={`${(vehicle.heading ?? 0).toFixed(0)} deg`} /><Metric label="Battery" value={vehicle.battery?.percentage == null ? "--" : `${Math.round(vehicle.battery.percentage * 100)}%`} /><Metric label="SAR Mission" value={sarMissionActive ? "Running" : "Idle"} />
+        {vehicle.gps_fix && (
+          <>
+            <Metric label="GPS Fix" value={vehicle.gps_fix.fix_type_label} tone={gpsFixQuality(vehicle.gps_fix.fix_type)} />
+            <Metric
+              label="GPS Accuracy"
+              value={vehicle.gps_fix.horizontal_accuracy_m != null ? `±${vehicle.gps_fix.horizontal_accuracy_m.toFixed(2)} m` : "--"}
+              tone={gpsFixQuality(vehicle.gps_fix.fix_type)}
+            />
+          </>
+        )}
       </div>
       {relativePos && <div style={{ marginTop: "15px", paddingTop: "15px", borderTop: "1px solid #334155" }}><div style={{ fontSize: "12px", fontWeight: "bold", color: "#94a3b8", marginBottom: "8px", textTransform: "uppercase" }}>Ship Reference Frame (FLU)</div><div className={styles.metrics}><Metric label="X (Forward)" value={`${relativePos.x > 0 ? "+" : ""}${relativePos.x.toFixed(1)} m`} /><Metric label="Y (Left/Port)" value={`${relativePos.y > 0 ? "+" : ""}${relativePos.y.toFixed(1)} m`} /><Metric label="Z (Up)" value={`${relativePos.z > 0 ? "+" : ""}${relativePos.z.toFixed(1)} m`} /><Metric label="Radial Dist." value={`${relativePos.distance.toFixed(1)} m`} /></div></div>}
       <div className={styles.modalActions} style={{ marginTop: "15px" }}>

@@ -44,6 +44,13 @@ export interface Vehicle {
     voltage?: number;
     current?: number;
   };
+  gps_fix?: {
+    fix_type: number;
+    fix_type_label: string;
+    satellites_visible?: number | null;
+    horizontal_accuracy_m?: number | null;
+    vertical_accuracy_m?: number | null;
+  };
   messages: Record<string, VehicleMessage>;
 }
 

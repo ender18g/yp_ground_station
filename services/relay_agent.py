@@ -23,6 +23,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -52,10 +53,20 @@ def _start_relay(port: str, baud: int, tcp_port: int) -> int:
         proc = subprocess.Popen(
             [sys.executable, str(RELAY_SCRIPT), "--port", port, "--baud", str(baud), "--tcp-port", str(tcp_port)],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         _relays[tcp_port] = proc
-        return proc.pid
+    # com_tcp_relay.py fails fast (bad port, port busy, etc.) if it's going to
+    # fail at all; give it a moment so we can report that instead of silently
+    # reporting success while nothing is actually listening.
+    time.sleep(0.5)
+    if proc.poll() is not None:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        with _lock:
+            _relays.pop(tcp_port, None)
+        raise RuntimeError(stderr.strip() or f"relay exited immediately with code {proc.returncode}")
+    return proc.pid
 
 
 def _stop_relay(tcp_port: int) -> bool:

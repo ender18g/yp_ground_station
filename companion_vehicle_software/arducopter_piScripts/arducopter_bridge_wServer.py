@@ -296,6 +296,28 @@ def get_gps_fix_label(fix_type: int) -> str:
     fix_map = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed"}
     return fix_map.get(fix_type, f"Fix {fix_type}")
 
+def create_gps_fix_message(vehicle_id: str, msg) -> dict:
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    fix_type = getattr(msg, "fix_type", 0)
+    satellites_visible = getattr(msg, "satellites_visible", 255)
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_type": VEHICLE_TYPE,
+        "topic": f"/vehicles/{vehicle_id}/gps_fix",
+        "type": "mavlink/GPS_RAW_INT",
+        "stamp": time.time(),
+        "msg": {
+            "fix_type": fix_type,
+            "fix_type_label": get_gps_fix_label(fix_type),
+            "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+            "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+            "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+        },
+    }
+
 def create_navsatfix_message(vehicle_id: str, lat: float, lon: float, alt: float, heading: float | None = None) -> dict:
     now = time.time()
     sec = int(now)
@@ -727,6 +749,7 @@ async def telemetry_loop(current_config: dict) -> None:
                     elif msg_type == "GPS_RAW_INT":
                         system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
                         system_status["satellites"] = getattr(msg, "satellites_visible", 0)
+                        await ws.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
                     elif msg_type == "GLOBAL_POSITION_INT":
                         lat, lon, alt = msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
                         heading_raw = getattr(msg, "hdg", None)
