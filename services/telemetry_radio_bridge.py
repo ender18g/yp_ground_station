@@ -137,6 +137,30 @@ def create_navsatfix_message(
     }
 
 
+def create_gps_fix_message(vehicle_id: str, msg) -> dict[str, object]:
+    fix_type = getattr(msg, "fix_type", 0)
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    satellites_visible = getattr(msg, "satellites_visible", 255)
+    fix_labels = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed", 7: "Static", 8: "PPP"}
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_type": "uav",
+        "topic": f"/vehicles/{vehicle_id}/gps_fix",
+        "type": f"mavlink/{msg.get_type()}",
+        "stamp": time.time(),
+        "msg": {
+            "fix_type": fix_type,
+            "fix_type_label": fix_labels.get(fix_type, "Unknown"),
+            "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+            "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+            "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+        },
+    }
+
+
 def build_mavlink_connection(port: str, baud: int) -> mavutil.mavlink_connection:
     return mavutil.mavlink_connection(f"serial:{port}:{baud}", source_system=255, autoreconnect=False)
 
@@ -508,11 +532,13 @@ async def read_mavlink_telemetry(
     )
     # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
     master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
     while True:
         msg = await asyncio.to_thread(
             master.recv_match,
-            type=["GLOBAL_POSITION_INT", "EXTENDED_SYS_STATE"],
+            type=["GLOBAL_POSITION_INT", "EXTENDED_SYS_STATE", "GPS_RAW_INT", "GPS2_RAW"],
             blocking=True,
             timeout=5,
         )
@@ -522,6 +548,9 @@ async def read_mavlink_telemetry(
 
         if msg.get_type() == "EXTENDED_SYS_STATE":
             _landed_state = msg.landed_state
+            continue
+        if msg.get_type() in ("GPS_RAW_INT", "GPS2_RAW"):
+            await websocket.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
             continue
 
         lat = msg.lat / 1e7

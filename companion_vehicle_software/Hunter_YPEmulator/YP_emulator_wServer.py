@@ -366,6 +366,8 @@ async def mavlink_loop(current_config: dict):
                 master.target_system, master.target_component,
                 mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1
             )
+            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
             last_send = 0.0
             while not reconnect_event.is_set():
@@ -382,7 +384,7 @@ async def mavlink_loop(current_config: dict):
                         except Exception as e:
                             print(f"[RTCM] MAVLink send error: {e}")
 
-                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
+                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW"], blocking=False)
                 if msg:
                     msg_type = msg.get_type()
                     
@@ -396,7 +398,7 @@ async def mavlink_loop(current_config: dict):
                             except Exception:
                                 pass
 
-                    elif msg_type == "GPS_RAW_INT":
+                    elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                         fix_type = getattr(msg, "fix_type", 0)
                         eph = getattr(msg, "eph", 65535)
                         epv = getattr(msg, "epv", 65535)

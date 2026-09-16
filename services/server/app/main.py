@@ -91,6 +91,7 @@ rtcm_status: dict[str, Any] = {
     "bytes_total": 0,
     "error": None,
 }
+_last_gps_fix_log_at: dict[str, float] = {}
 
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
@@ -686,6 +687,22 @@ async def _run_mavlink_bridge(
                 _mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0,
             )
         )
+        # GPS_RAW_INT carries the autopilot's live RTK Float/Fixed solution and
+        # accuracy; request it explicitly because it is not in the position stream.
+        await asyncio.to_thread(
+            lambda: master.mav.command_long_send(
+                master.target_system, master.target_component,
+                _mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                _mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0,
+            )
+        )
+        await asyncio.to_thread(
+            lambda: master.mav.command_long_send(
+                master.target_system, master.target_component,
+                _mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                _mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0,
+            )
+        )
 
         # ------------------------------------------------------------------ #
         # Dedicated MAVLink I/O thread                                        #
@@ -718,7 +735,7 @@ async def _run_mavlink_bridge(
 
                 # Blocking read — wakes up as soon as a message arrives
                 msg = m.recv_match(
-                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS", "EXTENDED_SYS_STATE", "GPS_RAW_INT"],
+                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS", "EXTENDED_SYS_STATE", "GPS_RAW_INT", "GPS2_RAW"],
                     blocking=True,
                     timeout=0.1,
                 )
@@ -737,7 +754,7 @@ async def _run_mavlink_bridge(
                     if now - last_pos_time < min_pos_interval:
                         continue
                     last_pos_time = now
-                elif msg_type == "GPS_RAW_INT":
+                elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                     if now - last_gps_fix_time < min_pos_interval:
                         continue
                     last_gps_fix_time = now
@@ -874,14 +891,14 @@ async def _run_mavlink_bridge(
                             "msg": {"percentage": last_battery_pct},
                         })
 
-                elif msg_type == "GPS_RAW_INT":
+                elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                     await ingest_vehicle_message({
                         "vehicle_id": vehicle_id,
                         "vehicle_type": info["vehicle_type"],
                         "topic": f"/vehicles/{vehicle_id}/gps_fix",
-                        "type": "mavlink/GPS_RAW_INT",
+                        "type": f"mavlink/{msg_type}",
                         "stamp": now,
-                        "msg": _gps_raw_int_to_dict(msg),
+                        "msg": _gps_raw_int_to_dict(msg, source=msg_type),
                     })
 
             # Yield to event loop; shorter sleep when actively draining data
@@ -1876,7 +1893,8 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
 
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     """Update vehicle state from an incoming telemetry message and fan it out to clients."""
-    now = float(payload.get("stamp") or time.time())
+    received_at = time.time()
+    now = float(payload.get("stamp") or received_at)
     vehicle_id = str(payload.get("vehicle_id") or topic_vehicle_id(payload.get("topic", "")) or "unknown")
     # Natural type from the message payload; stored so clearing the YP role can revert it.
     natural_type = normalize_vehicle_type(payload.get("vehicle_type") or infer_vehicle_type(vehicle_id))
@@ -1885,6 +1903,12 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     topic = str(payload.get("topic") or f"/vehicles/{vehicle_id}/unknown")
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
+
+    if "GPS_RAW_INT" in msg_type or "GPS2_RAW" in msg_type:
+        last_logged_at = _last_gps_fix_log_at.get(vehicle_id, 0.0)
+        if received_at - last_logged_at >= 10.0:
+            _last_gps_fix_log_at[vehicle_id] = received_at
+            print(f"[GPS] Received {msg_type} from {vehicle_id} at {received_at:.3f} (payload stamp {now:.3f})")
 
     if msg_type == "yp_ground_station/MissionComplete":
         shared_mission_completion_targets.pop(vehicle_id, None)
@@ -1969,7 +1993,12 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
 
         gps_fix = extract_gps_fix(topic, msg_type, msg)
         if gps_fix:
-            vehicle["gps_fix"] = {**gps_fix, "stamp": now}
+            previous_gps_fix = vehicle.get("gps_fix") or {}
+            if (
+                int(gps_fix.get("fix_type") or 0) >= int(previous_gps_fix.get("fix_type") or 0)
+                or received_at - float(previous_gps_fix.get("stamp") or 0) > 10.0
+            ):
+                vehicle["gps_fix"] = {**gps_fix, "stamp": received_at}
 
         vehicle_snapshot = public_vehicle(vehicle)
         # Strip history from the per-message update — it grows to thousands of entries
@@ -2990,8 +3019,8 @@ GPS_FIX_TYPE_LABELS = {
 }
 
 
-def _gps_raw_int_to_dict(msg: Any) -> dict[str, Any]:
-    """Convert a pymavlink GPS_RAW_INT message into the plain dict stored on the vehicle."""
+def _gps_raw_int_to_dict(msg: Any, source: str = "GPS_RAW_INT") -> dict[str, Any]:
+    """Convert a pymavlink GPS_RAW_INT/GPS2_RAW message into a plain dictionary."""
     fix_type = int(getattr(msg, "fix_type", 0))
     eph = getattr(msg, "eph", 65535)
     epv = getattr(msg, "epv", 65535)
@@ -3002,6 +3031,7 @@ def _gps_raw_int_to_dict(msg: Any) -> dict[str, Any]:
     horizontal_accuracy_m = (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None)
     vertical_accuracy_m = (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None)
     return {
+        "source": source,
         "fix_type": fix_type,
         "fix_type_label": GPS_FIX_TYPE_LABELS.get(fix_type, "Unknown"),
         "satellites_visible": satellites_visible if satellites_visible != 255 else None,
@@ -3014,7 +3044,7 @@ def extract_gps_fix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, A
     """Extract fix type/accuracy from a GPS_RAW_INT-shaped message, or None if not applicable."""
     if not isinstance(msg, dict):
         return None
-    if "GPS_RAW_INT" not in msg_type and not topic.endswith("gps_fix"):
+    if "GPS_RAW_INT" not in msg_type and "GPS2_RAW" not in msg_type and not topic.endswith("gps_fix"):
         return None
     return dict(msg)
 

@@ -104,15 +104,24 @@ async def mavlink_loop(ws: websockets.WebSocketClientProtocol):
         int(SEND_HZ),
         1
     )
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
     asyncio.create_task(command_loop(ws, master))
 
     last_send = 0.0
     while True:
-        msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
+        msg = master.recv_match(type=["GLOBAL_POSITION_INT", "GPS_RAW_INT", "GPS2_RAW"], blocking=False)
         if msg:
             now = time.time()
-            if (now - last_send) >= (1.0 / SEND_HZ):
+            if msg.get_type() in ("GPS_RAW_INT", "GPS2_RAW"):
+                fix_type = getattr(msg, "fix_type", 0)
+                eph, epv = getattr(msg, "eph", 65535), getattr(msg, "epv", 65535)
+                h_acc, v_acc = getattr(msg, "h_acc", None), getattr(msg, "v_acc", None)
+                satellites_visible = getattr(msg, "satellites_visible", 255)
+                labels = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed", 7: "Static", 8: "PPP"}
+                await ws.send(json.dumps(wrap("gps_fix", f"mavlink/{msg.get_type()}", now, {"fix_type": fix_type, "fix_type_label": labels.get(fix_type, "Unknown"), "satellites_visible": satellites_visible if satellites_visible != 255 else None, "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None), "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None)})))
+            elif (now - last_send) >= (1.0 / SEND_HZ):
                 lat = msg.lat / 1e7
                 lon = msg.lon / 1e7
                 alt = msg.relative_alt / 1000.0 

@@ -664,6 +664,8 @@ async def telemetry_loop(current_config: dict) -> None:
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
         # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
         async with websockets.connect(f"{server_ws_url.rstrip('/')}/{vehicle_id}", ping_interval=10, ping_timeout=10) as ws:
             system_status["ws_connected"] = True
@@ -725,7 +727,7 @@ async def telemetry_loop(current_config: dict) -> None:
 
                 msg = None
                 if not _sar_mission_lock.locked():
-                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "EXTENDED_SYS_STATE"], blocking=False)
+                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW", "EXTENDED_SYS_STATE"], blocking=False)
                
                 now = time.time()
                 if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
@@ -740,7 +742,7 @@ async def telemetry_loop(current_config: dict) -> None:
                         try:
                             system_status["flight_mode"] = master.flightmode
                         except Exception: pass
-                    elif msg_type == "GPS_RAW_INT":
+                    elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                         system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
                         system_status["satellites"] = getattr(msg, "satellites_visible", 0)
                         await ws.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
