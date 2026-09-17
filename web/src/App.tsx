@@ -24,7 +24,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } fro
 import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
 import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listAxisCameras, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
-import type { AxisCamera, CurrentUser, SITLBridge, RtcmStatus } from "./api";
+import type { AxisCamera, CameraDetectionUpdate, CurrentUser, SITLBridge, RtcmStatus } from "./api";
 import type { Command, Position, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
@@ -211,6 +211,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [showSITL, setShowSITL] = useState(false);
   const [showCameras, setShowCameras] = useState(false);
   const [axisCameras, setAxisCameras] = useState<AxisCamera[]>([]);
+  const [cameraDetections, setCameraDetections] = useState<Record<string, CameraDetectionUpdate>>({});
   const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
@@ -334,6 +335,10 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setAxisCameras((current) => current.some((item) => item.id === camera.id)
           ? current.map((item) => item.id === camera.id ? camera : item)
           : [...current, camera]);
+      }
+      if (payload.op === "camera_detection_update") {
+        const update = payload as unknown as CameraDetectionUpdate & { op: string };
+        setCameraDetections((current) => ({ ...current, [update.camera_id]: update }));
       }
     },
   });
@@ -1099,7 +1104,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         </div>
       )}
 
-      {showCameras && !DEMO_MODE && <CameraPanel cameras={axisCameras} onClose={() => setShowCameras(false)} />}
+      {showCameras && !DEMO_MODE && <CameraPanel cameras={axisCameras} detections={cameraDetections} onClose={() => setShowCameras(false)} />}
 
       {showUserManagement && currentUser?.permissions.includes("manage_users") && (
         <Suspense fallback={null}>

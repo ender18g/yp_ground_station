@@ -1,0 +1,4 @@
+ultralytics==8.3.28
+opencv-python-headless==4.10.0.84
+websockets==13.1
+httpx==0.28.1

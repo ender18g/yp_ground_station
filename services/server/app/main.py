@@ -1891,6 +1891,19 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
         ros_connections.pop(websocket, None)
 
 
+@app.websocket("/ws/detector")
+async def detector_ws(websocket: WebSocket) -> None:
+    """Internal endpoint for the YOLO detection service to publish bounding-box results for UI overlay."""
+    await websocket.accept()
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            if payload.get("op") == "camera_detection_update":
+                await broadcast_ui(payload)
+    except WebSocketDisconnect:
+        pass
+
+
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     """Update vehicle state from an incoming telemetry message and fan it out to clients."""
     received_at = time.time()

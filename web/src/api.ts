@@ -84,6 +84,20 @@ export async function listAxisCameras(): Promise<AxisCamera[]> {
   return data.cameras ?? [];
 }
 
+export interface CameraDetection {
+  label: string;
+  confidence: number;
+  box: [number, number, number, number]; // [x1, y1, x2, y2] in source frame pixels
+}
+
+export interface CameraDetectionUpdate {
+  camera_id: string;
+  frame_width: number;
+  frame_height: number;
+  detections: CameraDetection[];
+  timestamp: number;
+}
+
 export async function sendAxisPtz(cameraId: string, pan: number, tilt: number, zoom = 0): Promise<void> {
   const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/ptz`, {
     method: "POST",

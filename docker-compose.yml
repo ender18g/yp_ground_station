@@ -128,6 +128,26 @@ services:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
 
+  yolo-detector:
+    build:
+      context: ./services/yolo_detector
+      network: host
+    environment:
+      SERVER_WS_URL: ws://yp-server:8000/ws/detector
+      SERVER_HTTP_URL: http://yp-server:8000
+      # Auto-discovers online Axis cameras from /api/cameras every
+      # YOLO_DISCOVERY_INTERVAL_SECONDS; set YOLO_CAMERA_IDS (comma list) to
+      # pin specific cameras instead.
+      YOLO_CAMERA_IDS: ""
+      YOLO_MODEL_PATH: yolov8n.pt
+      YOLO_CONF_THRESHOLD: "0.4"
+      YOLO_INFER_INTERVAL_SECONDS: "0.5"
+      YOLO_DISCOVERY_INTERVAL_SECONDS: "15"
+      YOLO_CLASSES: ""
+    depends_on:
+      yp-server:
+        condition: service_healthy
+
   sim-uav1:
     build:
       context: ./services/sim_vehicle

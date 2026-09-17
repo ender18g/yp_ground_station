@@ -1,10 +1,11 @@
 import { Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Minus, Plus, Square, X } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
 
-import { listAxisCameras, sendAxisPtz, type AxisCamera } from "../api";
+import { listAxisCameras, sendAxisPtz, type AxisCamera, type CameraDetectionUpdate } from "../api";
 
 type CameraPanelProps = {
   cameras: AxisCamera[];
+  detections?: Record<string, CameraDetectionUpdate>;
   onClose: () => void;
 };
 
@@ -12,7 +13,10 @@ type PtzVector = { pan: number; tilt: number; zoom: number };
 
 const PTZ_STOP: PtzVector = { pan: 0, tilt: 0, zoom: 0 };
 
-export function CameraPanel({ cameras: initialCameras, onClose }: CameraPanelProps) {
+// Detections older than this are considered stale (camera/detector lag) and hidden.
+const DETECTION_MAX_AGE_SECONDS = 3;
+
+export function CameraPanel({ cameras: initialCameras, detections, onClose }: CameraPanelProps) {
   const [frame, setFrame] = useState(() => ({
     x: Math.max(12, window.innerWidth - 452),
     y: 64,
@@ -28,6 +32,8 @@ export function CameraPanel({ cameras: initialCameras, onClose }: CameraPanelPro
   useEffect(() => setCameras(initialCameras), [initialCameras]);
 
   const selected = cameras.find((camera) => camera.id === selectedId) ?? cameras[0];
+  const selectedDetections = selected ? detections?.[selected.id] : undefined;
+  const isDetectionFresh = !!selectedDetections && Date.now() / 1000 - selectedDetections.timestamp < DETECTION_MAX_AGE_SECONDS;
 
   const refresh = () => {
     void listAxisCameras().then((next) => {
@@ -133,6 +139,26 @@ export function CameraPanel({ cameras: initialCameras, onClose }: CameraPanelPro
           </div>
           <div className="camera-preview-wrap">
             {selected.online ? <img className="camera-preview" src={selected.stream_url} alt={`${selected.label} live view`} onPointerDown={startImageDrag} onPointerMove={moveImageDrag} onPointerUp={endImageDrag} onPointerCancel={endImageDrag} onWheel={zoomWithWheel} /> : <div className="camera-offline"><Camera size={28} />Camera unavailable</div>}
+            {selected.online && isDetectionFresh && selectedDetections && (
+              // preserveAspectRatio matches the img's object-fit: contain so boxes line up regardless of panel size.
+              <svg
+                className="camera-detection-overlay"
+                viewBox={`0 0 ${selectedDetections.frame_width} ${selectedDetections.frame_height}`}
+                preserveAspectRatio="xMidYMid meet"
+              >
+                {selectedDetections.detections.map((detection, index) => {
+                  const [x1, y1, x2, y2] = detection.box;
+                  return (
+                    <g key={index}>
+                      <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} className="camera-detection-box" />
+                      <text x={x1} y={Math.max(0, y1 - 4)} className="camera-detection-label">
+                        {detection.label} {Math.round(detection.confidence * 100)}%
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            )}
           </div>
           {selected.online && selected.ptz_capable && (
             <div className="camera-ptz-controls" aria-label="PTZ controls">
