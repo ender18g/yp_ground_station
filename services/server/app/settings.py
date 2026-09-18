@@ -42,6 +42,20 @@ class ApplicationSettings(Base):
     )
 
 
+class DetectorSettings(Base):
+    """Persistent tunables for the YOLO detector and PTZ auto-track controller."""
+    __tablename__ = "detector_settings"
+
+    id = Column(Integer, primary_key=True)
+    values_json = Column(Text, default="{}", nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 APPLICATION_SETTING_DEFAULTS: dict[str, Any] = {
     "trail_seconds": 45.0,
     "show_yp_range_rings": True,
@@ -159,6 +173,26 @@ def update_application_settings(payload: dict[str, Any]) -> tuple[bool, str]:
         except Exception as error:
             session.rollback()
             return False, f"Error updating application settings: {error}"
+
+
+def get_detector_settings() -> dict[str, Any]:
+    """Return persisted YOLO detector/PTZ-track tunables (raw, no defaults applied)."""
+    with get_db_session() as session:
+        record = session.query(DetectorSettings).first()
+        return _json_object(record.values_json) if record else {}
+
+
+def update_detector_settings(patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge and persist detector/track tunables; returns the full stored blob."""
+    with get_db_session() as session:
+        record = session.query(DetectorSettings).first()
+        if not record:
+            record = DetectorSettings(values_json="{}")
+            session.add(record)
+        stored = {**_json_object(record.values_json), **patch}
+        record.values_json = json.dumps(stored)
+        session.commit()
+        return stored
 
 
 def get_deconfliction_settings() -> dict[str, Any]:

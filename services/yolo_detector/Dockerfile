@@ -10,6 +10,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 
+# Bake the default model into the image so first boot works without outbound
+# internet access; it's copied into the shared models volume at runtime.
+RUN python -c "from ultralytics.utils.downloads import attempt_download_asset; attempt_download_asset('yolov8n.pt', dir='/app')"
+
 COPY yolo_detector.py .
 
 CMD ["python", "yolo_detector.py"]

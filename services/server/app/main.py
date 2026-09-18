@@ -34,7 +34,15 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 from app.auth import init_database, get_current_user, require_permission
 from app.auth_routes import router as auth_router
-from app.axis_cameras import router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast
+from app.axis_cameras import router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast, track_from_detections, load_persisted_settings as load_axis_camera_settings
+from app.yolo_models import (
+    router as yolo_models_router,
+    set_broadcast_callback as set_yolo_models_broadcast,
+    set_detector_sender as set_yolo_models_detector_sender,
+    get_active_model as get_active_yolo_model,
+    get_settings as get_active_yolo_settings,
+    load_persisted_settings as load_yolo_model_settings,
+)
 from app.settings import get_deconfliction_settings, update_deconfliction_settings
 from app.settings import APPLICATION_SETTING_DEFAULTS, get_application_settings, update_application_settings
 from app.tiles import router as tile_router, TILE_MAX_CACHE_AGE_SECONDS
@@ -98,6 +106,7 @@ app = FastAPI(title="YP Ground Station", version="0.1.0")
 app.include_router(tile_router)
 app.include_router(auth_router)
 app.include_router(axis_camera_router)
+app.include_router(yolo_models_router)
 
 
 @app.middleware("http")
@@ -413,6 +422,8 @@ async def startup() -> None:
     global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, rtcm_watchdog_task, deconfliction_task
     # Initialize authentication database
     init_database()
+    load_yolo_model_settings()
+    load_axis_camera_settings()
 
     persisted_settings = get_application_settings()
     settings.update(persisted_settings)
@@ -434,6 +445,8 @@ async def startup() -> None:
     cleanup_task = asyncio.create_task(influx_retention_loop())
     load_video_streams_from_env()
     set_axis_camera_broadcast(broadcast_ui)
+    set_yolo_models_broadcast(broadcast_ui)
+    set_yolo_models_detector_sender(send_to_detector)
     
     # Start deconfliction check task
     deconfliction_task = asyncio.create_task(_deconfliction_check_loop())
@@ -1891,17 +1904,44 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
         ros_connections.pop(websocket, None)
 
 
+_detector_ws: Optional[WebSocket] = None
+
+
+async def send_to_detector(payload: dict[str, Any]) -> bool:
+    """Push a command (e.g. set_model) to the connected YOLO detector service, if any."""
+    if _detector_ws is None:
+        return False
+    try:
+        await _detector_ws.send_json(payload)
+        return True
+    except Exception:
+        return False
+
+
 @app.websocket("/ws/detector")
 async def detector_ws(websocket: WebSocket) -> None:
     """Internal endpoint for the YOLO detection service to publish bounding-box results for UI overlay."""
+    global _detector_ws
     await websocket.accept()
+    _detector_ws = websocket
+    await send_to_detector({"op": "set_model", "model": get_active_yolo_model()})
+    await send_to_detector({"op": "set_settings", **get_active_yolo_settings()})
     try:
         while True:
             payload = await websocket.receive_json()
             if payload.get("op") == "camera_detection_update":
                 await broadcast_ui(payload)
+                await track_from_detections(
+                    payload.get("camera_id", ""),
+                    payload.get("detections", []),
+                    payload.get("frame_width", 0),
+                    payload.get("frame_height", 0),
+                )
     except WebSocketDisconnect:
         pass
+    finally:
+        if _detector_ws is websocket:
+            _detector_ws = None
 
 
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
