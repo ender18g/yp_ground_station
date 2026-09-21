@@ -499,7 +499,10 @@ async def telemetry_loop() -> None:
                                         target_lat,
                                         target_lon,
                                         target_alt,
-                                        force_guided=(source != "rtb_follow"),
+                                        force_guided=(
+                                            True if source != "rtb_follow"
+                                            else _rtb_waypoint_should_force_guided()
+                                        ),
                                     )
                                     print("[SUCCESS] Waypoint command routed to vehicle.")
                                 else:

@@ -277,7 +277,21 @@ def send_radio_command(
             print("[COMMAND] waypoint command missing latitude/lon")
             return
 
-        if source != "rtb_follow":
+        if source == "rtb_follow":
+            # RTB's approach phase before stern-capture also arrives as
+            # "waypoint" commands; share the RTB force-once gate so a vehicle
+            # left in LOITER (or any non-GUIDED mode) still gets switched to
+            # GUIDED at the start of the RTB sequence instead of never forcing.
+            now = time.monotonic()
+            if now - _last_rtb_step_time > 1.0:
+                _rtb_guided_forced = False
+            _last_rtb_step_time = now
+            should_force = not _rtb_guided_forced
+            _rtb_guided_forced = True
+        else:
+            should_force = True
+
+        if should_force:
             mode_mapping = master.mode_mapping()
             if mode_mapping and "GUIDED" in mode_mapping:
                 try:

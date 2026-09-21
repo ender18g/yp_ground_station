@@ -1027,7 +1027,22 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> bool:
         if lat is not None and lon is not None:
             # RTB-follow emits frequent waypoint updates; avoid repeated mode/arm
             # chatter so telemetry processing stays responsive.
-            if source != "rtb_follow":
+            if source == "rtb_follow":
+                # The RTB approach phase before stern-capture also arrives as
+                # "waypoint" commands. Share the rtb_follow force-once gate
+                # (keyed below) so a vehicle left in LOITER still gets forced
+                # into GUIDED at the start of the RTB sequence, instead of
+                # never forcing and silently ignoring the position target.
+                vehicle_id = str(cmd_payload.get("vehicle_id") or "")
+                now = time.monotonic()
+                if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) > 1.0:
+                    _sitl_guided_forced[vehicle_id] = False
+                _sitl_follow_guided_requests[vehicle_id] = now
+                should_force = not _sitl_guided_forced.get(vehicle_id, False)
+                _sitl_guided_forced[vehicle_id] = True
+            else:
+                should_force = True
+            if should_force:
                 # Fire-and-forget: set GUIDED mode then arm without waiting for ACKs
                 # so the IO thread is never stalled over a radio link. ArduPilot
                 # processes MAVLink messages in order, so the position target

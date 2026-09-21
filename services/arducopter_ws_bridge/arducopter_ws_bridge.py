@@ -412,6 +412,23 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     )
 
 
+def _rtb_waypoint_should_force_guided() -> bool:
+    """Force GUIDED once at the start of an RTB approach (the "waypoint" phase
+    before stern-capture) so a vehicle left in LOITER still responds; skip the
+    redundant mode switch on later ticks of the same continuous RTB sequence.
+    Shares state with follow_yp_velocity's gate so the whole RTB run only
+    forces the mode once."""
+    global _last_rtb_step_time, _rtb_guided_forced
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+    if _rtb_guided_forced:
+        return False
+    _rtb_guided_forced = True
+    return True
+
+
 def follow_yp_velocity(master, command: dict) -> None:
     """Stream the post-capture YP velocity, position target, and heading."""
     global _last_rtb_step_time, _rtb_guided_forced
@@ -617,7 +634,10 @@ async def telemetry_loop() -> None:
                                         target_lat,
                                         target_lon,
                                         target_alt,
-                                        force_guided=(source != "rtb_follow"),
+                                        force_guided=(
+                                            True if source != "rtb_follow"
+                                            else _rtb_waypoint_should_force_guided()
+                                        ),
                                     )
                                     print("[SUCCESS] Waypoint command routed to vehicle.")
                                 else:

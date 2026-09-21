@@ -460,6 +460,23 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
+def _rtb_waypoint_should_force_guided() -> bool:
+    """Force GUIDED once at the start of an RTB approach (the "waypoint" phase
+    before stern-capture) so a vehicle left in LOITER still responds; skip the
+    redundant mode switch on later ticks of the same continuous RTB sequence.
+    Shares state with follow_yp_velocity's gate so the whole RTB run only
+    forces the mode once."""
+    global _last_rtb_step_time, _rtb_guided_forced
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+    if _rtb_guided_forced:
+        return False
+    _rtb_guided_forced = True
+    return True
+
+
 def follow_yp_velocity(master, command_data: dict) -> None:
     """Stream the post-capture YP velocity, position target, and heading."""
     global _last_rtb_step_time, _rtb_guided_forced
@@ -693,7 +710,7 @@ async def telemetry_loop(current_config: dict) -> None:
                                         "stamp": time.time(),
                                     }))
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
-                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
+                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_guided()))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
                             elif cmd_type == "mob" and len(command_data.get("track_points", [])) >= 2:
