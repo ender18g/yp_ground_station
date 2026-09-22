@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import serial
 import socket
+import gzip
 import json
 import math
 import os
@@ -59,6 +60,9 @@ VEHICLE_TTL_SECONDS = float(os.getenv("VEHICLE_TTL_SECONDS", "30"))
 HISTORY_MAX_POINTS = int(os.getenv("HISTORY_MAX_POINTS", "5000"))
 MESSAGE_RETENTION_SECONDS = float(os.getenv("MESSAGE_RETENTION_SECONDS", str(10 * 60)))
 MESSAGE_CLEANUP_INTERVAL_SECONDS = float(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", str(10 * 60)))
+LOG_EXPORT_ON_SHUTDOWN = os.getenv("LOG_EXPORT_ON_SHUTDOWN", "true").lower() not in ("0", "false", "no")
+LOG_EXPORT_DIR = os.getenv("LOG_EXPORT_DIR", "/data/logs")
+LOG_EXPORT_SHUTDOWN_TIMEOUT_SECONDS = float(os.getenv("LOG_EXPORT_SHUTDOWN_TIMEOUT_SECONDS", "15"))
 INFLUX_MAX_WRITE_HZ = float(os.getenv("INFLUX_MAX_WRITE_HZ", "5"))
 VIDEO_STREAMS_JSON = os.getenv("VIDEO_STREAMS_JSON", "{}")
 CAMERA_DISCOVERY_PORT = int(os.getenv("CAMERA_DISCOVERY_PORT", "8889"))
@@ -197,6 +201,7 @@ query_api = None
 cleanup_task: Optional[asyncio.Task[None]] = None
 rtcm_task: Optional[asyncio.Task[None]] = None
 deconfliction_task: Optional[asyncio.Task[None]] = None
+_server_start_time: Optional[datetime] = None
 
 
 # YP role assignment: any vehicle whose vehicle_id matches this value will be
@@ -419,7 +424,8 @@ async def root() -> dict[str, Any]:
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize persistence, vehicle services, and background tasks."""
-    global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, rtcm_watchdog_task, deconfliction_task
+    global cleanup_task, delete_api, influx_client, write_api, query_api, rtcm_task, rtcm_watchdog_task, deconfliction_task, _server_start_time
+    _server_start_time = datetime.now(timezone.utc)
     # Initialize authentication database
     init_database()
     load_yolo_model_settings()
@@ -468,6 +474,13 @@ async def shutdown() -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    if LOG_EXPORT_ON_SHUTDOWN:
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_write_shutdown_log_export), timeout=LOG_EXPORT_SHUTDOWN_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print("Shutdown log export timed out")
+        except Exception as error:
+            print(f"Shutdown log export failed: {error}")
     if influx_client:
         influx_client.close()
 
@@ -1418,6 +1431,55 @@ def _query_log_records(start: datetime, end: datetime) -> Any:
   |> filter(fn: (r) => r._measurement == "yp_messages")
   |> pivot(rowKey: ["_time", "vehicle_id", "vehicle_type", "topic", "msg_type"], columnKey: ["_field"], valueColumn: "_value")'''
     return query_api.query_stream(query=flux, org=INFLUX_ORG)
+
+
+def _write_shutdown_log_export() -> None:
+    """Save the retained flight log to disk on shutdown, reusing the /api/logs/export format.
+
+    Runs synchronously in a worker thread from the shutdown event handler so a
+    `docker stop`/Ctrl+C/`docker compose down` always leaves an on-disk copy of
+    whatever telemetry is still retained in InfluxDB.
+    """
+    if not query_api or not _server_start_time:
+        return
+    end_time = datetime.now(timezone.utc)
+    start_time = max(_server_start_time, end_time - timedelta(seconds=MESSAGE_RETENTION_SECONDS))
+    if start_time >= end_time:
+        return
+
+    try:
+        records = (record for record in _query_log_records(start_time, end_time) if not _is_heartbeat_record(record))
+        first_record = next(records)
+    except StopIteration:
+        print("Shutdown log export: no retained flight log data to save")
+        return
+    except Exception as error:
+        print(f"Shutdown log export failed: {error}")
+        return
+
+    metadata = {
+        "format": "yp-ground-station-log",
+        "schema_version": 1,
+        "exported_at": _format_log_time(end_time),
+        "start": _format_log_time(start_time),
+        "end": _format_log_time(end_time),
+        "bucket": INFLUX_BUCKET,
+        "measurement": "yp_messages",
+        "trigger": "shutdown",
+    }
+    filename = f"yp-flight-log-{start_time.strftime('%Y%m%dT%H%M%SZ')}-{end_time.strftime('%Y%m%dT%H%M%SZ')}.jsonl.gz"
+    path = os.path.join(LOG_EXPORT_DIR, filename)
+    try:
+        os.makedirs(LOG_EXPORT_DIR, exist_ok=True)
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(json.dumps(metadata, separators=(",", ":")) + "\n")
+            handle.write(json.dumps(_influx_log_record(first_record), separators=(",", ":"), default=str) + "\n")
+            for record in records:
+                handle.write(json.dumps(_influx_log_record(record), separators=(",", ":"), default=str) + "\n")
+    except Exception as error:
+        print(f"Shutdown log export failed while writing {path}: {error}")
+        return
+    print(f"Shutdown log export saved: {path}")
 
 
 @app.get("/api/logs/export")

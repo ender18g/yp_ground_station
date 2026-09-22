@@ -100,6 +100,13 @@ _landed_state = 0  # MAV_LANDED_STATE_UNDEFINED until EXTENDED_SYS_STATE arrives
 _land_touchdown_since: float | None = None
 _land_touchdown_sent = False
 
+# --- FLIGHT LOG DOWNLOAD ---
+LOG_DIR = Path(os.getenv("LOG_DOWNLOAD_DIR", "flight_logs"))
+LOG_REQUEST_TIMEOUT_S = 5.0
+LOG_CHUNK_BYTES = 90  # MAVLink LOG_DATA payload size
+LOG_CHUNK_MAX_RETRIES = 8
+_armed_state = False
+
 # --- CONFIG MANAGEMENT & WEB SERVER ---
 
 def load_config() -> dict:
@@ -137,6 +144,10 @@ HTML_TEMPLATE = """
         input, select {{ width: 100%; padding: 10px; margin-top: 5px; border-radius: 6px; border: 1px solid #475569; background: #1e293b; color: white; box-sizing: border-box; font-size: 1rem; }}
         button {{ width: 100%; margin-top: 25px; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; }}
         button:hover {{ background: #1d4ed8; }}
+        .log-row {{ display: flex; gap: 10px; align-items: center; }}
+        .log-row select {{ margin-top: 0; }}
+        .log-row button {{ width: auto; margin-top: 0; padding: 10px 16px; white-space: nowrap; }}
+        .log-empty {{ color: #94a3b8; font-size: 0.9rem; }}
     </style>
 </head>
 <body>
@@ -193,6 +204,15 @@ HTML_TEMPLATE = """
         <button type="submit">Save & Restart Telemetry Stream</button>
     </form>
 
+    <h2>Flight Logs</h2>
+    <div class="diag-card">
+        <div class="log-row">
+            <select id="log_select"><option value="">Loading...</option></select>
+            <button type="button" onclick="downloadSelectedLog()">Download</button>
+        </div>
+        <div id="log_empty" class="log-empty" style="display: none; margin-top: 10px;">No flight logs found on this device yet. Logs auto-download here when the vehicle disarms.</div>
+    </div>
+
     <script>
         function toggleCustomUrl() {{
             const select = document.getElementById('mavlink_url_select');
@@ -228,6 +248,46 @@ HTML_TEMPLATE = """
         }}
         setInterval(fetchStatus, 1000);
         fetchStatus();
+
+        function formatBytes(bytes) {{
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }}
+
+        async function fetchLogs() {{
+            try {{
+                const res = await fetch('/api/logs');
+                const logs = await res.json();
+                const select = document.getElementById('log_select');
+                const empty = document.getElementById('log_empty');
+                const previous = select.value;
+                select.innerHTML = '';
+                if (logs.length === 0) {{
+                    select.innerHTML = '<option value="">No logs available</option>';
+                    empty.style.display = 'block';
+                    return;
+                }}
+                empty.style.display = 'none';
+                for (const log of logs) {{
+                    const option = document.createElement('option');
+                    option.value = log.name;
+                    const when = new Date(log.modified * 1000).toLocaleString();
+                    option.text = `${{log.name}} (${{formatBytes(log.size)}}, ${{when}})`;
+                    select.appendChild(option);
+                }}
+                if (logs.some(log => log.name === previous)) select.value = previous;
+            }} catch (e) {{ console.error("Failed fetching logs", e); }}
+        }}
+
+        function downloadSelectedLog() {{
+            const select = document.getElementById('log_select');
+            if (!select.value) return;
+            window.location.href = '/logs/' + encodeURIComponent(select.value);
+        }}
+
+        setInterval(fetchLogs, 5000);
+        fetchLogs();
     </script>
 </body>
 </html>
@@ -280,11 +340,34 @@ async def handle_save(request):
     reconnect_event.set()
     return web.HTTPFound(location="/")
 
+async def handle_logs_api(request):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for path in LOG_DIR.iterdir():
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        entries.append({"name": path.name, "size": stat.st_size, "modified": stat.st_mtime})
+    entries.sort(key=lambda entry: entry["modified"], reverse=True)
+    return web.json_response(entries)
+
+async def handle_log_download(request):
+    name = request.match_info.get("filename", "")
+    # Reject anything that isn't a bare filename to prevent path traversal out of LOG_DIR.
+    if not name or name != Path(name).name:
+        raise web.HTTPBadRequest(text="Invalid filename")
+    path = LOG_DIR / name
+    if not path.is_file():
+        raise web.HTTPNotFound(text="Log file not found")
+    return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/status", handle_status_api)
     app.router.add_post("/save", handle_save)
+    app.router.add_get("/api/logs", handle_logs_api)
+    app.router.add_get("/logs/{filename}", handle_log_download)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8080))
@@ -649,10 +732,65 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
                 sar_missions.start_mission(master)
         except Exception as exc: pass
 
+
+def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
+    """Fetch the flight controller's most recently closed dataflash log over MAVLink.
+
+    Runs in a background thread, holding _sar_mission_lock so the telemetry
+    loop pauses its own reads of `master` for the (slow, chunked) duration of
+    the download.
+    """
+    with _sar_mission_lock:
+        try:
+            master.mav.log_request_list_send(master.target_system, master.target_component, 0, 0xFFFF)
+            log_id = None
+            log_size = None
+            deadline = time.time() + LOG_REQUEST_TIMEOUT_S
+            while time.time() < deadline:
+                entry = master.recv_match(type="LOG_ENTRY", blocking=True, timeout=1.0)
+                if entry is None:
+                    continue
+                if entry.num_logs == 0 or entry.last_log_num == 0:
+                    break
+                if entry.id == entry.last_log_num:
+                    log_id, log_size = entry.id, entry.size
+                    break
+
+            if not log_id or not log_size:
+                print(f"[LOG] No dataflash log available on {vehicle_id} to auto-download.")
+                return
+
+            data = bytearray(log_size)
+            offset = 0
+            retries = 0
+            while offset < log_size:
+                count = min(LOG_CHUNK_BYTES, log_size - offset)
+                master.mav.log_request_data_send(master.target_system, master.target_component, log_id, offset, count)
+                chunk = master.recv_match(type="LOG_DATA", blocking=True, timeout=2.0)
+                if chunk is None or chunk.id != log_id or chunk.ofs != offset:
+                    retries += 1
+                    if retries > LOG_CHUNK_MAX_RETRIES:
+                        print(f"[LOG] Auto-download of log {log_id} for {vehicle_id} timed out at offset {offset}/{log_size}")
+                        return
+                    continue
+                retries = 0
+                chunk_len = min(chunk.count, log_size - offset)
+                data[offset:offset + chunk_len] = bytes(chunk.data[:chunk_len])
+                offset += chunk_len
+
+            master.mav.log_request_end_send(master.target_system, master.target_component)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            filename = f"{vehicle_id}_log{log_id}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.bin"
+            (LOG_DIR / filename).write_bytes(bytes(data))
+            print(f"[LOG] Auto-downloaded flight log on disarm: {filename} ({log_size} bytes)")
+        except Exception as exc:
+            print(f"[LOG] Auto-download failed for {vehicle_id}: {exc}")
+
+
 # --- MAIN TELEMETRY LOOP ---
 
 async def telemetry_loop(current_config: dict) -> None:
-    global VEHICLE_TYPE, SAR_INCLUDE_TAKEOFF, _landed_state
+    global VEHICLE_TYPE, SAR_INCLUDE_TAKEOFF, _landed_state, _armed_state
 
     vehicle_id = current_config["vehicle_id"]
     server_ws_url = current_config["server_ws_url"]
@@ -676,6 +814,7 @@ async def telemetry_loop(current_config: dict) -> None:
         system_status["cube_connected"] = True
         system_status["cube_status"] = "Connected"
         system_status["last_hb_time"] = time.time()
+        _armed_state = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
         try:
             system_status["flight_mode"] = master.flightmode
         except Exception: pass
@@ -763,6 +902,11 @@ async def telemetry_loop(current_config: dict) -> None:
                     msg_type = msg.get_type()
                     if msg_type == "HEARTBEAT":
                         system_status["last_hb_time"] = now
+                        armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                        if _armed_state and not armed:
+                            print(f"[LOG] {vehicle_id} disarmed; auto-downloading flight log...")
+                            threading.Thread(target=_download_latest_dataflash_log, args=(master, vehicle_id), daemon=True).start()
+                        _armed_state = armed
                         try:
                             system_status["flight_mode"] = master.flightmode
                         except Exception: pass

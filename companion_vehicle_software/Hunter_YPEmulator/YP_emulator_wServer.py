@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,19 @@ DEFAULT_CONFIG = {
 
 config = {}
 reconnect_event = asyncio.Event()
+shutdown_event = asyncio.Event()
 telemetry_queue = asyncio.Queue(maxsize=50)
 rtcm_queue = asyncio.Queue(maxsize=200)  # inbound RTCM correction commands awaiting forward to the Cube
+
+# --- Flight Log Download ---
+# This rig is a manually-driven Hunter UGV; the Cube is only ever force-armed so its
+# dataflash logger runs, never to actuate motors. Disarming on shutdown flushes/closes
+# that log so it can be downloaded.
+LOG_DIR = Path(os.getenv("LOG_DOWNLOAD_DIR", "flight_logs"))
+LOG_REQUEST_TIMEOUT_S = 5.0
+LOG_CHUNK_BYTES = 90  # MAVLink LOG_DATA payload size
+LOG_CHUNK_MAX_RETRIES = 8
+_cube_master = None  # most recent mavutil connection, used by the shutdown disarm/download sequence
 
 # Shared Live Telemetry & Connection Status
 system_status = {
@@ -83,6 +95,10 @@ HTML_TEMPLATE = """
         input, select {{ width: 100%; padding: 10px; margin-top: 5px; border-radius: 6px; border: 1px solid #475569; background: #1e293b; color: white; box-sizing: border-box; font-size: 1rem; }}
         button {{ width: 100%; margin-top: 25px; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; }}
         button:hover {{ background: #1d4ed8; }}
+        .log-row {{ display: flex; gap: 10px; align-items: center; }}
+        .log-row select {{ margin-top: 0; }}
+        .log-row button {{ width: auto; margin-top: 0; padding: 10px 16px; white-space: nowrap; }}
+        .log-empty {{ color: #94a3b8; font-size: 0.9rem; }}
     </style>
 </head>
 <body>
@@ -132,6 +148,15 @@ HTML_TEMPLATE = """
         <button type="submit">Save & Restart Telemetry Stream</button>
     </form>
 
+    <h2>Flight Logs</h2>
+    <div class="diag-card">
+        <div class="log-row">
+            <select id="log_select"><option value="">Loading...</option></select>
+            <button type="button" onclick="downloadSelectedLog()">Download</button>
+        </div>
+        <div id="log_empty" class="log-empty" style="display: none; margin-top: 10px;">No flight logs found on this device yet. A log is saved here when this program is stopped (Ctrl+C or service stop).</div>
+    </div>
+
     <script>
         async function fetchStatus() {{
             try {{
@@ -156,6 +181,46 @@ HTML_TEMPLATE = """
         }}
         setInterval(fetchStatus, 1000);
         fetchStatus();
+
+        function formatBytes(bytes) {{
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }}
+
+        async function fetchLogs() {{
+            try {{
+                const res = await fetch('/api/logs');
+                const logs = await res.json();
+                const select = document.getElementById('log_select');
+                const empty = document.getElementById('log_empty');
+                const previous = select.value;
+                select.innerHTML = '';
+                if (logs.length === 0) {{
+                    select.innerHTML = '<option value="">No logs available</option>';
+                    empty.style.display = 'block';
+                    return;
+                }}
+                empty.style.display = 'none';
+                for (const log of logs) {{
+                    const option = document.createElement('option');
+                    option.value = log.name;
+                    const when = new Date(log.modified * 1000).toLocaleString();
+                    option.text = `${{log.name}} (${{formatBytes(log.size)}}, ${{when}})`;
+                    select.appendChild(option);
+                }}
+                if (logs.some(log => log.name === previous)) select.value = previous;
+            }} catch (e) {{ console.error("Failed fetching logs", e); }}
+        }}
+
+        function downloadSelectedLog() {{
+            const select = document.getElementById('log_select');
+            if (!select.value) return;
+            window.location.href = '/logs/' + encodeURIComponent(select.value);
+        }}
+
+        setInterval(fetchLogs, 5000);
+        fetchLogs();
     </script>
 </body>
 </html>
@@ -192,11 +257,34 @@ async def handle_save(request):
     reconnect_event.set()
     return web.HTTPFound(location="/")
 
+async def handle_logs_api(request):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for path in LOG_DIR.iterdir():
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        entries.append({"name": path.name, "size": stat.st_size, "modified": stat.st_mtime})
+    entries.sort(key=lambda entry: entry["modified"], reverse=True)
+    return web.json_response(entries)
+
+async def handle_log_download(request):
+    name = request.match_info.get("filename", "")
+    # Reject anything that isn't a bare filename to prevent path traversal out of LOG_DIR.
+    if not name or name != Path(name).name:
+        raise web.HTTPBadRequest(text="Invalid filename")
+    path = LOG_DIR / name
+    if not path.is_file():
+        raise web.HTTPNotFound(text="Log file not found")
+    return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/status", handle_status_api)
     app.router.add_post("/save", handle_save)
+    app.router.add_get("/api/logs", handle_logs_api)
+    app.router.add_get("/logs/{filename}", handle_log_download)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8080))
@@ -227,6 +315,96 @@ def wrap(vehicle_id: str, topic_suffix: str, msg_type: str, stamp: float, msg: d
 def get_gps_fix_label(fix_type: int) -> str:
     fix_map = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed"}
     return fix_map.get(fix_type, f"Fix {fix_type}")
+
+def _force_arm_for_logging(master) -> None:
+    """Force-arm the Cube purely so its dataflash logger runs.
+
+    This rig has no motors/props attached (Here3 GPS + Cube used only to track
+    a manually-driven vehicle), so pre-arm checks that assume a flyable
+    vehicle (EKF origin, GPS-as-primary-nav, etc.) are disabled and the arm
+    command uses ArduPilot's force-arm magic value (21196) to bypass whatever
+    checks remain.
+    """
+    try:
+        master.mav.param_set_send(
+            master.target_system, master.target_component,
+            b"ARMING_CHECK", 0, mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+        )
+        master.mav.command_long_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+            1, 21196, 0, 0, 0, 0, 0,
+        )
+        print("[ARM] Force-arm sent so the Cube starts logging.")
+    except Exception as exc:
+        print(f"[ARM] Force-arm request failed: {exc}")
+
+def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
+    """Fetch the flight controller's most recently closed dataflash log over MAVLink."""
+    try:
+        master.mav.log_request_list_send(master.target_system, master.target_component, 0, 0xFFFF)
+        log_id = None
+        log_size = None
+        deadline = time.time() + LOG_REQUEST_TIMEOUT_S
+        while time.time() < deadline:
+            entry = master.recv_match(type="LOG_ENTRY", blocking=True, timeout=1.0)
+            if entry is None:
+                continue
+            if entry.num_logs == 0 or entry.last_log_num == 0:
+                break
+            if entry.id == entry.last_log_num:
+                log_id, log_size = entry.id, entry.size
+                break
+
+        if not log_id or not log_size:
+            print(f"[LOG] No dataflash log available on {vehicle_id} to download.")
+            return
+
+        data = bytearray(log_size)
+        offset = 0
+        retries = 0
+        while offset < log_size:
+            count = min(LOG_CHUNK_BYTES, log_size - offset)
+            master.mav.log_request_data_send(master.target_system, master.target_component, log_id, offset, count)
+            chunk = master.recv_match(type="LOG_DATA", blocking=True, timeout=2.0)
+            if chunk is None or chunk.id != log_id or chunk.ofs != offset:
+                retries += 1
+                if retries > LOG_CHUNK_MAX_RETRIES:
+                    print(f"[LOG] Download of log {log_id} for {vehicle_id} timed out at offset {offset}/{log_size}")
+                    return
+                continue
+            retries = 0
+            chunk_len = min(chunk.count, log_size - offset)
+            data[offset:offset + chunk_len] = bytes(chunk.data[:chunk_len])
+            offset += chunk_len
+
+        master.mav.log_request_end_send(master.target_system, master.target_component)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"{vehicle_id}_log{log_id}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.bin"
+        (LOG_DIR / filename).write_bytes(bytes(data))
+        print(f"[LOG] Saved flight log on shutdown: {filename} ({log_size} bytes)")
+    except Exception as exc:
+        print(f"[LOG] Shutdown log download failed for {vehicle_id}: {exc}")
+
+async def _disarm_and_download_log(vehicle_id: str) -> None:
+    """Disarm the Cube (closing/flushing its dataflash log) then pull it down over MAVLink."""
+    master = _cube_master
+    if master is None:
+        print("[SHUTDOWN] No active Cube connection; skipping disarm/log download.")
+        return
+    try:
+        master.mav.command_long_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+            0, 21196, 0, 0, 0, 0, 0,
+        )
+        print("[SHUTDOWN] Disarm sent; waiting for the Cube to close its log...")
+        await asyncio.sleep(2.0)
+        await asyncio.wait_for(asyncio.to_thread(_download_latest_dataflash_log, master, vehicle_id), timeout=30.0)
+    except asyncio.TimeoutError:
+        print("[SHUTDOWN] Flight log download timed out.")
+    except Exception as exc:
+        print(f"[SHUTDOWN] Disarm/log download failed: {exc}")
 
 # --- Decoupled Connection Tasks ---
 
@@ -316,6 +494,7 @@ async def ws_loop(current_config: dict):
             await asyncio.sleep(2.0)
 
 async def mavlink_loop(current_config: dict):
+    global _cube_master
     port = current_config["serial_port"]
     baud = current_config["baud_rate"]
     hz = current_config["send_hz"]
@@ -356,6 +535,9 @@ async def mavlink_loop(current_config: dict):
 
         if reconnect_event.is_set() or not connected:
             continue
+
+        _cube_master = master
+        _force_arm_for_logging(master)
 
         try:
             master.mav.request_data_stream_send(
@@ -447,6 +629,10 @@ async def main():
 
     await start_web_server()
 
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, shutdown_event.set)
+
     while True:
         reconnect_event.clear()
         current_config = config.copy()
@@ -459,12 +645,23 @@ async def main():
         mav_task = asyncio.create_task(mavlink_loop(current_config))
         ws_task = asyncio.create_task(ws_loop(current_config))
 
-        # Wait until a settings update triggers a restart
-        await reconnect_event.wait()
-        
-        print("Settings updated via web UI! Terminating connections to reconnect...")
+        # Wait until a settings update or a shutdown request (Ctrl+C / docker stop) fires
+        reconnect_wait = asyncio.create_task(reconnect_event.wait())
+        shutdown_wait = asyncio.create_task(shutdown_event.wait())
+        await asyncio.wait({reconnect_wait, shutdown_wait}, return_when=asyncio.FIRST_COMPLETED)
+        reconnect_wait.cancel()
+        shutdown_wait.cancel()
+
         mav_task.cancel()
         ws_task.cancel()
+        await asyncio.gather(mav_task, ws_task, return_exceptions=True)
+
+        if shutdown_event.is_set():
+            print("Shutdown requested; disarming the Cube and saving its flight log...")
+            await _disarm_and_download_log(current_config["vehicle_id"])
+            break
+
+        print("Settings updated via web UI! Terminating connections to reconnect...")
 
 if __name__ == "__main__":
     asyncio.run(main())
