@@ -231,3 +231,4 @@ web/playwright-report/
 data/tiles/
 data/tile-cache/
 data/influx/
+data/logs/
