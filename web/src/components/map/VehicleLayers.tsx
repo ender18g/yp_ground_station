@@ -364,7 +364,8 @@ function vehicleZIndexOffset(type: VehicleType): number {
   return {
     uav: 1500,
     uavf: 1500,
-    yp: 4000,
+    // Keep the YP beneath every vehicle so overlapping vehicles stay clickable.
+    yp: -1000,
     usv: 2000,
     ugv: 1800,
     uuv: 1000,

@@ -76,9 +76,9 @@ class APIContractTests(DatabaseTestCase):
                     self.assertEqual(snapshot["waypoints"][0]["latitude"], 38.91)
                     self.assertEqual(len(snapshot["vehicles"][0]["history"]), 1)
                 vehicle.close()
-                self.assertEqual(ui.receive_json()["op"], "vehicle_disconnected")
+                self.assertEqual(ui.receive_json(), {"op": "vehicle_removed", "vehicle_id": "boat-01"})
         self.assertNotIn("boat-01", main.vehicle_queues)
-        self.assertFalse(self.client.get("/api/vehicles/boat-01").json()["connected"])
+        self.assertEqual(self.client.get("/api/vehicles/boat-01").status_code, 404)
 
     def test_rosbridge_publish_updates_subscribers_and_http_vehicle_state(self):
         topic = "/vehicles/boat-01/navsatfix"

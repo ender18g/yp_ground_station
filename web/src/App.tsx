@@ -1,6 +1,7 @@
 import L from "leaflet";
 import {
   AlertTriangle,
+  Camera,
   Cable,
   Crosshair,
   EthernetPort,
@@ -22,8 +23,8 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 
-import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
-import type { CurrentUser, SITLBridge, RtcmStatus } from "./api";
+import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listAxisCameras, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
+import type { AxisCamera, CameraDetectionUpdate, CurrentUser, SITLBridge, RtcmStatus } from "./api";
 import type { Command, Position, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
@@ -33,6 +34,7 @@ import { MessageDrawer, type StreamMessage } from "./components/MessageDrawer";
 import { SITLPanel } from "./components/SITLPanel";
 import { VehicleModal } from "./components/VehicleModal";
 import { VideoViewer } from "./components/VideoViewer";
+import { CameraPanel } from "./components/CameraPanel";
 import { FitAllControl, FollowYpCenter, SarPatternOverlay, VehicleLayer, WaypointCrosshair, YpRangeRings, type WaypointMarker } from "./components/map/VehicleLayers";
 import { vehicleMarkerColor } from "./utils/vehicleStyle";
 import { WeatherRadarLayer, WindLayer } from "./components/map/OverlayLayers";
@@ -59,6 +61,17 @@ const RTCM_STATUS_LABELS: Record<RtcmStatus["state"], string> = {
   stale: "No Data Received",
   error: "Connection Error",
 };
+/** Buckets a MAV_GPS_FIX_TYPE value into a quality tier used for RTK tab styling. */
+function gpsFixQuality(fixType: number): "good" | "warn" | "bad" {
+  if (fixType >= 6) return "good"; // RTK Fixed / Static / PPP
+  if (fixType >= 4) return "warn"; // DGPS / RTK Float
+  return "bad"; // No GPS / No Fix / 2D / 3D only
+}
+/** A GPS fix reading older than this is likely leftover from before a link drop or config change. */
+const GPS_FIX_STALE_AFTER_S = 10;
+function isGpsFixStale(stamp: number | undefined): boolean {
+  return stamp == null || Date.now() / 1000 - stamp > GPS_FIX_STALE_AFTER_S;
+}
 /** Renders elapsed time since a unix-seconds timestamp as a short human string. */
 function formatSecondsAgo(epochSeconds: number | null): string {
   if (epochSeconds == null) return "never";
@@ -196,6 +209,9 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [deconflictionOrbitRadius, setDeconflictionOrbitRadius] = useState(50.0);
   const [deconflictionMaxPause, setDeconflictionMaxPause] = useState(300.0);
   const [showSITL, setShowSITL] = useState(false);
+  const [showCameras, setShowCameras] = useState(false);
+  const [axisCameras, setAxisCameras] = useState<AxisCamera[]>([]);
+  const [cameraDetections, setCameraDetections] = useState<Record<string, CameraDetectionUpdate>>({});
   const [showUserManagement, setShowUserManagement] = useState(false);
   const [sitlBridges, setSitlBridges] = useState<Record<string, SITLBridge>>({});
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
@@ -292,7 +308,27 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setSarPatterns((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
       }
       if (payload.op === "vehicle_disconnected") {
-        setVehicles((current) => ({ ...current, [payload.vehicle_id as string]: { ...current[payload.vehicle_id as string], connected: false } }));
+        const disconnectedId = payload.vehicle_id as string;
+        setVehicles((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setSarMissionActiveByVehicle((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setSitlBridges((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setRtbFollowState((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
       }
       if (payload.op === "video_stream_update") {
         const incoming = payload.video as Vehicle["video"] & { vehicle_id?: string };
@@ -313,6 +349,16 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           delete nextVehicle.video;
           return { ...current, [vehicleId]: nextVehicle };
         });
+      }
+      if (payload.op === "camera_status_update") {
+        const camera = payload.camera as AxisCamera;
+        setAxisCameras((current) => current.some((item) => item.id === camera.id)
+          ? current.map((item) => item.id === camera.id ? camera : item)
+          : [...current, camera]);
+      }
+      if (payload.op === "camera_detection_update") {
+        const update = payload as unknown as CameraDetectionUpdate & { op: string };
+        setCameraDetections((current) => ({ ...current, [update.camera_id]: update }));
       }
     },
   });
@@ -358,6 +404,11 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setSitlBridges(Object.fromEntries(bridges.map((b) => [b.vehicle_id, b])))
       )
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    void listAxisCameras().then(setAxisCameras).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -489,6 +540,10 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
 
   const handleStartRtkRelay = async () => {
     setRtkRelayError(null);
+    if (rtkNetworkPort < 1024) {
+      setRtkRelayError("Network port must be 1024 or higher (ports below 1024 require root and will fail to bind).");
+      return;
+    }
     setRtkRelayStarting(true);
     try {
       await startAgentRelay(rtkRelayPort, rtkBaudrate, rtkNetworkPort);
@@ -1007,6 +1062,15 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
               <Cable size={19} />
             </button>
           )}
+          {!DEMO_MODE && (
+            <button
+              className={showCameras ? "icon-button active" : "icon-button"}
+              title="YP Cameras"
+              onClick={() => { setShowCameras((value) => !value); setShowSettings(false); setShowSITL(false); }}
+            >
+              <Camera size={19} />
+            </button>
+          )}
           <button
             ref={settingsButtonRef}
             className={showSettings ? "icon-button active" : "icon-button"}
@@ -1059,6 +1123,8 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           />
         </div>
       )}
+
+      {showCameras && !DEMO_MODE && <CameraPanel cameras={axisCameras} detections={cameraDetections} onClose={() => setShowCameras(false)} />}
 
       {showUserManagement && currentUser?.permissions.includes("manage_users") && (
         <Suspense fallback={null}>
@@ -1144,6 +1210,33 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                     : `${rtcmStatus.frame_count} frames received · last frame ${formatSecondsAgo(rtcmStatus.last_frame_at)}`}
                 </p>
               )}
+              {Object.values(vehicles).some((vehicle) => vehicle.gps_fix) && (
+                <div className="gps-fix-list">
+                  {Object.values(vehicles)
+                    .filter((vehicle) => vehicle.gps_fix)
+                    .map((vehicle) => {
+                      const fix = vehicle.gps_fix!;
+                      const stale = isGpsFixStale(fix.stamp);
+                      return (
+                        <div
+                          key={vehicle.vehicle_id}
+                          className={`gps-fix-row ${stale ? "gps-fix-stale" : `gps-fix-${gpsFixQuality(fix.fix_type)}`}`}
+                        >
+                          <span className="gps-fix-vehicle">{vehicle.vehicle_id}</span>
+                          <span className="gps-fix-type">{fix.fix_type_label}</span>
+                          <span className="gps-fix-accuracy">
+                            {fix.horizontal_accuracy_m != null ? `±${fix.horizontal_accuracy_m.toFixed(2)}m H` : "—"}
+                            {fix.vertical_accuracy_m != null ? ` / ±${fix.vertical_accuracy_m.toFixed(2)}m V` : ""}
+                          </span>
+                          {fix.satellites_visible != null && (
+                            <span className="gps-fix-sats">{fix.satellites_visible} sats</span>
+                          )}
+                          <span className="gps-fix-age">{stale ? `stale · ${formatSecondsAgo(fix.stamp ?? null)}` : formatSecondsAgo(fix.stamp ?? null)}</span>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
               <label>
                 Source Mode
                 <select
@@ -1193,7 +1286,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
                       Network Port
                       <input
                         type="number"
-                        min={1}
+                        min={1024}
                         max={65535}
                         value={rtkNetworkPort}
                         disabled={DEMO_MODE}

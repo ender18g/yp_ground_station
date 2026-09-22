@@ -548,6 +548,8 @@ async def mavlink_loop(current_config: dict):
                 master.target_system, master.target_component,
                 mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1
             )
+            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
             last_send = 0.0
             while not reconnect_event.is_set():
@@ -564,7 +566,7 @@ async def mavlink_loop(current_config: dict):
                         except Exception as e:
                             print(f"[RTCM] MAVLink send error: {e}")
 
-                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
+                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW"], blocking=False)
                 if msg:
                     msg_type = msg.get_type()
                     
@@ -578,9 +580,28 @@ async def mavlink_loop(current_config: dict):
                             except Exception:
                                 pass
 
-                    elif msg_type == "GPS_RAW_INT":
-                        system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
-                        system_status["satellites"] = getattr(msg, "satellites_visible", 0)
+                    elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
+                        fix_type = getattr(msg, "fix_type", 0)
+                        eph = getattr(msg, "eph", 65535)
+                        epv = getattr(msg, "epv", 65535)
+                        h_acc = getattr(msg, "h_acc", None)
+                        v_acc = getattr(msg, "v_acc", None)
+                        satellites_visible = getattr(msg, "satellites_visible", 255)
+                        system_status["gps_status"] = get_gps_fix_label(fix_type)
+                        system_status["satellites"] = satellites_visible
+                        try:
+                            telemetry_queue.put_nowait(wrap(
+                                v_id, "gps_fix", "mavlink/GPS_RAW_INT", time.time(),
+                                {
+                                    "fix_type": fix_type,
+                                    "fix_type_label": get_gps_fix_label(fix_type),
+                                    "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+                                    "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+                                    "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+                                },
+                            ))
+                        except asyncio.QueueFull:
+                            pass
 
                     elif msg_type == "GLOBAL_POSITION_INT":
                         now = time.time()

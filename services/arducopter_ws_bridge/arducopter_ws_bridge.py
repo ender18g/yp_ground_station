@@ -113,6 +113,30 @@ def create_navsatfix_message(lat: float, lon: float, alt: float, heading: float 
     return payload
 
 
+def create_gps_fix_message(msg) -> dict:
+    fix_type = getattr(msg, "fix_type", 0)
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    satellites_visible = getattr(msg, "satellites_visible", 255)
+    fix_labels = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed", 7: "Static", 8: "PPP"}
+    return {
+        "vehicle_id": VEHICLE_ID,
+        "vehicle_type": VEHICLE_TYPE,
+        "topic": f"/vehicles/{VEHICLE_ID}/gps_fix",
+        "type": f"mavlink/{msg.get_type()}",
+        "stamp": time.time(),
+        "msg": {
+            "fix_type": fix_type,
+            "fix_type_label": fix_labels.get(fix_type, "Unknown"),
+            "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+            "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+            "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+        },
+    }
+
+
 def _ui_ws_url() -> str:
     base = SERVER_WS_URL.rstrip("/")
     marker = "/ws/vehicle"
@@ -388,6 +412,23 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     )
 
 
+def _rtb_waypoint_should_force_guided() -> bool:
+    """Force GUIDED once at the start of an RTB approach (the "waypoint" phase
+    before stern-capture) so a vehicle left in LOITER still responds; skip the
+    redundant mode switch on later ticks of the same continuous RTB sequence.
+    Shares state with follow_yp_velocity's gate so the whole RTB run only
+    forces the mode once."""
+    global _last_rtb_step_time, _rtb_guided_forced
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+    if _rtb_guided_forced:
+        return False
+    _rtb_guided_forced = True
+    return True
+
+
 def follow_yp_velocity(master, command: dict) -> None:
     """Stream the post-capture YP velocity, position target, and heading."""
     global _last_rtb_step_time, _rtb_guided_forced
@@ -543,6 +584,8 @@ async def telemetry_loop() -> None:
     )
     # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
     master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
     print("[SUCCESS] Telemetry stream requested")
 
     asyncio.create_task(ship_state_listener_loop())
@@ -591,7 +634,10 @@ async def telemetry_loop() -> None:
                                         target_lat,
                                         target_lon,
                                         target_alt,
-                                        force_guided=(source != "rtb_follow"),
+                                        force_guided=(
+                                            True if source != "rtb_follow"
+                                            else _rtb_waypoint_should_force_guided()
+                                        ),
                                     )
                                     print("[SUCCESS] Waypoint command routed to vehicle.")
                                 else:
@@ -695,13 +741,15 @@ async def telemetry_loop() -> None:
                 # consuming COMMAND_ACKs that the mission sequence is waiting for.
                 msg = None
                 if not _sar_mission_lock.locked():
-                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "EXTENDED_SYS_STATE"], blocking=False)
+                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "EXTENDED_SYS_STATE", "GPS_RAW_INT", "GPS2_RAW"], blocking=False)
                 
                 # 3. Process and send telemetry at the specified SEND_HZ rate
                 now = time.time()
                 telemetry_sample = None
                 if msg is not None and msg.get_type() == "EXTENDED_SYS_STATE":
                     _landed_state = msg.landed_state
+                elif msg is not None and msg.get_type() in ("GPS_RAW_INT", "GPS2_RAW"):
+                    await ws.send(json.dumps(create_gps_fix_message(msg)))
                 elif msg is not None:
                     lat = msg.lat / 1e7
                     lon = msg.lon / 1e7

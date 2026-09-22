@@ -31,6 +31,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 - `sim-umaa`: Loopback UMAA vehicle for testing the ground-station workflow before real DDS topics are available.
 - `yp-gps`: Simulated or serial NMEA YP GPS publisher.
 - `arducopter_ws_bridge`: Hardware WebSocket bridge for real ArduPilot/MAVLink vehicles.
+- `yolo-detector`: Optional Ultralytics YOLO service that analyzes Axis camera MJPEG feeds and sends bounding boxes to the UI.
 - `px4-sitl-uav`, `mavros`, `ros-master`, `rosbridge`, and `px4-yp-bridge`: Optional PX4/MAVROS simulation path.
 - `umaa-bridge`: RTI Connext DDS bridge shell for a real UMAA vehicle.
 - `influxdb`: Time-series storage for telemetry and command messages.
@@ -46,6 +47,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 | `services/sim_vehicle/` | Lightweight simulated vehicles |
 | `services/umaa_bridge/` | UMAA loopback and RTI adapter |
 | `services/arducopter_ws_bridge/` | ArduPilot WebSocket bridge |
+| `services/yolo_detector/` | Optional YOLO camera detection service |
 | `services/px4_*` and `services/mavros/` | Optional PX4/MAVROS path |
 | `services/yp_gps/` | YP GPS publisher |
 | `services/telemetry_radio_bridge.py` | Standalone serial-radio bridge |
@@ -70,7 +72,7 @@ Open:
 - API root/status links: `http://localhost:8000`
 - InfluxDB: `http://localhost:8086`
 
-The default compose file starts two simulated UAVs (`sim-uav1`, `sim-uav2`), one simulated USV, one simulated UUV, the `sim-umaa` loopback vehicle, and a simulated YP GPS source near the Severn River off the US Naval Academy.
+The default compose file starts two simulated UAVs (`sim-uav1`, `sim-uav2`), one simulated USV, one simulated UUV, the `sim-umaa` loopback vehicle, a simulated YP GPS source near the Severn River off the US Naval Academy, and the optional `yolo-detector` service. The detector waits for configured online Axis cameras; it does not affect telemetry when no cameras are configured.
 
 The normal stack does not require ROS. ROS is only required for the optional PX4/MAVROS profile.
 
@@ -100,6 +102,8 @@ The map displays icons for USV, UAV (quad and fixed wing), UUV, UGV,and YP; head
 </p>
 
 Click a vehicle marker to open its draggable modal. It provides real-time position, altitude, heading, battery, SAR status, and, when a mother ship is selected, forward/left/up and radial ship-frame distances. Depending on permissions and vehicle type it also provides RTB, Waypoint, flight-mode controls, video, and a marker color picker.
+
+Vehicles with MAVLink GPS telemetry also show fix type, horizontal accuracy, and satellite count. Fix types include `3D Fix`, `DGPS`, `RTK Float`, and `RTK Fixed`; the UI marks a fix stale after 10 seconds without a fresh reading. The top-bar GPS status list shows the same quality and age information for all vehicles.
 
 ### Settings
 
@@ -236,6 +240,11 @@ To avoid opening a terminal every time you switch a port or baud rate, run `pyth
 
 SAR mission code is shared in `yp_common/`; existing bridge script names remain valid. For a Pi deployment that copies only a bridge directory, use the [companion bundle instructions](companion_vehicle_software/README.md) to include its shared code.
 
+MAVLink bridges request `GPS_RAW_INT` and `GPS2_RAW` at 2 Hz and publish the
+result on `/vehicles/<vehicle_id>/gps_fix`, including fix type, accuracy, and
+visible satellites. Companion and bridge processes use `SEND_HZ` (default `5`)
+to throttle forwarded telemetry and GPS-fix updates.
+
 The optional `arducopter` profile starts the WebSocket bridge and exposes UDP port `14600` for an external ArduPilot SITL or MAVLink vehicle. This repository does not include an ArduPilot SITL image:
 
 ```bash
@@ -363,6 +372,59 @@ curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
 ```
 
 MAVLink camera discovery probes `<camera-host>:8889` after bridge connection and every 60 seconds. On success it publishes `http://<camera-host>:8889/cam/whep`. The `yp-server` container must be able to reach that host and port. A failed probe does not erase an existing stream. The optional Camera Host field is sent as `camera_host`; when omitted, host-based `tcp:`, `tcpout:`, `udpout:`, and `udpbcast:` URLs can provide the host. Serial URLs, inbound/wildcard listeners, `0.0.0.0`, and `localhost` require an explicit camera host. The probe checks raw TCP reachability; the browser negotiates WHEP only when video is opened.
+
+### Axis YP cameras
+
+Configure reachable Axis camera IPs in the `yp-server` environment and
+recreate that service:
+
+```yaml
+AXIS_CAMERA_USERNAME: root
+AXIS_CAMERA_PASSWORD: "your-camera-password"
+AXIS_CAMERA_AFT_HOST: "192.168.0.50"
+AXIS_CAMERA_PORT_HOST: ""
+AXIS_CAMERA_STARBOARD_HOST: ""
+```
+
+The camera panel probes configured hosts and shows their online status. Live
+video is proxied through the server as MJPEG, keeping Axis credentials out of
+the browser. PTZ controls use `POST /api/cameras/{id}/ptz` and require the
+`control_cameras` permission, included in the admin permission level. The
+camera service polls every 15 seconds, so the remaining hosts can be added as
+those cameras are installed. The camera view supports hold-to-move directional
+buttons, click-dragging the live image to pan/tilt, and mouse-wheel zoom. The
+camera window can be dragged by its header and resized from its lower-right
+corner.
+
+### YOLO detection and camera tracking
+
+The optional `yolo-detector` service discovers online Axis cameras, reads their
+server-proxied MJPEG feeds, and publishes bounding boxes over the internal
+`/ws/detector` WebSocket. The Camera panel's **Detection** tab overlays fresh
+detections on the selected camera and lets users with `control_cameras` upload
+or select `.pt`/`.onnx` models, change the confidence threshold, and change the
+inference interval. The bundled default model is `yolov8n.pt`.
+
+The same panel can enable PTZ auto-track. When enabled, the server centers the
+highest-confidence detection using proportional pan/tilt control. Manual PTZ
+movement disables auto-track. Track settings are persisted with the detector
+settings and can be changed through:
+
+```http
+GET  /api/detector/models
+POST /api/detector/models
+POST /api/detector/model
+POST /api/detector/settings
+GET  /api/detector/track-settings
+POST /api/detector/track-settings
+GET  /api/cameras/{camera_id}/track
+POST /api/cameras/{camera_id}/track
+```
+
+Uploaded models are stored in `data/yolo_models/` and shared with the detector
+container. Set `YOLO_CAMERA_IDS` to a comma-separated list to pin cameras;
+leave it empty to discover all online cameras. `YOLO_CLASSES` optionally limits
+detections to comma-separated class labels.
 
 ## Vehicle deconfliction
 
@@ -501,6 +563,11 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 | `yp-server` | `MESSAGE_RETENTION_SECONDS` | `600` | Message retention |
 | `yp-server` | `MESSAGE_CLEANUP_INTERVAL_SECONDS` | `600` | Message cleanup interval |
 | `yp-server` | `INFLUX_MAX_WRITE_HZ` | `5` | Influx write limit |
+| `vehicle bridges` | `SEND_HZ` | `5` | Telemetry and GPS-fix forwarding rate |
+| `yolo-detector` | `YOLO_MODEL_PATH` / `YOLO_MODELS_DIR` | `yolov8n.pt` / `/data/yolo_models` | Active model and shared model directory |
+| `yolo-detector` | `YOLO_CONF_THRESHOLD` / `YOLO_INFER_INTERVAL_SECONDS` | `0.4` / `0.5` | Detection confidence threshold and inference interval in seconds |
+| `yolo-detector` | `YOLO_DISCOVERY_INTERVAL_SECONDS` | `15` | Online-camera discovery interval |
+| `yolo-detector` | `YOLO_CAMERA_IDS` / `YOLO_CLASSES` | empty / empty | Optional camera and class filters; empty means auto-discover all cameras or allow all classes |
 | `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` / `RTB_YP_SAFE_DISTANCE_M` | `35.0` / `2.0` / `30.0` / `20.0` | RTB target, update rate, transit altitude, and the minimum distance kept from the YP while routing around it during RTB |
 | `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |

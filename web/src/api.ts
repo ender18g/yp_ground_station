@@ -68,6 +68,142 @@ export function websocketUrl(path: string): string {
   return `${protocol}//${window.location.host}${path}`;
 }
 
+export interface AxisCamera {
+  id: string;
+  label: string;
+  online: boolean;
+  last_checked: number | null;
+  stream_url: string;
+  ptz_capable: boolean;
+}
+
+export async function listAxisCameras(): Promise<AxisCamera[]> {
+  const response = await apiFetch("/api/cameras", { headers: getAuthHeaders() });
+  if (!response.ok) return [];
+  const data = await response.json() as { cameras?: AxisCamera[] };
+  return data.cameras ?? [];
+}
+
+export interface CameraDetection {
+  label: string;
+  confidence: number;
+  box: [number, number, number, number]; // [x1, y1, x2, y2] in source frame pixels
+}
+
+export interface CameraDetectionUpdate {
+  camera_id: string;
+  frame_width: number;
+  frame_height: number;
+  detections: CameraDetection[];
+  timestamp: number;
+}
+
+export async function sendAxisPtz(cameraId: string, pan: number, tilt: number, zoom = 0): Promise<void> {
+  const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/ptz`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ pan, tilt, zoom }),
+  });
+  if (!response.ok) throw new Error(`PTZ command failed: ${response.status}`);
+}
+
+export async function getCameraTrack(cameraId: string): Promise<boolean> {
+  const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/track`, { headers: getAuthHeaders() });
+  if (!response.ok) return false;
+  const data = await response.json() as { tracking?: boolean };
+  return data.tracking ?? false;
+}
+
+export async function setCameraTrack(cameraId: string, enabled: boolean): Promise<boolean> {
+  const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/track`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error ?? `Track toggle failed: ${response.status}`);
+  }
+  const data = await response.json() as { tracking?: boolean };
+  return data.tracking ?? enabled;
+}
+
+export interface TrackSettings {
+  track_gain: number;
+  track_max_speed: number;
+  track_deadzone: number;
+}
+
+export async function getTrackSettings(): Promise<TrackSettings> {
+  const response = await apiFetch("/api/detector/track-settings", { headers: getAuthHeaders() });
+  if (!response.ok) return { track_gain: 160, track_max_speed: 60, track_deadzone: 0.04 };
+  return response.json();
+}
+
+export async function updateTrackSettings(settings: Partial<TrackSettings>): Promise<TrackSettings> {
+  const response = await apiFetch("/api/detector/track-settings", {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(settings),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error ?? `Track settings update failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export interface DetectorModels {
+  models: string[];
+  active_model: string;
+  conf_threshold: number;
+  infer_interval_seconds: number;
+}
+
+export async function listDetectorModels(): Promise<DetectorModels> {
+  const response = await apiFetch("/api/detector/models", { headers: getAuthHeaders() });
+  if (!response.ok) return { models: [], active_model: "", conf_threshold: 0.4, infer_interval_seconds: 0.5 };
+  return response.json();
+}
+
+export async function selectDetectorModel(model: string): Promise<DetectorModels> {
+  const response = await apiFetch("/api/detector/model", {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ model }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error ?? `Model selection failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function uploadDetectorModel(file: File): Promise<DetectorModels> {
+  const body = new FormData();
+  body.append("file", file);
+  // No Content-Type header: the browser sets the multipart boundary itself.
+  const response = await apiFetch("/api/detector/models", { method: "POST", body });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error ?? `Model upload failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function updateDetectorSettings(settings: Partial<Pick<DetectorModels, "conf_threshold" | "infer_interval_seconds">>): Promise<DetectorModels> {
+  const response = await apiFetch("/api/detector/settings", {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(settings),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error ?? `Settings update failed: ${response.status}`);
+  }
+  return response.json();
+}
+
 // ===== Authentication API =====
 
 export interface LoginResult {

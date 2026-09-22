@@ -35,6 +35,15 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 from app.auth import init_database, get_current_user, require_permission
 from app.auth_routes import router as auth_router
+from app.axis_cameras import router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast, track_from_detections, load_persisted_settings as load_axis_camera_settings
+from app.yolo_models import (
+    router as yolo_models_router,
+    set_broadcast_callback as set_yolo_models_broadcast,
+    set_detector_sender as set_yolo_models_detector_sender,
+    get_active_model as get_active_yolo_model,
+    get_settings as get_active_yolo_settings,
+    load_persisted_settings as load_yolo_model_settings,
+)
 from app.settings import get_deconfliction_settings, update_deconfliction_settings
 from app.settings import APPLICATION_SETTING_DEFAULTS, get_application_settings, update_application_settings
 from app.tiles import router as tile_router, TILE_MAX_CACHE_AGE_SECONDS
@@ -94,11 +103,14 @@ rtcm_status: dict[str, Any] = {
     "bytes_total": 0,
     "error": None,
 }
+_last_gps_fix_log_at: dict[str, float] = {}
 
 
 app = FastAPI(title="YP Ground Station", version="0.1.0")
 app.include_router(tile_router)
 app.include_router(auth_router)
+app.include_router(axis_camera_router)
+app.include_router(yolo_models_router)
 
 
 @app.middleware("http")
@@ -416,6 +428,8 @@ async def startup() -> None:
     _server_start_time = datetime.now(timezone.utc)
     # Initialize authentication database
     init_database()
+    load_yolo_model_settings()
+    load_axis_camera_settings()
 
     persisted_settings = get_application_settings()
     settings.update(persisted_settings)
@@ -436,6 +450,9 @@ async def startup() -> None:
         print(f"InfluxDB unavailable at startup: {exc}")
     cleanup_task = asyncio.create_task(influx_retention_loop())
     load_video_streams_from_env()
+    set_axis_camera_broadcast(broadcast_ui)
+    set_yolo_models_broadcast(broadcast_ui)
+    set_yolo_models_detector_sender(send_to_detector)
     
     # Start deconfliction check task
     deconfliction_task = asyncio.create_task(_deconfliction_check_loop())
@@ -696,6 +713,22 @@ async def _run_mavlink_bridge(
                 _mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0,
             )
         )
+        # GPS_RAW_INT carries the autopilot's live RTK Float/Fixed solution and
+        # accuracy; request it explicitly because it is not in the position stream.
+        await asyncio.to_thread(
+            lambda: master.mav.command_long_send(
+                master.target_system, master.target_component,
+                _mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                _mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0,
+            )
+        )
+        await asyncio.to_thread(
+            lambda: master.mav.command_long_send(
+                master.target_system, master.target_component,
+                _mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                _mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0,
+            )
+        )
 
         # ------------------------------------------------------------------ #
         # Dedicated MAVLink I/O thread                                        #
@@ -705,6 +738,7 @@ async def _run_mavlink_bridge(
         def _io_thread(m: Any) -> None:
             min_pos_interval = 1.0 / send_hz
             last_pos_time = 0.0
+            last_gps_fix_time = 0.0
 
             while not _stop.is_set():
                 # Forward any outbound commands queued by the asyncio side
@@ -727,7 +761,7 @@ async def _run_mavlink_bridge(
 
                 # Blocking read — wakes up as soon as a message arrives
                 msg = m.recv_match(
-                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS", "EXTENDED_SYS_STATE"],
+                    type=["GLOBAL_POSITION_INT", "SYS_STATUS", "BATTERY_STATUS", "EXTENDED_SYS_STATE", "GPS_RAW_INT", "GPS2_RAW"],
                     blocking=True,
                     timeout=0.1,
                 )
@@ -746,6 +780,10 @@ async def _run_mavlink_bridge(
                     if now - last_pos_time < min_pos_interval:
                         continue
                     last_pos_time = now
+                elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
+                    if now - last_gps_fix_time < min_pos_interval:
+                        continue
+                    last_gps_fix_time = now
 
                 try:
                     _inbound.put_nowait((msg_type, msg, now))
@@ -879,6 +917,16 @@ async def _run_mavlink_bridge(
                             "msg": {"percentage": last_battery_pct},
                         })
 
+                elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
+                    await ingest_vehicle_message({
+                        "vehicle_id": vehicle_id,
+                        "vehicle_type": info["vehicle_type"],
+                        "topic": f"/vehicles/{vehicle_id}/gps_fix",
+                        "type": f"mavlink/{msg_type}",
+                        "stamp": now,
+                        "msg": _gps_raw_int_to_dict(msg, source=msg_type),
+                    })
+
             # Yield to event loop; shorter sleep when actively draining data
             await asyncio.sleep(0.0 if processed else 0.02)
 
@@ -900,9 +948,9 @@ async def _run_mavlink_bridge(
             info["status"] = "disconnected"
             await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
         async with state_lock:
-            if vehicle_id in vehicles:
-                vehicles[vehicle_id]["connected"] = False
-        await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+            removed_vehicle = vehicles.pop(vehicle_id, None)
+        if removed_vehicle is not None:
+            await broadcast_ui({"op": "vehicle_removed", "vehicle_id": vehicle_id})
 
 
 def _execute_sar_command(
@@ -992,7 +1040,22 @@ def _handle_sitl_command(master: Any, cmd_payload: dict[str, Any]) -> bool:
         if lat is not None and lon is not None:
             # RTB-follow emits frequent waypoint updates; avoid repeated mode/arm
             # chatter so telemetry processing stays responsive.
-            if source != "rtb_follow":
+            if source == "rtb_follow":
+                # The RTB approach phase before stern-capture also arrives as
+                # "waypoint" commands. Share the rtb_follow force-once gate
+                # (keyed below) so a vehicle left in LOITER still gets forced
+                # into GUIDED at the start of the RTB sequence, instead of
+                # never forcing and silently ignoring the position target.
+                vehicle_id = str(cmd_payload.get("vehicle_id") or "")
+                now = time.monotonic()
+                if now - _sitl_follow_guided_requests.get(vehicle_id, 0.0) > 1.0:
+                    _sitl_guided_forced[vehicle_id] = False
+                _sitl_follow_guided_requests[vehicle_id] = now
+                should_force = not _sitl_guided_forced.get(vehicle_id, False)
+                _sitl_guided_forced[vehicle_id] = True
+            else:
+                should_force = True
+            if should_force:
                 # Fire-and-forget: set GUIDED mode then arm without waiting for ACKs
                 # so the IO thread is never stalled over a radio link. ArduPilot
                 # processes MAVLink messages in order, so the position target
@@ -1812,10 +1875,8 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
         if vehicle_queues.get(vehicle_id) is queue:
             vehicle_queues.pop(vehicle_id, None)
             async with state_lock:
-                if vehicle_id in vehicles:
-                    vehicles[vehicle_id]["connected"] = False
-                    vehicles[vehicle_id]["last_seen_age"] = time.time() - vehicles[vehicle_id].get("last_seen", time.time())
-            await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+                vehicles.pop(vehicle_id, None)
+            await broadcast_ui({"op": "vehicle_removed", "vehicle_id": vehicle_id})
 
 
 @app.websocket("/ws/ui")
@@ -1918,9 +1979,50 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
         ros_connections.pop(websocket, None)
 
 
+_detector_ws: Optional[WebSocket] = None
+
+
+async def send_to_detector(payload: dict[str, Any]) -> bool:
+    """Push a command (e.g. set_model) to the connected YOLO detector service, if any."""
+    if _detector_ws is None:
+        return False
+    try:
+        await _detector_ws.send_json(payload)
+        return True
+    except Exception:
+        return False
+
+
+@app.websocket("/ws/detector")
+async def detector_ws(websocket: WebSocket) -> None:
+    """Internal endpoint for the YOLO detection service to publish bounding-box results for UI overlay."""
+    global _detector_ws
+    await websocket.accept()
+    _detector_ws = websocket
+    await send_to_detector({"op": "set_model", "model": get_active_yolo_model()})
+    await send_to_detector({"op": "set_settings", **get_active_yolo_settings()})
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            if payload.get("op") == "camera_detection_update":
+                await broadcast_ui(payload)
+                await track_from_detections(
+                    payload.get("camera_id", ""),
+                    payload.get("detections", []),
+                    payload.get("frame_width", 0),
+                    payload.get("frame_height", 0),
+                )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if _detector_ws is websocket:
+            _detector_ws = None
+
+
 async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     """Update vehicle state from an incoming telemetry message and fan it out to clients."""
-    now = float(payload.get("stamp") or time.time())
+    received_at = time.time()
+    now = float(payload.get("stamp") or received_at)
     vehicle_id = str(payload.get("vehicle_id") or topic_vehicle_id(payload.get("topic", "")) or "unknown")
     # Natural type from the message payload; stored so clearing the YP role can revert it.
     natural_type = normalize_vehicle_type(payload.get("vehicle_type") or infer_vehicle_type(vehicle_id))
@@ -1929,6 +2031,12 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
     topic = str(payload.get("topic") or f"/vehicles/{vehicle_id}/unknown")
     msg_type = str(payload.get("type") or payload.get("msg_type") or "unknown")
     msg = payload.get("msg", {})
+
+    if "GPS_RAW_INT" in msg_type or "GPS2_RAW" in msg_type:
+        last_logged_at = _last_gps_fix_log_at.get(vehicle_id, 0.0)
+        if received_at - last_logged_at >= 10.0:
+            _last_gps_fix_log_at[vehicle_id] = received_at
+            print(f"[GPS] Received {msg_type} from {vehicle_id} at {received_at:.3f} (payload stamp {now:.3f})")
 
     if msg_type == "yp_ground_station/MissionComplete":
         shared_mission_completion_targets.pop(vehicle_id, None)
@@ -2010,6 +2118,15 @@ async def ingest_vehicle_message(payload: dict[str, Any]) -> None:
         battery = extract_battery(topic, msg_type, msg)
         if battery:
             vehicle["battery"] = battery
+
+        gps_fix = extract_gps_fix(topic, msg_type, msg)
+        if gps_fix:
+            previous_gps_fix = vehicle.get("gps_fix") or {}
+            if (
+                int(gps_fix.get("fix_type") or 0) >= int(previous_gps_fix.get("fix_type") or 0)
+                or received_at - float(previous_gps_fix.get("stamp") or 0) > 10.0
+            ):
+                vehicle["gps_fix"] = {**gps_fix, "stamp": received_at}
 
         vehicle_snapshot = public_vehicle(vehicle)
         # Strip history from the per-message update — it grows to thousands of entries
@@ -3014,6 +3131,51 @@ def extract_battery(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, A
         "voltage": msg.get("voltage"),
         "current": msg.get("current"),
     }
+
+
+# MAV_GPS_FIX_TYPE labels, used to surface RTK correction quality to the UI.
+GPS_FIX_TYPE_LABELS = {
+    0: "No GPS",
+    1: "No Fix",
+    2: "2D Fix",
+    3: "3D Fix",
+    4: "DGPS",
+    5: "RTK Float",
+    6: "RTK Fixed",
+    7: "Static",
+    8: "PPP",
+}
+
+
+def _gps_raw_int_to_dict(msg: Any, source: str = "GPS_RAW_INT") -> dict[str, Any]:
+    """Convert a pymavlink GPS_RAW_INT/GPS2_RAW message into a plain dictionary."""
+    fix_type = int(getattr(msg, "fix_type", 0))
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    satellites_visible = int(getattr(msg, "satellites_visible", 255))
+    # h_acc/v_acc (mm) are more precise than eph/epv (cm) and present on most modern dialects.
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    horizontal_accuracy_m = (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None)
+    vertical_accuracy_m = (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None)
+    return {
+        "source": source,
+        "fix_type": fix_type,
+        "fix_type_label": GPS_FIX_TYPE_LABELS.get(fix_type, "Unknown"),
+        "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+        "horizontal_accuracy_m": horizontal_accuracy_m,
+        "vertical_accuracy_m": vertical_accuracy_m,
+    }
+
+
+def extract_gps_fix(topic: str, msg_type: str, msg: Any) -> Optional[dict[str, Any]]:
+    """Extract fix type/accuracy from a GPS_RAW_INT-shaped message, or None if not applicable."""
+    if not isinstance(msg, dict):
+        return None
+    if "GPS_RAW_INT" not in msg_type and "GPS2_RAW" not in msg_type and not topic.endswith("gps_fix"):
+        return None
+    return dict(msg)
+
 
 
 def extract_heading(msg: Any) -> Optional[float]:

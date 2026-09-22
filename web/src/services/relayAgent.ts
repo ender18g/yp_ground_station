@@ -32,7 +32,10 @@ export async function startAgentRelay(port: string, baud: number, tcpPort: numbe
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ port, baud, tcp_port: tcpPort }),
   });
-  if (!response.ok) throw new Error(`Failed to start relay: ${response.status}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `Failed to start relay: ${response.status}`);
+  }
 }
 
 export async function stopAgentRelay(tcpPort: number): Promise<void> {

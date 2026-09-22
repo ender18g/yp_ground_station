@@ -376,6 +376,28 @@ def get_gps_fix_label(fix_type: int) -> str:
     fix_map = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed"}
     return fix_map.get(fix_type, f"Fix {fix_type}")
 
+def create_gps_fix_message(vehicle_id: str, msg) -> dict:
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    fix_type = getattr(msg, "fix_type", 0)
+    satellites_visible = getattr(msg, "satellites_visible", 255)
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_type": VEHICLE_TYPE,
+        "topic": f"/vehicles/{vehicle_id}/gps_fix",
+        "type": "mavlink/GPS_RAW_INT",
+        "stamp": time.time(),
+        "msg": {
+            "fix_type": fix_type,
+            "fix_type_label": get_gps_fix_label(fix_type),
+            "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+            "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+            "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+        },
+    }
+
 def create_navsatfix_message(vehicle_id: str, lat: float, lon: float, alt: float, heading: float | None = None) -> dict:
     now = time.time()
     sec = int(now)
@@ -519,6 +541,23 @@ def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_
     if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
     if force_guided: master.set_mode('GUIDED')
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def _rtb_waypoint_should_force_guided() -> bool:
+    """Force GUIDED once at the start of an RTB approach (the "waypoint" phase
+    before stern-capture) so a vehicle left in LOITER still responds; skip the
+    redundant mode switch on later ticks of the same continuous RTB sequence.
+    Shares state with follow_yp_velocity's gate so the whole RTB run only
+    forces the mode once."""
+    global _last_rtb_step_time, _rtb_guided_forced
+    now = time.monotonic()
+    if now - _last_rtb_step_time > 1.0:
+        _rtb_guided_forced = False
+    _last_rtb_step_time = now
+    if _rtb_guided_forced:
+        return False
+    _rtb_guided_forced = True
+    return True
 
 
 def follow_yp_velocity(master, command_data: dict) -> None:
@@ -781,6 +820,8 @@ async def telemetry_loop(current_config: dict) -> None:
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
         # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
         async with websockets.connect(f"{server_ws_url.rstrip('/')}/{vehicle_id}", ping_interval=10, ping_timeout=10) as ws:
             system_status["ws_connected"] = True
@@ -808,7 +849,7 @@ async def telemetry_loop(current_config: dict) -> None:
                                         "stamp": time.time(),
                                     }))
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
-                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(server_msg.get("source") != "rtb_follow"))
+                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_guided()))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
                             elif cmd_type == "mob" and len(command_data.get("track_points", [])) >= 2:
@@ -842,7 +883,7 @@ async def telemetry_loop(current_config: dict) -> None:
 
                 msg = None
                 if not _sar_mission_lock.locked():
-                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "EXTENDED_SYS_STATE"], blocking=False)
+                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW", "EXTENDED_SYS_STATE"], blocking=False)
                
                 now = time.time()
                 if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
@@ -862,9 +903,10 @@ async def telemetry_loop(current_config: dict) -> None:
                         try:
                             system_status["flight_mode"] = master.flightmode
                         except Exception: pass
-                    elif msg_type == "GPS_RAW_INT":
+                    elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                         system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
                         system_status["satellites"] = getattr(msg, "satellites_visible", 0)
+                        await ws.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
                     elif msg_type == "GLOBAL_POSITION_INT":
                         lat, lon, alt = msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
                         heading_raw = getattr(msg, "hdg", None)

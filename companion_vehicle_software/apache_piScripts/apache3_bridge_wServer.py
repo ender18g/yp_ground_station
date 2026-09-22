@@ -428,6 +428,28 @@ def get_gps_fix_label(fix_type: int) -> str:
     fix_map = {0: "No GPS", 1: "No Fix", 2: "2D Fix", 3: "3D Fix", 4: "DGPS", 5: "RTK Float", 6: "RTK Fixed"}
     return fix_map.get(fix_type, f"Fix {fix_type}")
 
+def create_gps_fix_message(vehicle_id: str, msg) -> dict:
+    eph = getattr(msg, "eph", 65535)
+    epv = getattr(msg, "epv", 65535)
+    h_acc = getattr(msg, "h_acc", None)
+    v_acc = getattr(msg, "v_acc", None)
+    fix_type = getattr(msg, "fix_type", 0)
+    satellites_visible = getattr(msg, "satellites_visible", 255)
+    return {
+        "vehicle_id": vehicle_id,
+        "vehicle_type": VEHICLE_TYPE,
+        "topic": f"/vehicles/{vehicle_id}/gps_fix",
+        "type": "mavlink/GPS_RAW_INT",
+        "stamp": time.time(),
+        "msg": {
+            "fix_type": fix_type,
+            "fix_type_label": get_gps_fix_label(fix_type),
+            "satellites_visible": satellites_visible if satellites_visible != 255 else None,
+            "horizontal_accuracy_m": (h_acc / 1000.0) if h_acc else ((eph / 100.0) if eph != 65535 else None),
+            "vertical_accuracy_m": (v_acc / 1000.0) if v_acc else ((epv / 100.0) if epv != 65535 else None),
+        },
+    }
+
 def create_navsatfix_message(vehicle_id: str, lat: float, lon: float, heading: float | None = None) -> dict:
     now = time.time()
     sec, nanosec = int(now), int((now - int(now)) * 1e9)
@@ -501,6 +523,8 @@ async def telemetry_loop(current_config: dict) -> None:
 
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_POSITION, int(send_hz), 1)
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
         async with websockets.connect(f"{server_ws_url.rstrip('/')}/{vehicle_id}", ping_interval=10, ping_timeout=10) as ws:
             system_status["ws_connected"] = True
@@ -565,7 +589,7 @@ async def telemetry_loop(current_config: dict) -> None:
 
                 msg = None
                 if not _sar_mission_lock.locked():
-                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT"], blocking=False)
+                    msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW"], blocking=False)
 
                 now = time.time()
                 if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
@@ -580,9 +604,10 @@ async def telemetry_loop(current_config: dict) -> None:
                         custom_mode_val = getattr(msg, "custom_mode", 0)
                         mode_names = {0: "MANUAL", 4: "HOLD", 10: "AUTO", 11: "RTL", 12: "LOITER", 15: "GUIDED"}
                         system_status["flight_mode"] = mode_names.get(custom_mode_val, f"MODE_{custom_mode_val}")
-                    elif msg_type == "GPS_RAW_INT":
+                    elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                         system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
                         system_status["satellites"] = getattr(msg, "satellites_visible", 0)
+                        await ws.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
                     elif msg_type == "GLOBAL_POSITION_INT":
                         lat, lon = msg.lat / 1e7, msg.lon / 1e7
                         heading_raw = getattr(msg, "hdg", None)
