@@ -1,7 +1,7 @@
 import { Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Minus, Plus, Square, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
 
-import { getCameraTrack, getTrackSettings, listAxisCameras, listDetectorModels, selectDetectorModel, sendAxisPtz, setCameraTrack, updateDetectorSettings, updateTrackSettings, uploadDetectorModel, type AxisCamera, type CameraDetectionUpdate } from "../api";
+import { fetchSettings, getCameraTrack, getCameraTrackStates, getCoordinatedCameraTrack, getTrackSettings, listAxisCameras, listDetectorModels, selectDetectorModel, sendAxisPtz, setCameraTrack, setCoordinatedCameraTrack, updateCameraSpatial, updateDetectorSettings, updateSettings, updateTrackSettings, uploadDetectorModel, type AxisCamera, type CameraDetectionUpdate, type CameraSpatial } from "../api";
 
 type CameraPanelProps = {
   cameras: AxisCamera[];
@@ -10,7 +10,7 @@ type CameraPanelProps = {
 };
 
 type PtzVector = { pan: number; tilt: number; zoom: number };
-type CameraPanelTab = "cameras" | "detection";
+type CameraPanelTab = "cameras" | "all" | "spatial" | "detection";
 
 const PTZ_STOP: PtzVector = { pan: 0, tilt: 0, zoom: 0 };
 
@@ -41,19 +41,34 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
   const [confThreshold, setConfThreshold] = useState(0.4);
   const [inferInterval, setInferInterval] = useState(0.5);
   const [uploading, setUploading] = useState(false);
-  const [tracking, setTracking] = useState(false);
+  const [trackingByCamera, setTrackingByCamera] = useState<Record<string, boolean>>({});
+  const [coordinatedTracking, setCoordinatedTracking] = useState(false);
   const [trackGain, setTrackGain] = useState(160);
   const [trackMaxSpeed, setTrackMaxSpeed] = useState(60);
   const [trackDeadzone, setTrackDeadzone] = useState(0.04);
+  const [spatial, setSpatial] = useState<Record<string, CameraSpatial>>(() => Object.fromEntries(initialCameras.map((camera) => [camera.id, camera.spatial])));
+  const [spatialSaved, setSpatialSaved] = useState(false);
+  const [fallbackRangeM, setFallbackRangeM] = useState(20);
   const [streamAspect, setStreamAspect] = useState(DEFAULT_STREAM_ASPECT_RATIO);
   const dragRef = useRef<{ mode: "move" | "resize"; pointerId: number; startX: number; startY: number; frame: typeof frame; chromeHeight: number | null } | null>(null);
-  const imageDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const imageDragRef = useRef<{ cameraId: string; pointerId: number; x: number; y: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const settingsDebounceRef = useRef<number | null>(null);
   const hasAutoSizedRef = useRef(false);
 
-  useEffect(() => setCameras(initialCameras), [initialCameras]);
+  useEffect(() => {
+    setCameras(initialCameras);
+    setSpatial((current) => Object.fromEntries(initialCameras.map((camera) => [camera.id, current[camera.id] ?? camera.spatial])));
+  }, [initialCameras]);
+
+  useEffect(() => {
+    void getCameraTrackStates(initialCameras.map((camera) => camera.id)).then(setTrackingByCamera);
+  }, [initialCameras]);
+
+  useEffect(() => {
+    void getCoordinatedCameraTrack().then(setCoordinatedTracking);
+  }, []);
 
   const selected = cameras.find((camera) => camera.id === selectedId) ?? cameras[0];
   const selectedDetections = selected ? detections?.[selected.id] : undefined;
@@ -76,9 +91,30 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
   const refresh = () => {
     void listAxisCameras().then((next) => {
       setCameras(next);
+      setSpatial((current) => Object.fromEntries(next.map((camera) => [camera.id, current[camera.id] ?? camera.spatial])));
       setSelectedId((current) => next.some((camera) => camera.id === current) ? current : next[0]?.id ?? "");
     });
   };
+
+  const changeSpatial = (cameraId: string, field: keyof CameraSpatial, value: number) => {
+    setSpatial((current) => ({ ...current, [cameraId]: { ...current[cameraId], [field]: value } }));
+    setSpatialSaved(false);
+  };
+
+  const saveSpatial = () => {
+    void Promise.all([
+      updateCameraSpatial(spatial),
+      updateSettings({ coordinated_fallback_range_m: fallbackRangeM }),
+    ])
+      .then(() => setSpatialSaved(true))
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Camera spatial settings update failed"));
+  };
+
+  useEffect(() => {
+    void fetchSettings().then((settings) => {
+      if (typeof settings.coordinated_fallback_range_m === "number") setFallbackRangeM(settings.coordinated_fallback_range_m);
+    });
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -101,27 +137,24 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
     return () => window.clearInterval(timer);
   }, []);
 
-  const refreshTracking = () => {
-    if (!selected) return;
-    void getCameraTrack(selected.id).then(setTracking);
-  };
-
-  useEffect(() => {
-    refreshTracking();
-    const timer = window.setInterval(refreshTracking, 5000);
-    return () => window.clearInterval(timer);
-  }, [selected?.id]);
-
-  const toggleTracking = (enabled: boolean) => {
-    if (!selected) return;
+  const toggleCameraTracking = (cameraId: string, enabled: boolean) => {
     setError(null);
-    setTracking(enabled);
-    void setCameraTrack(selected.id, enabled)
-      .then(setTracking)
+    setTrackingByCamera((current) => ({ ...current, [cameraId]: enabled }));
+    void setCameraTrack(cameraId, enabled)
+      .then((actual) => {
+        setTrackingByCamera((current) => ({ ...current, [cameraId]: actual }));
+      })
       .catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : "Track toggle failed");
-        refreshTracking();
+        void getCameraTrack(cameraId).then((actual) => setTrackingByCamera((current) => ({ ...current, [cameraId]: actual })));
       });
+  };
+
+  const toggleCoordinatedTracking = (enabled: boolean) => {
+    setCoordinatedTracking(enabled);
+    void setCoordinatedCameraTrack(enabled)
+      .then(setCoordinatedTracking)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Coordinated tracking update failed"));
   };
 
   useEffect(() => {
@@ -202,13 +235,11 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
     applySettingsDebounced({ infer_interval_seconds: value });
   };
 
-  const move = (vector: PtzVector) => {
-    if (!selected) return;
+  const moveCamera = (cameraId: string, vector: PtzVector) => {
     setError(null);
-    void sendAxisPtz(selected.id, vector.pan, vector.tilt, vector.zoom)
+    void sendAxisPtz(cameraId, vector.pan, vector.tilt, vector.zoom)
       .then(() => {
-        // A manual move overrides auto-track server-side; reflect that in the toggle.
-        if (vector.pan || vector.tilt || vector.zoom) refreshTracking();
+        // A manual move overrides auto-track server-side; the server owns the resulting state.
       })
       .catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : "PTZ command failed");
@@ -283,11 +314,11 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
   };
 
-  const startImageDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
-    if (!selected?.online) return;
+  const startImageDrag = (cameraId: string, event: ReactPointerEvent<HTMLImageElement>) => {
+    if (!cameras.find((camera) => camera.id === cameraId)?.online) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
-    imageDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    imageDragRef.current = { cameraId, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
   };
 
   const moveImageDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
@@ -297,31 +328,44 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
     const dy = drag.y - event.clientY;
     drag.x = event.clientX;
     drag.y = event.clientY;
-    move({ pan: Math.max(-100, Math.min(100, dx * 3)), tilt: Math.max(-100, Math.min(100, dy * 3)), zoom: 0 });
+    moveCamera(drag.cameraId, { pan: Math.max(-100, Math.min(100, dx * 3)), tilt: Math.max(-100, Math.min(100, dy * 3)), zoom: 0 });
   };
 
   const endImageDrag = (event: ReactPointerEvent<HTMLImageElement>) => {
-    if (imageDragRef.current?.pointerId === event.pointerId) {
+    const drag = imageDragRef.current;
+    if (drag?.pointerId === event.pointerId) {
       imageDragRef.current = null;
-      move(PTZ_STOP);
+      moveCamera(drag.cameraId, PTZ_STOP);
     }
   };
 
-  const zoomWithWheel = (event: WheelEvent<HTMLImageElement>) => {
+  const zoomWithWheel = (cameraId: string, event: WheelEvent<HTMLImageElement>) => {
     event.preventDefault();
-    move({ pan: 0, tilt: 0, zoom: event.deltaY < 0 ? 70 : -70 });
-    window.setTimeout(() => move(PTZ_STOP), 120);
+    moveCamera(cameraId, { pan: 0, tilt: 0, zoom: event.deltaY < 0 ? 70 : -70 });
+    window.setTimeout(() => moveCamera(cameraId, PTZ_STOP), 120);
   };
 
-  const hold = (vector: PtzVector) => ({
+  const hold = (cameraId: string, vector: PtzVector) => ({
     onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => {
       event.currentTarget.setPointerCapture(event.pointerId);
-      move(vector);
+      moveCamera(cameraId, vector);
     },
-    onPointerUp: () => move(PTZ_STOP),
-    onPointerCancel: () => move(PTZ_STOP),
-    onPointerLeave: () => move(PTZ_STOP),
+    onPointerUp: () => moveCamera(cameraId, PTZ_STOP),
+    onPointerCancel: () => moveCamera(cameraId, PTZ_STOP),
+    onPointerLeave: () => moveCamera(cameraId, PTZ_STOP),
   });
+
+  const renderPtzControls = (cameraId: string, compact = false) => (
+    <div className={compact ? "camera-ptz-controls camera-all-ptz-controls" : "camera-ptz-controls"} aria-label={`${cameraId} PTZ controls`}>
+      <button className="camera-ptz-up" title="Tilt up" {...hold(cameraId, { pan: 0, tilt: 70, zoom: 0 })}><ChevronUp size={compact ? 14 : 18} /></button>
+      <button className="camera-ptz-left" title="Pan left" {...hold(cameraId, { pan: -70, tilt: 0, zoom: 0 })}><ChevronLeft size={compact ? 14 : 18} /></button>
+      <button className="camera-ptz-stop" title="Stop movement" onClick={() => moveCamera(cameraId, PTZ_STOP)}><Square size={compact ? 10 : 13} /></button>
+      <button className="camera-ptz-right" title="Pan right" {...hold(cameraId, { pan: 70, tilt: 0, zoom: 0 })}><ChevronRight size={compact ? 14 : 18} /></button>
+      <button className="camera-ptz-down" title="Tilt down" {...hold(cameraId, { pan: 0, tilt: -70, zoom: 0 })}><ChevronDown size={compact ? 14 : 18} /></button>
+      <button className="camera-ptz-zoom-out" title="Zoom out" {...hold(cameraId, { pan: 0, tilt: 0, zoom: -70 })}><Minus size={compact ? 12 : 16} /></button>
+      <button className="camera-ptz-zoom-in" title="Zoom in" {...hold(cameraId, { pan: 0, tilt: 0, zoom: 70 })}><Plus size={compact ? 12 : 16} /></button>
+    </div>
+  );
 
   return (
     <section className="camera-panel" aria-label="Axis cameras" style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}>
@@ -332,12 +376,30 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
       <div className="camera-tabs" role="tablist" aria-label="Camera panel sections">
         <button
           role="tab"
+          aria-selected={tab === "spatial"}
+          className={tab === "spatial" ? "camera-tab active" : "camera-tab"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => setTab("spatial")}
+        >
+          Spatial setup
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === "cameras"}
           className={tab === "cameras" ? "camera-tab active" : "camera-tab"}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={() => setTab("cameras")}
         >
           Cameras
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "all"}
+          className={tab === "all" ? "camera-tab active" : "camera-tab"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => setTab("all")}
+        >
+          All cameras
         </button>
         <button
           role="tab"
@@ -350,6 +412,92 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
         </button>
       </div>
       <div className="camera-panel-body">
+        {tab === "spatial" && (
+          <div className="camera-spatial-form">
+            <p className="camera-field-hint">Positions use meters relative to the YP reference point: X forward, Y starboard, Z up.</p>
+            <div className="camera-field">
+              <label htmlFor="coordinated-fallback-range">Single-camera acquisition range (m)</label>
+              <p className="camera-field-hint">Temporary range used until a second camera sees the same target.</p>
+              <input id="coordinated-fallback-range" type="number" min="1" step="1" value={fallbackRangeM} onChange={(event) => setFallbackRangeM(Number(event.target.value))} onPointerDown={(event) => event.stopPropagation()} />
+            </div>
+            {cameras.map((camera) => {
+              const values = spatial[camera.id] ?? camera.spatial;
+              return <fieldset className="camera-spatial-group" key={camera.id}>
+                <legend>{camera.label}</legend>
+                <div className="camera-spatial-grid">
+                  {(["x_m", "y_m", "z_m", "heading_deg", "tilt_deg", "pan_zero_deg", "hfov_deg", "vfov_deg"] as const).map((field) => (
+                      <label key={field}>{field.replace("_", " ")}
+                      <input type="number" step="0.1" value={values[field]} onChange={(event) => changeSpatial(camera.id, field, Number(event.target.value))} onPointerDown={(event) => event.stopPropagation()} />
+                    </label>
+                  ))}
+                </div>
+              </fieldset>;
+            })}
+            <button className="camera-spatial-save" onClick={saveSpatial} onPointerDown={(event) => event.stopPropagation()}>Save spatial setup</button>
+            {spatialSaved && <span className="camera-spatial-saved">Saved</span>}
+          </div>
+        )}
+        {tab === "all" && cameras.length === 0 && <p className="camera-panel-empty">No Axis cameras configured.</p>}
+        {tab === "all" && cameras.length > 0 && (
+          <>
+            <div className="camera-field camera-all-coordination">
+              <label className="camera-toggle">
+                <input type="checkbox" checked={coordinatedTracking} onChange={(event) => toggleCoordinatedTracking(event.target.checked)} onPointerDown={(event) => event.stopPropagation()} />
+                <span>{coordinatedTracking ? "Coordinated tracking on" : "Coordinate enabled cameras"}</span>
+              </label>
+              <p className="camera-field-hint">Uses spatial setup to pan cameras checked for tracking toward the same two-camera fused target.</p>
+            </div>
+            <div className="camera-all-grid">
+              {cameras.map((camera) => (
+                <article className="camera-all-card" key={camera.id}>
+                <div className="camera-all-card-header">
+                  <strong>{camera.label}</strong>
+                  <span className={camera.online ? "camera-status online" : "camera-status"}>{camera.online ? "Online" : "Offline"}</span>
+                </div>
+                <div className="camera-all-preview">
+                  {camera.online ? (
+                    <div className="camera-all-video-wrap">
+                      <img
+                        src={camera.stream_url}
+                        alt={`${camera.label} live view`}
+                        onPointerDown={(event) => startImageDrag(camera.id, event)}
+                        onPointerMove={moveImageDrag}
+                        onPointerUp={endImageDrag}
+                        onPointerCancel={endImageDrag}
+                        onWheel={(event) => zoomWithWheel(camera.id, event)}
+                      />
+                      {(() => {
+                        const cameraDetections = detections?.[camera.id];
+                        const fresh = !!cameraDetections && Date.now() / 1000 - cameraDetections.timestamp < DETECTION_MAX_AGE_SECONDS;
+                        return fresh && cameraDetections ? (
+                          <svg className="camera-detection-overlay" viewBox={`0 0 ${cameraDetections.frame_width} ${cameraDetections.frame_height}`} preserveAspectRatio="xMidYMid meet">
+                            {cameraDetections.detections.map((detection, index) => {
+                              const [x1, y1, x2, y2] = detection.box;
+                              return <g key={index}>
+                                <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} className="camera-detection-box" />
+                                <text x={x1} y={Math.max(0, y1 - 4)} className="camera-detection-label">{detection.label} #{detection.track_id ?? "-"}</text>
+                              </g>;
+                            })}
+                          </svg>
+                        ) : null;
+                      })()}
+                    </div>
+                  ) : <div className="camera-offline"><Camera size={22} />Unavailable</div>}
+                </div>
+                {camera.online && <label className="camera-toggle camera-all-track-toggle">
+                  <input type="checkbox" checked={Boolean(trackingByCamera[camera.id])} onChange={(event) => toggleCameraTracking(camera.id, event.target.checked)} onPointerDown={(event) => event.stopPropagation()} />
+                  <span>{trackingByCamera[camera.id] ? "Tracking on" : "Track this camera"}</span>
+                </label>}
+                <div className="camera-angle-readout">
+                  <span>Ship relative</span>
+                  <strong>{camera.ship_relative_deg === null ? "--" : `${camera.ship_relative_deg.toFixed(0)}°`}</strong>
+                </div>
+                {camera.online && camera.ptz_capable && renderPtzControls(camera.id, true)}
+                </article>
+              ))}
+            </div>
+          </>
+        )}
         {tab === "cameras" && cameras.length === 0 && <p className="camera-panel-empty">No Axis cameras configured.</p>}
         {tab === "cameras" && cameras.length > 0 && selected && (
           <>
@@ -360,6 +508,10 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
                 {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.label}{camera.online ? "" : " (offline)"}</option>)}
               </select>
               <span className={selected.online ? "camera-status online" : "camera-status"}>{selected.online ? "Online" : "Offline"}</span>
+            </div>
+            <div className="camera-angle-readout camera-angle-readout-selected">
+              <span>Ship relative: <strong>{selected.ship_relative_deg === null ? "--" : `${selected.ship_relative_deg.toFixed(0)}°`}</strong></span>
+              <span>Pan: <strong>{selected.pan_deg === null ? "--" : `${selected.pan_deg.toFixed(0)}°`}</strong></span>
             </div>
           </div>
           <div className="camera-preview-wrap" ref={previewWrapRef}>
@@ -372,11 +524,11 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
                   const img = event.currentTarget;
                   if (img.naturalWidth && img.naturalHeight) setStreamAspect(img.naturalWidth / img.naturalHeight);
                 }}
-                onPointerDown={startImageDrag}
+                onPointerDown={(event) => startImageDrag(selected.id, event)}
                 onPointerMove={moveImageDrag}
                 onPointerUp={endImageDrag}
                 onPointerCancel={endImageDrag}
-                onWheel={zoomWithWheel}
+                onWheel={(event) => zoomWithWheel(selected.id, event)}
               />
             ) : <div className="camera-offline"><Camera size={28} />Camera unavailable</div>}
             {selected.online && isDetectionFresh && selectedDetections && (
@@ -392,7 +544,7 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
                     <g key={index}>
                       <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} className="camera-detection-box" />
                       <text x={x1} y={Math.max(0, y1 - 4)} className="camera-detection-label">
-                        {detection.label} {Math.round(detection.confidence * 100)}%
+                        {detection.label} #{detection.track_id ?? "-"}{detection.fusion_id ? ` / YP ${detection.fusion_id}` : ""} {Math.round(detection.confidence * 100)}%
                       </text>
                     </g>
                   );
@@ -401,15 +553,7 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
             )}
           </div>
           {selected.online && selected.ptz_capable && (
-            <div className="camera-ptz-controls" aria-label="PTZ controls">
-              <button className="camera-ptz-up" title="Tilt up" {...hold({ pan: 0, tilt: 70, zoom: 0 })}><ChevronUp size={18} /></button>
-              <button className="camera-ptz-left" title="Pan left" {...hold({ pan: -70, tilt: 0, zoom: 0 })}><ChevronLeft size={18} /></button>
-              <button className="camera-ptz-stop" title="Stop movement" onClick={() => move(PTZ_STOP)}><Square size={13} /></button>
-              <button className="camera-ptz-right" title="Pan right" {...hold({ pan: 70, tilt: 0, zoom: 0 })}><ChevronRight size={18} /></button>
-              <button className="camera-ptz-down" title="Tilt down" {...hold({ pan: 0, tilt: -70, zoom: 0 })}><ChevronDown size={18} /></button>
-              <button className="camera-ptz-zoom-out" title="Zoom out" {...hold({ pan: 0, tilt: 0, zoom: -70 })}><Minus size={16} /></button>
-              <button className="camera-ptz-zoom-in" title="Zoom in" {...hold({ pan: 0, tilt: 0, zoom: 70 })}><Plus size={16} /></button>
-            </div>
+            renderPtzControls(selected.id)
           )}
         </>
       )}
@@ -461,25 +605,6 @@ export function CameraPanel({ cameras: initialCameras, detections, onClose }: Ca
               onChange={(event) => changeInferInterval(parseFloat(event.target.value))}
               onPointerDown={(event) => event.stopPropagation()}
             />
-          </div>
-          <div className="camera-field">
-            <label htmlFor="detector-ptz-track">PTZ Auto-Track</label>
-            <p className="camera-field-hint">
-              {selected
-                ? `Automatically pan/tilt "${selected.label}" to keep the top detection centered.`
-                : "Select a camera in the Cameras tab to enable tracking."}
-            </p>
-            <label className="camera-toggle">
-              <input
-                id="detector-ptz-track"
-                type="checkbox"
-                checked={tracking}
-                disabled={!selected?.online || !selected?.ptz_capable}
-                onChange={(event) => toggleTracking(event.target.checked)}
-                onPointerDown={(event) => event.stopPropagation()}
-              />
-              <span>{tracking ? "Tracking on" : "Tracking off"}</span>
-            </label>
           </div>
           <div className="camera-field">
             <label htmlFor="detector-track-gain">Track Gain: {trackGain.toFixed(0)}</label>

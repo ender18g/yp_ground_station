@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import cv2
 import httpx
+import torch
 import websockets
 from ultralytics import YOLO
 
@@ -26,12 +27,21 @@ MODELS_DIR = Path(os.getenv("YOLO_MODELS_DIR", "/data/yolo_models"))
 _BUNDLED_MODELS_DIR = Path(__file__).resolve().parent
 CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.4"))
 INFER_INTERVAL_SECONDS = float(os.getenv("YOLO_INFER_INTERVAL_SECONDS", "0.5"))
+# Inference resolution independent of the model's trained/native size - the single
+# biggest lever for CPU inference cost, since larger custom models can otherwise
+# run at 960/1280px and take seconds per frame instead of tens of milliseconds.
+INFER_IMAGE_SIZE = int(os.getenv("YOLO_IMGSZ", "416"))
 DISCOVERY_INTERVAL_SECONDS = float(os.getenv("YOLO_DISCOVERY_INTERVAL_SECONDS", "15"))
 CAMERA_IDS_ENV = os.getenv("YOLO_CAMERA_IDS", "").strip()  # empty = auto-discover all online cameras
 CLASS_FILTER = {c.strip() for c in os.getenv("YOLO_CLASSES", "").split(",") if c.strip()}
+# "auto" uses the GPU when the container has one passed through (ROCm reports
+# through the same torch.cuda API as CUDA); set to "cpu" to force CPU inference.
+DEVICE = os.getenv("YOLO_DEVICE", "auto").strip().lower()
 
 _send_queue: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
 _camera_tasks: dict[str, asyncio.Task] = {}
+_camera_tracks: dict[str, dict[int, dict[str, Any]]] = {}
+_next_track_id: dict[str, int] = {}
 _model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
 _model: Optional[YOLO] = None
 
@@ -65,6 +75,9 @@ def _load_model() -> YOLO:
     if _model is None:
         print(f"Loading YOLO model: {_model_path}")
         _model = YOLO(_model_path)
+        device = DEVICE if DEVICE != "auto" else ("cuda:0" if torch.cuda.is_available() else "cpu")
+        _model.to(device)
+        print(f"YOLO inference device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.startswith("cuda") else ""))
         _persist_model_file(_model_path)
     return _model
 
@@ -84,6 +97,42 @@ def _apply_settings(payload: dict[str, Any]) -> None:
     if "infer_interval_seconds" in payload:
         INFER_INTERVAL_SECONDS = float(payload["infer_interval_seconds"])
     print(f"Detector settings updated: conf_threshold={CONF_THRESHOLD}, infer_interval_seconds={INFER_INTERVAL_SECONDS}")
+
+
+def _box_iou(first: list[float], second: list[float]) -> float:
+    left = max(first[0], second[0])
+    top = max(first[1], second[1])
+    right = min(first[2], second[2])
+    bottom = min(first[3], second[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+    second_area = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
+    union = first_area + second_area - intersection
+    return intersection / union if union else 0.0
+
+
+def _assign_track_ids(camera_id: str, detections: list[dict[str, Any]], timestamp: float) -> None:
+    tracks = _camera_tracks.setdefault(camera_id, {})
+    used_track_ids: set[int] = set()
+    for detection in detections:
+        best_id = None
+        best_iou = 0.3
+        for track_id, track in tracks.items():
+            if track_id in used_track_ids or track["label"] != detection["label"]:
+                continue
+            overlap = _box_iou(track["box"], detection["box"])
+            if overlap > best_iou:
+                best_id = track_id
+                best_iou = overlap
+        if best_id is None:
+            best_id = _next_track_id.get(camera_id, 0) + 1
+            _next_track_id[camera_id] = best_id
+        detection["track_id"] = best_id
+        used_track_ids.add(best_id)
+        tracks[best_id] = {"label": detection["label"], "box": detection["box"], "last_seen": timestamp}
+    for track_id in list(tracks):
+        if timestamp - tracks[track_id]["last_seen"] > 1.5:
+            tracks.pop(track_id, None)
 
 
 async def _fetch_online_camera_ids(client: httpx.AsyncClient) -> set[str]:
@@ -124,7 +173,7 @@ async def _detect_camera(camera_id: str) -> None:
                 height, width = frame.shape[:2]
                 model = _load_model()
                 results = await loop.run_in_executor(
-                    None, lambda: model(frame, conf=CONF_THRESHOLD, verbose=False)
+                    None, lambda: model(frame, conf=CONF_THRESHOLD, imgsz=INFER_IMAGE_SIZE, verbose=False)
                 )
                 detections = []
                 for result in results:
@@ -139,6 +188,7 @@ async def _detect_camera(camera_id: str) -> None:
                             "confidence": round(float(box.conf[0]), 3),
                             "box": [x1, y1, x2, y2],
                         })
+                _assign_track_ids(camera_id, detections, now)
                 await _send_queue.put({
                     "op": "camera_detection_update",
                     "camera_id": camera_id,

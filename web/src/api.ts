@@ -28,6 +28,7 @@ export interface ServerSettings {
   rtk_host_or_port?: string;
   rtk_network_port?: number;
   rtk_baudrate?: number;
+  coordinated_fallback_range_m?: number;
 }
 
 export interface RtcmStatus {
@@ -75,6 +76,22 @@ export interface AxisCamera {
   last_checked: number | null;
   stream_url: string;
   ptz_capable: boolean;
+  mount_heading_deg: number;
+  pan_deg: number | null;
+  tilt_deg: number | null;
+  ship_relative_deg: number | null;
+  spatial: CameraSpatial;
+}
+
+export interface CameraSpatial {
+  x_m: number;
+  y_m: number;
+  z_m: number;
+  heading_deg: number;
+  tilt_deg: number;
+  pan_zero_deg: number;
+  hfov_deg: number;
+  vfov_deg: number;
 }
 
 export async function listAxisCameras(): Promise<AxisCamera[]> {
@@ -84,10 +101,20 @@ export async function listAxisCameras(): Promise<AxisCamera[]> {
   return data.cameras ?? [];
 }
 
+export async function updateCameraSpatial(spatial: Record<string, CameraSpatial>): Promise<void> {
+  const response = await apiFetch("/api/cameras/spatial", {
+    method: "PUT", headers: getAuthHeaders(), body: JSON.stringify(spatial),
+  });
+  if (!response.ok) throw new Error(`camera spatial settings update failed: ${response.status}`);
+}
+
 export interface CameraDetection {
   label: string;
   confidence: number;
   box: [number, number, number, number]; // [x1, y1, x2, y2] in source frame pixels
+  track_id?: number;
+  fusion_id?: number;
+  yp_position?: { x_m: number; y_m: number; z_m: number | null; camera_count: number };
 }
 
 export interface CameraDetectionUpdate {
@@ -114,6 +141,11 @@ export async function getCameraTrack(cameraId: string): Promise<boolean> {
   return data.tracking ?? false;
 }
 
+export async function getCameraTrackStates(cameraIds: string[]): Promise<Record<string, boolean>> {
+  const states = await Promise.all(cameraIds.map(async (cameraId) => [cameraId, await getCameraTrack(cameraId)] as const));
+  return Object.fromEntries(states);
+}
+
 export async function setCameraTrack(cameraId: string, enabled: boolean): Promise<boolean> {
   const response = await apiFetch(`/api/cameras/${encodeURIComponent(cameraId)}/track`, {
     method: "POST",
@@ -126,6 +158,20 @@ export async function setCameraTrack(cameraId: string, enabled: boolean): Promis
   }
   const data = await response.json() as { tracking?: boolean };
   return data.tracking ?? enabled;
+}
+
+export async function getCoordinatedCameraTrack(): Promise<boolean> {
+  const response = await apiFetch("/api/cameras/coordinated-track", { headers: getAuthHeaders() });
+  if (!response.ok) return false;
+  return Boolean((await response.json() as { enabled?: boolean }).enabled);
+}
+
+export async function setCoordinatedCameraTrack(enabled: boolean): Promise<boolean> {
+  const response = await apiFetch("/api/cameras/coordinated-track", {
+    method: "POST", headers: getAuthHeaders(), body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) throw new Error(`Coordinated tracking update failed: ${response.status}`);
+  return Boolean((await response.json() as { enabled?: boolean }).enabled);
 }
 
 export interface TrackSettings {

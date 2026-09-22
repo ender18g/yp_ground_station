@@ -7,6 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# ROCm-enabled torch/torchvision for AMD GPU inference (RDNA3/gfx110x); installed
+# before requirements.txt so ultralytics reuses this build instead of pulling the
+# default CPU-only wheel from PyPI. Falls back to CPU automatically if no GPU.
+RUN pip install --no-cache-dir --retries 10 --timeout 120 torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 

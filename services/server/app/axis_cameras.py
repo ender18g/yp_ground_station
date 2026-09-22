@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -18,13 +19,14 @@ from fastapi import APIRouter, Body, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.auth import require_permission
-from app.settings import get_detector_settings, update_detector_settings
+from app.settings import get_application_settings, get_detector_settings, update_application_settings, update_detector_settings
 
 AXIS_CAMERA_USERNAME = os.getenv("AXIS_CAMERA_USERNAME", "root")
 AXIS_CAMERA_PASSWORD = os.getenv("AXIS_CAMERA_PASSWORD", "")
 AXIS_CAMERA_PROBE_INTERVAL_SECONDS = float(os.getenv("AXIS_CAMERA_PROBE_INTERVAL_SECONDS", "15.0"))
 AXIS_CAMERA_PROBE_TIMEOUT_SECONDS = float(os.getenv("AXIS_CAMERA_PROBE_TIMEOUT_SECONDS", "3.0"))
 AXIS_CAMERAS_JSON = os.getenv("AXIS_CAMERAS_JSON", "")
+AXIS_CAMERA_POSITION_INTERVAL_SECONDS = float(os.getenv("AXIS_CAMERA_POSITION_INTERVAL_SECONDS", "2.0"))
 
 # Proportional-control gains mapping a detection's offset from frame-center (as a fraction
 # of frame size) to a PTZ continuous-move velocity (-100..100). Mutable/persistent - see
@@ -32,20 +34,32 @@ AXIS_CAMERAS_JSON = os.getenv("AXIS_CAMERAS_JSON", "")
 _track_gain = float(os.getenv("AXIS_CAMERA_TRACK_GAIN", "160"))
 _track_max_speed = float(os.getenv("AXIS_CAMERA_TRACK_MAX_SPEED", "60"))
 _track_deadzone = float(os.getenv("AXIS_CAMERA_TRACK_DEADZONE", "0.04"))
+# Safety net independent of detection cadence: a slow detector model (e.g. a large
+# custom-trained model on CPU) can leave a continuous-move command running far
+# longer than intended between corrections, so force a stop if none arrives in time.
+AXIS_CAMERA_TRACK_WATCHDOG_SECONDS = float(os.getenv("AXIS_CAMERA_TRACK_WATCHDOG_SECONDS", "1.5"))
 
 # Known mounting positions on the YP. Hosts are optional (blank = not installed yet)
 # and are configured individually so cameras can come online one at a time.
 _DEFAULT_POSITIONS = [
-    ("port", "Port"),
-    ("starboard", "Starboard"),
-    ("aft", "Aft"),
+    ("port", "Port", 270.0),
+    ("starboard", "Starboard", 90.0),
+    ("aft", "Aft", 180.0),
 ]
 
 cameras: dict[str, dict[str, Any]] = {}
 _probe_tasks: dict[str, asyncio.Task] = {}
+_position_task: Optional[asyncio.Task] = None
 _broadcast: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
 _http_client: Optional[httpx.AsyncClient] = None
 _tracking_enabled: dict[str, bool] = {}
+_tracking_moving: dict[str, bool] = {}
+_tracking_last_correction_at: dict[str, float] = {}
+_coordinated_tracking_enabled = False
+_coordinated_target_seen_at = 0.0
+_position_locks: dict[str, asyncio.Lock] = {}
+_coordinate_lock = asyncio.Lock()
+_last_coordinate_command_at = 0.0
 
 router = APIRouter()
 
@@ -56,13 +70,25 @@ def set_broadcast_callback(fn: Callable[[dict[str, Any]], Awaitable[None]]) -> N
     _broadcast = fn
 
 
+def _ship_relative_deg(spatial: dict[str, Any]) -> float:
+    """Static heading the camera points at pan-zero, from calibration alone (no hardware query)."""
+    return (float(spatial.get("heading_deg", 0.0)) + float(spatial.get("pan_zero_deg", 0.0))) % 360.0
+
+
+def _live_ship_relative_deg(entry: dict[str, Any]) -> float:
+    spatial = entry.get("spatial", {})
+    return (float(spatial.get("heading_deg", 0.0)) + float(spatial.get("pan_zero_deg", 0.0)) + float(entry.get("pan_deg") or 0.0)) % 360.0
+
+
 def _load_cameras() -> None:
     """Populate the camera registry from env vars: default port/starboard/aft
     slots (each with its own optional host/credential overrides), plus any
     additional cameras/overrides supplied via AXIS_CAMERAS_JSON."""
-    for camera_id, label in _DEFAULT_POSITIONS:
+    spatial_settings = get_application_settings().get("camera_spatial", {})
+    for camera_id, label, default_heading in _DEFAULT_POSITIONS:
         prefix = f"AXIS_CAMERA_{camera_id.upper()}"
         host = os.getenv(f"{prefix}_HOST", "").strip()
+        spatial = spatial_settings.get(camera_id, {"heading_deg": default_heading})
         cameras[camera_id] = {
             "id": camera_id,
             "label": label,
@@ -72,6 +98,7 @@ def _load_cameras() -> None:
             "online": False,
             "last_checked": None,
             "error": None,
+            "spatial": spatial,
         }
 
     if not AXIS_CAMERAS_JSON:
@@ -98,11 +125,13 @@ def _load_cameras() -> None:
             "online": False,
             "last_checked": None,
             "error": None,
+            "spatial": spatial_settings.get(camera_id, existing.get("spatial", {})),
         }
 
 
 def public_camera(entry: dict[str, Any]) -> dict[str, Any]:
     """Client-facing camera info (credentials never leave the server)."""
+    spatial = entry.get("spatial", {})
     return {
         "id": entry["id"],
         "label": entry["label"],
@@ -110,6 +139,11 @@ def public_camera(entry: dict[str, Any]) -> dict[str, Any]:
         "last_checked": entry["last_checked"],
         "stream_url": f"/api/cameras/{entry['id']}/stream.mjpg",
         "ptz_capable": True,
+        "mount_heading_deg": float(spatial.get("heading_deg", 0.0)),
+        "pan_deg": entry.get("pan_deg"),
+        "tilt_deg": entry.get("tilt_deg"),
+        "ship_relative_deg": _live_ship_relative_deg(entry) if entry.get("pan_deg") is not None else _ship_relative_deg(spatial),
+        "spatial": spatial,
     }
 
 
@@ -143,14 +177,69 @@ async def _probe_loop(camera_id: str) -> None:
         await asyncio.sleep(AXIS_CAMERA_PROBE_INTERVAL_SECONDS)
 
 
+async def _read_position(entry: dict[str, Any]) -> None:
+    if not _http_client or not entry.get("host"):
+        return
+    try:
+        response = await _http_client.get(
+            f"http://{entry['host']}/axis-cgi/com/ptz.cgi",
+            params={"camera": 1, "query": "position"},
+            auth=_auth_for(entry),
+            timeout=AXIS_CAMERA_PROBE_TIMEOUT_SECONDS,
+        )
+        if response.status_code >= 400:
+            return
+        values: dict[str, float] = {}
+        for line in response.text.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                try:
+                    values[key.strip().lower()] = float(value.strip())
+                except ValueError:
+                    continue
+        if "pan" in values:
+            entry["pan_deg"] = values["pan"]
+            entry["tilt_deg"] = values.get("tilt")
+            if _broadcast:
+                await _broadcast({"op": "camera_status_update", "camera": public_camera(entry)})
+    except Exception:
+        return
+
+
+async def _position_loop() -> None:
+    while True:
+        await asyncio.sleep(AXIS_CAMERA_POSITION_INTERVAL_SECONDS)
+        if not _coordinated_tracking_enabled and not any(_tracking_enabled.values()):
+            continue
+        for entry in cameras.values():
+            if not entry.get("online") or not entry.get("host"):
+                continue
+            lock = _position_locks.setdefault(entry["id"], asyncio.Lock())
+            async with lock:
+                await _read_position(entry)
+
+
+async def _tracking_watchdog_loop() -> None:
+    """Stop any camera left moving longer than expected without a fresh correction."""
+    while True:
+        await asyncio.sleep(0.25)
+        now = time.time()
+        for camera_id, moving in list(_tracking_moving.items()):
+            if moving and now - _tracking_last_correction_at.get(camera_id, 0.0) > AXIS_CAMERA_TRACK_WATCHDOG_SECONDS:
+                _tracking_moving[camera_id] = False
+                await _send_ptz_move(camera_id, 0, 0, 0)
+
+
 @router.on_event("startup")
 async def startup() -> None:
-    global _http_client
+    global _http_client, _position_task
     _http_client = httpx.AsyncClient(timeout=AXIS_CAMERA_PROBE_TIMEOUT_SECONDS)
     _load_cameras()
     for camera_id, entry in cameras.items():
         if entry["host"]:
             _probe_tasks[camera_id] = asyncio.create_task(_probe_loop(camera_id))
+    asyncio.create_task(_tracking_watchdog_loop())
+    _position_task = asyncio.create_task(_position_loop())
 
 
 @router.on_event("shutdown")
@@ -159,6 +248,9 @@ async def shutdown() -> None:
         task.cancel()
     if _probe_tasks:
         await asyncio.gather(*_probe_tasks.values(), return_exceptions=True)
+    if _position_task:
+        _position_task.cancel()
+        await asyncio.gather(_position_task, return_exceptions=True)
     if _http_client:
         await _http_client.aclose()
 
@@ -167,6 +259,24 @@ async def shutdown() -> None:
 async def list_cameras() -> dict[str, Any]:
     """List cameras that have a configured host (i.e. installed on the network)."""
     return {"cameras": [public_camera(entry) for entry in cameras.values() if entry["host"]]}
+
+
+@router.put("/api/cameras/spatial")
+async def update_camera_spatial(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> Any:
+    """Persist camera positions and orientation calibration entered in Spatial Setup."""
+    authorization_error = require_permission(authorization, "manage_settings")
+    if authorization_error:
+        return authorization_error
+    current = get_application_settings().get("camera_spatial", {})
+    merged = {**current, **payload}
+    success, message = update_application_settings({"camera_spatial": merged})
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+    for camera_id, spatial in merged.items():
+        entry = cameras.get(camera_id)
+        if entry:
+            entry["spatial"] = spatial
+    return {"camera_spatial": merged}
 
 
 @router.get("/api/cameras/{camera_id}/stream.mjpg")
@@ -229,6 +339,60 @@ def is_tracking(camera_id: str) -> bool:
     return _tracking_enabled.get(camera_id, False)
 
 
+def is_coordinated_tracking() -> bool:
+    return _coordinated_tracking_enabled
+
+
+async def coordinate_tracking(target_x_m: float, target_y_m: float) -> None:
+    """Pan enabled cameras toward a fused target using calibrated positions."""
+    global _coordinated_target_seen_at, _last_coordinate_command_at
+    if not _coordinated_tracking_enabled or not math.isfinite(target_x_m) or not math.isfinite(target_y_m):
+        return
+    _coordinated_target_seen_at = time.time()
+    async with _coordinate_lock:
+        now = time.time()
+        if now - _last_coordinate_command_at < 0.35:
+            return
+        _last_coordinate_command_at = now
+        for camera_id, entry in cameras.items():
+            if not entry.get("online") or not is_tracking(camera_id):
+                continue
+            spatial = entry.get("spatial", {})
+            camera_x = float(spatial.get("x_m", 0.0))
+            camera_y = float(spatial.get("y_m", 0.0))
+            target_heading = math.degrees(math.atan2(target_y_m - camera_y, target_x_m - camera_x)) % 360.0
+            current_heading = (float(spatial.get("heading_deg", 0.0))
+                               + float(spatial.get("pan_zero_deg", 0.0))
+                               + float(entry.get("pan_deg") or 0.0)) % 360.0
+            error = (target_heading - current_heading + 180.0) % 360.0 - 180.0
+            if abs(error) < 3.0:
+                pan = 0.0
+            else:
+                pan = max(-_track_max_speed, min(_track_max_speed, error * 1.0))
+            _tracking_last_correction_at[camera_id] = now
+            _tracking_moving[camera_id] = bool(pan)
+            await _send_ptz_move(camera_id, pan, 0, 0)
+
+
+@router.get("/api/cameras/coordinated-track")
+async def get_coordinated_track() -> JSONResponse:
+    return JSONResponse({"enabled": _coordinated_tracking_enabled})
+
+
+@router.post("/api/cameras/coordinated-track")
+async def post_coordinated_track(payload: dict[str, Any] = Body(default={}), authorization: Optional[str] = Header(default=None)) -> JSONResponse:
+    global _coordinated_tracking_enabled
+    authorization_error = require_permission(authorization, "control_cameras")
+    if authorization_error:
+        return authorization_error
+    _coordinated_tracking_enabled = bool(payload.get("enabled", False))
+    if not _coordinated_tracking_enabled:
+        for camera_id in cameras:
+            _tracking_moving[camera_id] = False
+            await _send_ptz_move(camera_id, 0, 0, 0)
+    return JSONResponse({"enabled": _coordinated_tracking_enabled})
+
+
 def get_track_settings() -> dict[str, float]:
     return {"track_gain": _track_gain, "track_max_speed": _track_max_speed, "track_deadzone": _track_deadzone}
 
@@ -258,6 +422,7 @@ async def set_tracking(camera_id: str, enabled: bool) -> bool:
         return False
     _tracking_enabled[camera_id] = enabled
     if not enabled:
+        _tracking_moving[camera_id] = False
         await _send_ptz_move(camera_id, 0, 0, 0)
     if _broadcast:
         await _broadcast({"op": "camera_track_update", "camera_id": camera_id, "tracking": enabled})
@@ -266,9 +431,12 @@ async def set_tracking(camera_id: str, enabled: bool) -> bool:
 
 async def track_from_detections(camera_id: str, detections: list[dict[str, Any]], frame_width: float, frame_height: float) -> None:
     """Steer the camera to keep the highest-confidence detection centered while tracking is enabled."""
+    if _coordinated_tracking_enabled and time.time() - _coordinated_target_seen_at <= 1.0:
+        return
     if not is_tracking(camera_id) or not frame_width or not frame_height:
         return
     if not detections:
+        _tracking_moving[camera_id] = False
         await _send_ptz_move(camera_id, 0, 0, 0)
         return
 
@@ -284,8 +452,9 @@ async def track_from_detections(camera_id: str, detections: list[dict[str, Any]]
         error_y = 0.0
     pan = max(-_track_max_speed, min(_track_max_speed, error_x * _track_gain))
     tilt = max(-_track_max_speed, min(_track_max_speed, error_y * _track_gain))
+    _tracking_last_correction_at[camera_id] = time.time()
+    _tracking_moving[camera_id] = bool(pan or tilt)
     await _send_ptz_move(camera_id, pan, tilt, 0)
-
 
 
 @router.post("/api/cameras/{camera_id}/ptz")
@@ -365,5 +534,3 @@ async def post_track_settings_route(payload: dict[str, Any] = Body(default={}), 
     if _broadcast:
         await _broadcast({"op": "detector_track_settings_update", **updated})
     return JSONResponse(updated)
-
-

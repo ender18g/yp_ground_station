@@ -14,6 +14,7 @@ Shipboard ground station for a Naval Academy Yard Patrol craft. The stack collec
 - [Commanding and mission planning](#commanding-and-mission-planning)
 - [Search and rescue operations](#search-and-rescue-operations)
 - [Video streams](#video-streams)
+- [Axis cameras and tracking](#axis-cameras-and-tracking)
 - [Vehicle deconfliction](#vehicle-deconfliction)
 - [Advanced integrations](#advanced-integrations)
 - [Message transport](#message-transport)
@@ -73,6 +74,8 @@ Open:
 - InfluxDB: `http://localhost:8086`
 
 The default compose file starts two simulated UAVs (`sim-uav1`, `sim-uav2`), one simulated USV, one simulated UUV, the `sim-umaa` loopback vehicle, a simulated YP GPS source near the Severn River off the US Naval Academy, and the optional `yolo-detector` service. The detector waits for configured online Axis cameras; it does not affect telemetry when no cameras are configured.
+
+On AMD GPU hosts, the detector image includes ROCm-enabled PyTorch and Compose passes through `/dev/kfd` and `/dev/dri`. CPU fallback remains available when no compatible GPU is exposed.
 
 The normal stack does not require ROS. ROS is only required for the optional PX4/MAVROS profile.
 
@@ -373,7 +376,7 @@ curl -X PUT http://localhost:8000/api/video/streams/blueboat-03 \
 
 MAVLink camera discovery probes `<camera-host>:8889` after bridge connection and every 60 seconds. On success it publishes `http://<camera-host>:8889/cam/whep`. The `yp-server` container must be able to reach that host and port. A failed probe does not erase an existing stream. The optional Camera Host field is sent as `camera_host`; when omitted, host-based `tcp:`, `tcpout:`, `udpout:`, and `udpbcast:` URLs can provide the host. Serial URLs, inbound/wildcard listeners, `0.0.0.0`, and `localhost` require an explicit camera host. The probe checks raw TCP reachability; the browser negotiates WHEP only when video is opened.
 
-### Axis YP cameras
+## Axis cameras and tracking
 
 Configure reachable Axis camera IPs in the `yp-server` environment and
 recreate that service:
@@ -382,7 +385,7 @@ recreate that service:
 AXIS_CAMERA_USERNAME: root
 AXIS_CAMERA_PASSWORD: "your-camera-password"
 AXIS_CAMERA_AFT_HOST: "192.168.0.50"
-AXIS_CAMERA_PORT_HOST: ""
+AXIS_CAMERA_PORT_HOST: "192.168.0.51"
 AXIS_CAMERA_STARBOARD_HOST: ""
 ```
 
@@ -390,25 +393,77 @@ The camera panel probes configured hosts and shows their online status. Live
 video is proxied through the server as MJPEG, keeping Axis credentials out of
 the browser. PTZ controls use `POST /api/cameras/{id}/ptz` and require the
 `control_cameras` permission, included in the admin permission level. The
-camera service polls every 15 seconds, so the remaining hosts can be added as
-those cameras are installed. The camera view supports hold-to-move directional
-buttons, click-dragging the live image to pan/tilt, and mouse-wheel zoom. The
-camera window can be dragged by its header and resized from its lower-right
-corner.
+camera service checks camera availability every 15 seconds. The camera view
+supports hold-to-move directional buttons, click-dragging the live image to
+pan/tilt, and mouse-wheel zoom. The camera window can be dragged by its header
+and resized from its lower-right corner.
+
+The **All cameras** view displays all configured feeds simultaneously. Each
+camera tile includes detection overlays, per-camera PTZ controls, and a
+`Track this camera` toggle. This is the primary tracking control surface; the
+Detection tab contains model and detector tuning rather than duplicate camera
+tracking switches.
+
+### Spatial Setup
+
+The **Spatial Setup** tab stores persistent calibration relative to the YP
+landing-pad center. The coordinate frame is:
+
+- `X+`: forward
+- `Y+`: starboard
+- `Z+`: upward
+
+Each camera has position fields in metres and orientation fields in degrees:
+
+| Field | Meaning |
+| --- | --- |
+| `x_m`, `y_m`, `z_m` | Camera position relative to the YP reference point |
+| `heading_deg` | Physical pan-zero direction relative to the YP |
+| `tilt_deg` | Physical vertical mounting angle |
+| `pan_zero_deg` | Correction for a rotated PTZ zero position |
+| `hfov_deg`, `vfov_deg` | Horizontal and vertical field of view used by tracking geometry |
+| `coordinated_fallback_range_m` | Temporary acquisition range used before a second camera sees the target |
+
+The settings are stored in the application SQLite database and survive
+container restarts. The current displayed ship-relative bearing is calculated
+from the calibrated heading, pan-zero correction, and live PTZ pan telemetry.
 
 ### YOLO detection and camera tracking
 
 The optional `yolo-detector` service discovers online Axis cameras, reads their
 server-proxied MJPEG feeds, and publishes bounding boxes over the internal
-`/ws/detector` WebSocket. The Camera panel's **Detection** tab overlays fresh
-detections on the selected camera and lets users with `control_cameras` upload
-or select `.pt`/`.onnx` models, change the confidence threshold, and change the
-inference interval. The bundled default model is `yolov8n.pt`.
+`/ws/detector` WebSocket. The Camera panel overlays fresh detections in both
+the selected-camera view and All cameras view. Per-camera detection identities
+are assigned short-lived `track_id` values based on class and bounding-box
+overlap.
 
-The same panel can enable PTZ auto-track. When enabled, the server centers the
-highest-confidence detection using proportional pan/tilt control. Manual PTZ
-movement disables auto-track. Track settings are persisted with the detector
-settings and can be changed through:
+Users with `control_cameras` can upload or select `.pt`/`.onnx` models, change
+the confidence threshold, and change the inference interval. The bundled
+default model is `yolov8n.pt`. On AMD GPU hosts, the detector uses ROCm
+PyTorch and logs the active device at startup, for example:
+
+```text
+YOLO inference device: cuda:0 (AMD Radeon RX 7900 XTX)
+```
+
+The same panel can enable PTZ auto-track per camera. When enabled, the server
+centers the highest-confidence detection using proportional pan/tilt control.
+Manual PTZ movement disables auto-track. A watchdog stops stale continuous PTZ
+motion if detector updates stop arriving.
+
+Coordinated tracking is optional. Enable tracking for the aft and port cameras,
+then enable **Coordinate enabled cameras** in All cameras. The first camera's
+calibrated bearing is used as an approximate acquisition cue; after both
+cameras detect the same class, the server intersects their calibrated bearing
+rays and uses the resulting YP-relative horizontal position. The current
+fusion result estimates `x_m` and `y_m`; altitude is not yet estimated.
+
+The temporary single-camera acquisition range is configured in Spatial Setup
+and defaults to `20 m`. Because one camera cannot determine target range by
+itself, this value is only an acquisition approximation; the two-camera
+intersection is the authoritative spatial estimate.
+
+Track settings are persisted with the detector settings and can be changed through:
 
 ```http
 GET  /api/detector/models
@@ -566,8 +621,12 @@ Runtime viewing caches only tiles requested by the active viewport. It does not 
 | `vehicle bridges` | `SEND_HZ` | `5` | Telemetry and GPS-fix forwarding rate |
 | `yolo-detector` | `YOLO_MODEL_PATH` / `YOLO_MODELS_DIR` | `yolov8n.pt` / `/data/yolo_models` | Active model and shared model directory |
 | `yolo-detector` | `YOLO_CONF_THRESHOLD` / `YOLO_INFER_INTERVAL_SECONDS` | `0.4` / `0.5` | Detection confidence threshold and inference interval in seconds |
+| `yolo-detector` | `YOLO_IMGSZ` | `416` | Inference image size; lower values improve CPU speed, higher values can improve small-object recall |
+| `yolo-detector` | `YOLO_DEVICE` | `auto` | `auto` selects the exposed ROCm/CUDA device; `cpu` forces CPU inference |
 | `yolo-detector` | `YOLO_DISCOVERY_INTERVAL_SECONDS` | `15` | Online-camera discovery interval |
 | `yolo-detector` | `YOLO_CAMERA_IDS` / `YOLO_CLASSES` | empty / empty | Optional camera and class filters; empty means auto-discover all cameras or allow all classes |
+| `yp-server` | `AXIS_CAMERA_PROBE_INTERVAL_SECONDS` | `15.0` | Axis camera availability probe interval |
+| `yp-server` | `AXIS_CAMERA_*_HEADING_DEG` | camera-specific | Environment defaults for camera mounting headings; Spatial Setup overrides these after persistence |
 | `yp-server` | `RTB_STERN_DISTANCE_M` / `RTB_UPDATE_HZ` / `RTB_ALTITUDE_M` / `RTB_YP_SAFE_DISTANCE_M` | `35.0` / `2.0` / `30.0` / `20.0` | RTB target, update rate, transit altitude, and the minimum distance kept from the YP while routing around it during RTB |
 | `yp-server` | `SAR_*` | See SAR tables | MOB/SAR tuning |
 | `sim-*` | `VEHICLE_TYPE` | `uav` | `uav`, `uavf`, `usv`, `uuv`, or `ugv` |
