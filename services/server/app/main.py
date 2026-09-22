@@ -935,9 +935,9 @@ async def _run_mavlink_bridge(
             info["status"] = "disconnected"
             await broadcast_ui({"op": "sitl_bridge_update", "bridge": dict(info)})
         async with state_lock:
-            if vehicle_id in vehicles:
-                vehicles[vehicle_id]["connected"] = False
-        await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+            removed_vehicle = vehicles.pop(vehicle_id, None)
+        if removed_vehicle is not None:
+            await broadcast_ui({"op": "vehicle_removed", "vehicle_id": vehicle_id})
 
 
 def _execute_sar_command(
@@ -1813,10 +1813,8 @@ async def vehicle_ws(websocket: WebSocket, vehicle_id: str) -> None:
         if vehicle_queues.get(vehicle_id) is queue:
             vehicle_queues.pop(vehicle_id, None)
             async with state_lock:
-                if vehicle_id in vehicles:
-                    vehicles[vehicle_id]["connected"] = False
-                    vehicles[vehicle_id]["last_seen_age"] = time.time() - vehicles[vehicle_id].get("last_seen", time.time())
-            await broadcast_ui({"op": "vehicle_disconnected", "vehicle_id": vehicle_id})
+                vehicles.pop(vehicle_id, None)
+            await broadcast_ui({"op": "vehicle_removed", "vehicle_id": vehicle_id})
 
 
 @app.websocket("/ws/ui")

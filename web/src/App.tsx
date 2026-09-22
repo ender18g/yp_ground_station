@@ -308,7 +308,27 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setSarPatterns((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
       }
       if (payload.op === "vehicle_disconnected") {
-        setVehicles((current) => ({ ...current, [payload.vehicle_id as string]: { ...current[payload.vehicle_id as string], connected: false } }));
+        const disconnectedId = payload.vehicle_id as string;
+        setVehicles((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setSarMissionActiveByVehicle((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setSitlBridges((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
+        setRtbFollowState((current) => {
+          const next = { ...current };
+          delete next[disconnectedId];
+          return next;
+        });
       }
       if (payload.op === "video_stream_update") {
         const incoming = payload.video as Vehicle["video"] & { vehicle_id?: string };
