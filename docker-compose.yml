@@ -48,10 +48,13 @@ services:
       MESSAGE_CLEANUP_INTERVAL_SECONDS: "600"
       INFLUX_MAX_WRITE_HZ: "5"
       TILE_MAX_CACHE_AGE_SECONDS: "31536000"
+      LOG_EXPORT_ON_SHUTDOWN: "true"
+      LOG_EXPORT_DIR: /data/logs
     volumes:
       - ./data/auth:/data/auth
       - ./data/tiles:/data/tiles:ro
       - ./data/tile-cache:/data/tile-cache
+      - ./data/logs:/data/logs
     depends_on:
       influxdb:
         condition: service_healthy
@@ -61,6 +64,10 @@ services:
       timeout: 5s
       retries: 20
       start_period: 15s
+    # Give the shutdown handler time to query InfluxDB and write the flight
+    # log to ./data/logs before Docker sends SIGKILL (docker stop/down default
+    # is 10s, which can be too short for a slow Influx query).
+    stop_grace_period: 30s
     # Recommended: connect an RFD-900 telemetry radio or RTK base station
     # (e.g. u-blox / Here+) via `python services/com_tcp_relay.py --port <port>
     # --tcp-port <n>` on the host, then pick "TCP" as the source in the browser
@@ -106,8 +113,7 @@ services:
       SERIAL_PORT: /dev/ttyUSB0
       BAUD_RATE: "9600"
     depends_on:
-      yp-server:
-        condition: service_healthy
+      - yp-server
     # For a real serial GPS, switch GPS_MODE to serial and uncomment:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
@@ -120,8 +126,8 @@ services:
       SERVER_WS_URL: ws://yp-server:8000/ws/vehicle
       VEHICLE_TYPE: uav
       VEHICLE_ID: sim-uav1
-      HOME_LAT: "38.984250"
-      HOME_LON: "-76.508618"
+      HOME_LAT: "38.988650"
+      HOME_LON: "-76.485618"
       HOME_ALT: "45.0"
       SPAWN_JITTER_DEG: "0.0002"
       TARGET_JITTER_DEG: "0.0011"
