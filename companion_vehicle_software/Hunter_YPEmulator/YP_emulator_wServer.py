@@ -463,35 +463,48 @@ async def ws_loop(current_config: dict):
     base_url = current_config["server_ws_url"].rstrip("/")
     vehicle_id = current_config["vehicle_id"]
     uri = f"{base_url}/{vehicle_id}"
+    ws = None
 
     while not reconnect_event.is_set():
-        system_status["ws_status"] = "Connecting..."
-        system_status["ws_connected"] = False
-        try:
-            async with websockets.connect(uri, ping_interval=30, ping_timeout=20) as ws:
+        if ws is None:
+            system_status["ws_status"] = "Connecting..."
+            system_status["ws_connected"] = False
+            try:
+                ws = await asyncio.wait_for(
+                    websockets.connect(uri, ping_interval=30, ping_timeout=20),
+                    timeout=2.0,
+                )
                 system_status["ws_connected"] = True
                 system_status["ws_status"] = "Connected"
                 print(f"WebSocket Connected to {uri}!")
+            except Exception as exc:
+                system_status["ws_connected"] = False
+                system_status["ws_status"] = "Server Offline (Retrying)"
+                print(f"WebSocket connection error: {exc}")
+                await asyncio.sleep(5.0)
+                continue
 
-                send_task = asyncio.create_task(_ws_send_loop(ws))
-                recv_task = asyncio.create_task(_ws_recv_loop(ws, vehicle_id))
-                try:
-                    done, pending = await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    for task in done:
-                        task.result()
-                finally:
-                    send_task.cancel()
-                    recv_task.cancel()
-
+        send_task = asyncio.create_task(_ws_send_loop(ws))
+        recv_task = asyncio.create_task(_ws_recv_loop(ws, vehicle_id))
+        try:
+            done, pending = await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
         except Exception as exc:
             system_status["ws_connected"] = False
             system_status["ws_status"] = "Disconnected"
-            # Flush the queue so it doesn't build up stale data while offline
-            while not telemetry_queue.empty():
-                telemetry_queue.get_nowait()
-            await asyncio.sleep(2.0)
+            print(f"WebSocket disconnected: {exc}")
+        finally:
+            send_task.cancel()
+            recv_task.cancel()
+            await asyncio.gather(send_task, recv_task, return_exceptions=True)
+            await ws.close()
+            ws = None
+
+        if not reconnect_event.is_set():
+            await asyncio.sleep(5.0)
 
 async def mavlink_loop(current_config: dict):
     global _cube_master
