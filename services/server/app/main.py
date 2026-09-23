@@ -35,7 +35,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 from app.auth import init_database, get_current_user, require_permission
 from app.auth_routes import router as auth_router
-from app.axis_cameras import router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast, track_from_detections, load_persisted_settings as load_axis_camera_settings
+from app.axis_cameras import cameras as axis_camera_registry, coordinate_tracking, is_coordinated_tracking, is_tracking, router as axis_camera_router, set_broadcast_callback as set_axis_camera_broadcast, track_from_detections, load_persisted_settings as load_axis_camera_settings
 from app.yolo_models import (
     router as yolo_models_router,
     set_broadcast_callback as set_yolo_models_broadcast,
@@ -1984,6 +1984,77 @@ async def rosbridge_ws(websocket: WebSocket) -> None:
 
 
 _detector_ws: Optional[WebSocket] = None
+_fusion_tracks: dict[int, dict[str, Any]] = {}
+_pending_observations: list[dict[str, Any]] = []
+_next_fusion_id = 1
+
+
+def _camera_bearing(camera_id: str, detection: dict[str, Any], frame_width: float) -> float | None:
+    camera = axis_camera_registry.get(camera_id)
+    spatial = camera.get("spatial", {}) if camera else {}
+    hfov = float(spatial.get("hfov_deg", 70.0))
+    if not frame_width or not 0 < hfov < 180:
+        return None
+    left, _, right, _ = detection.get("box", [0, 0, 0, 0])
+    center_fraction = ((left + right) / 2.0) / frame_width
+    heading = (float(spatial.get("heading_deg", 0.0))
+               + float(spatial.get("pan_zero_deg", 0.0))
+               + float(camera.get("pan_deg") or 0.0) if camera else 0.0)
+    return (heading + (center_fraction - 0.5) * hfov) % 360.0
+
+
+def _intersect_bearings(first: tuple[float, float, float], second: tuple[float, float, float]) -> tuple[float, float] | None:
+    x1, y1, bearing1 = first
+    x2, y2, bearing2 = second
+    r1, r2 = math.radians(bearing1), math.radians(bearing2)
+    dx1, dy1, dx2, dy2 = math.cos(r1), math.sin(r1), math.cos(r2), math.sin(r2)
+    denominator = dx1 * dy2 - dy1 * dx2
+    if abs(denominator) < 1e-5:
+        return None
+    delta_x, delta_y = x2 - x1, y2 - y1
+    distance = (delta_x * dy2 - delta_y * dx2) / denominator
+    other_distance = (delta_x * dy1 - delta_y * dx1) / denominator
+    if distance < 0 or other_distance < 0:
+        return None
+    return x1 + distance * dx1, y1 + distance * dy1
+
+
+def _update_fusion(payload: dict[str, Any]) -> None:
+    global _next_fusion_id
+    camera_id = str(payload.get("camera_id", ""))
+    timestamp = float(payload.get("timestamp") or time.time())
+    frame_width = float(payload.get("frame_width") or 0)
+    camera = axis_camera_registry.get(camera_id)
+    spatial = camera.get("spatial", {}) if camera else {}
+    camera_x, camera_y = float(spatial.get("x_m", 0.0)), float(spatial.get("y_m", 0.0))
+    for detection in payload.get("detections", []):
+        bearing = _camera_bearing(camera_id, detection, frame_width)
+        if bearing is None:
+            continue
+        if is_coordinated_tracking() and is_tracking(camera_id):
+            # Before a second camera sees the object, use a temporary range
+            # point on the leader camera's bearing to turn the other cameras.
+            bearing_radians = math.radians(bearing)
+            asyncio.create_task(coordinate_tracking(
+                camera_x + float(settings.get("coordinated_fallback_range_m", 20.0)) * math.cos(bearing_radians),
+                camera_y + float(settings.get("coordinated_fallback_range_m", 20.0)) * math.sin(bearing_radians),
+            ))
+        observation = {"camera_id": camera_id, "track_id": detection.get("track_id"), "label": detection.get("label"), "timestamp": timestamp, "x_m": camera_x, "y_m": camera_y, "bearing_deg": bearing}
+        match = next((item for item in _pending_observations if item["label"] == observation["label"] and item["camera_id"] != camera_id and timestamp - item["timestamp"] <= 0.8), None)
+        if not match:
+            _pending_observations.append(observation)
+            continue
+        position = _intersect_bearings((camera_x, camera_y, bearing), (match["x_m"], match["y_m"], match["bearing_deg"]))
+        if not position:
+            continue
+        _pending_observations.remove(match)
+        fusion_id = _next_fusion_id
+        _next_fusion_id += 1
+        _fusion_tracks[fusion_id] = {"label": observation["label"], "x_m": position[0], "y_m": position[1], "last_seen": timestamp}
+        detection["fusion_id"] = fusion_id
+        detection["yp_position"] = {"x_m": round(position[0], 2), "y_m": round(position[1], 2), "z_m": None, "camera_count": 2}
+        asyncio.create_task(coordinate_tracking(position[0], position[1]))
+    _pending_observations[:] = [item for item in _pending_observations if timestamp - item["timestamp"] <= 0.8]
 
 
 async def send_to_detector(payload: dict[str, Any]) -> bool:
@@ -2009,6 +2080,7 @@ async def detector_ws(websocket: WebSocket) -> None:
         while True:
             payload = await websocket.receive_json()
             if payload.get("op") == "camera_detection_update":
+                _update_fusion(payload)
                 await broadcast_ui(payload)
                 await track_from_detections(
                     payload.get("camera_id", ""),

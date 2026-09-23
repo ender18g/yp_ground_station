@@ -61,11 +61,14 @@ services:
       # show up in the UI until a host is set and it responds.
       AXIS_CAMERA_USERNAME: root
       AXIS_CAMERA_PASSWORD: "usna1845"
-      AXIS_CAMERA_PORT_HOST: ""
+      AXIS_CAMERA_PORT_HOST: "10.10.40.12"
+      AXIS_CAMERA_PORT_HEADING_DEG: "270"
       AXIS_CAMERA_STARBOARD_HOST: ""
+      AXIS_CAMERA_STARBOARD_HEADING_DEG: "90"
       AXIS_CAMERA_AFT_HOST: "10.10.40.11"
       LOG_EXPORT_ON_SHUTDOWN: "true"
       LOG_EXPORT_DIR: /data/logs
+      AXIS_CAMERA_AFT_HEADING_DEG: "180"
     volumes:
       - ./data/auth:/data/auth
       - ./data/tiles:/data/tiles:ro
@@ -139,6 +142,16 @@ services:
     build:
       context: ./services/yolo_detector
       network: host
+    # AMD GPU (ROCm) passthrough - render/video are the host's group IDs owning
+    # /dev/kfd and /dev/dri; falls back to CPU automatically if unavailable.
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "992"
+      - "44"
+    ipc: host
+    shm_size: "8g"
     environment:
       SERVER_WS_URL: ws://yp-server:8000/ws/detector
       SERVER_HTTP_URL: http://yp-server:8000

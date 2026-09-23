@@ -81,6 +81,12 @@ APPLICATION_SETTING_DEFAULTS: dict[str, Any] = {
     "rtk_host_or_port": "/dev/ttyACM0",
     "rtk_network_port": 9000,
     "rtk_baudrate": 115200,
+    "coordinated_fallback_range_m": 20.0,
+    "camera_spatial": {
+        "port": {"x_m": 0.0, "y_m": -1.0, "z_m": 2.0, "heading_deg": 270.0, "tilt_deg": 0.0, "pan_zero_deg": 0.0, "hfov_deg": 70.0, "vfov_deg": 45.0},
+        "starboard": {"x_m": 0.0, "y_m": 1.0, "z_m": 2.0, "heading_deg": 90.0, "tilt_deg": 0.0, "pan_zero_deg": 0.0, "hfov_deg": 70.0, "vfov_deg": 45.0},
+        "aft": {"x_m": -2.0, "y_m": 0.0, "z_m": 2.0, "heading_deg": 180.0, "tilt_deg": 0.0, "pan_zero_deg": 0.0, "hfov_deg": 70.0, "vfov_deg": 45.0},
+    },
 }
 
 
@@ -115,6 +121,24 @@ def normalize_application_settings(payload: dict[str, Any]) -> dict[str, Any]:
         if key in ("show_yp_range_rings", "land_on_boat_auto_disarm"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
+        elif key == "camera_spatial":
+            if not isinstance(value, dict):
+                raise ValueError("camera_spatial must be an object")
+            normalized_cameras = {}
+            for camera_id, camera in value.items():
+                if not isinstance(camera, dict):
+                    raise ValueError(f"camera_spatial.{camera_id} must be an object")
+                normalized_camera = {}
+                for field in ("x_m", "y_m", "z_m", "heading_deg", "tilt_deg", "pan_zero_deg", "hfov_deg", "vfov_deg"):
+                    try:
+                        number = float(camera.get(field, 0.0))
+                    except (TypeError, ValueError):
+                        raise ValueError(f"camera_spatial.{camera_id}.{field} must be a number")
+                    if not math.isfinite(number):
+                        raise ValueError(f"camera_spatial.{camera_id}.{field} must be finite")
+                    normalized_camera[field] = number % 360.0 if field.endswith("_deg") else number
+                normalized_cameras[str(camera_id)] = normalized_camera
+            value = normalized_cameras
         elif key == "yp_role_vehicle_id":
             value = str(value).strip() if value and str(value).strip() else None
         elif key == "rtk_source_type":

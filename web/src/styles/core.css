@@ -1,3 +1,5 @@
+.camera-all-video-wrap { width: 100%; height: 100%; position: relative; }
+.camera-all-preview img { display: block; width: 100%; height: 100%; object-fit: cover; cursor: crosshair; touch-action: none; }
 
 .app,
 .map {
@@ -641,6 +643,27 @@
 .camera-panel-header { flex-shrink: 0; }
 
 .camera-tabs { display: flex; gap: 4px; margin: 12px 0 4px; border-bottom: 1px solid #cbd5e1; flex-shrink: 0; }
+.camera-all-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 8px 0; }
+.camera-all-card { min-width: 0; border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; background: #fff; }
+.camera-all-card-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 7px 8px; font-size: 12px; }
+.camera-all-preview { aspect-ratio: 16 / 9; background: #f8fafc; }
+.camera-all-preview img { display: block; width: 100%; height: 100%; object-fit: cover; cursor: crosshair; touch-action: none; }
+.camera-all-ptz-controls { grid-template: repeat(3, 24px) / repeat(5, 24px); gap: 3px; margin: 7px auto 8px; }
+.camera-all-ptz-controls button { width: 24px; height: 24px; }
+.camera-spatial-form { padding: 8px 0; }
+.camera-spatial-group { margin: 10px 0; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+.camera-spatial-group legend { padding: 0 4px; font-size: 12px; font-weight: 700; color: #334155; }
+.camera-spatial-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.camera-spatial-grid label { display: grid; gap: 3px; font-size: 10px; color: #64748b; text-transform: capitalize; }
+.camera-spatial-grid input { width: 100%; box-sizing: border-box; }
+.camera-spatial-save { margin-top: 4px; padding: 7px 10px; border: 1px solid #2563eb; border-radius: 5px; color: #fff; background: #2563eb; cursor: pointer; }
+.camera-spatial-saved { margin-left: 8px; color: #15803d; font-size: 12px; }
+.camera-angle-readout { display: flex; justify-content: space-between; gap: 8px; color: #64748b; font-size: 11px; }
+.camera-angle-readout strong { color: #0f172a; font-variant-numeric: tabular-nums; }
+.camera-angle-readout-selected { margin-top: 8px; }
+.camera-all-track-toggle { padding: 5px 8px 0; font-size: 11px; }
+.camera-all-coordination { margin: 8px 0 4px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+.camera-all-coordination { margin: 8px 0 4px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
 .camera-tab { flex: 1; padding: 6px 8px; font-size: 13px; color: #64748b; background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; }
 .camera-tab:hover { color: #334155; }
 .camera-tab.active { color: #0f172a; font-weight: 600; border-bottom-color: #2563eb; }
