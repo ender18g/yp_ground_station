@@ -144,6 +144,9 @@ shared_waypoints: dict[str, dict[str, Any]] = {}
 shared_sar_patterns: dict[str, dict[str, Any]] = {}
 shared_mission_plans: dict[str, list[list[float]]] = {}
 shared_mission_completion_targets: dict[str, dict[str, float]] = {}
+# Ship-relative plans store the local waypoints (not resolved lat/lon) so clients
+# can redraw the route as the reference ship moves.
+shared_ship_relative_plans: dict[str, dict[str, Any]] = {}
 
 # SITL MAVLink bridge state
 sitl_bridges: dict[str, asyncio.Task[None]] = {}  # vehicle_id -> running asyncio task
@@ -1901,6 +1904,7 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
                 "waypoints": list(shared_waypoints.values()),
                 "sar_patterns": shared_sar_patterns,
                 "mission_plans": shared_mission_plans,
+                "ship_relative_plans": shared_ship_relative_plans,
                 "rtcm_status": dict(rtcm_status),
                 "rtb_follow_state": dict(_rtb_follow_state),
             })
@@ -2192,6 +2196,10 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
         if shared_mission_plans.pop(vehicle_id, None) is not None:
             await broadcast_ui({"op": "mission_plan_cleared", "vehicle_id": vehicle_id})
 
+    if not is_temporary_avoidance and cmd_type != "ship_relative_trajectory":
+        if shared_ship_relative_plans.pop(vehicle_id, None) is not None:
+            await broadcast_ui({"op": "ship_relative_plan_cleared", "vehicle_id": vehicle_id})
+
     if not is_temporary_avoidance and cmd_type == "waypoint":
         target = command.get("target", {})
         lat, lon = target.get("latitude"), target.get("longitude")
@@ -2283,6 +2291,14 @@ async def route_command(vehicle_id: Optional[str], command: dict[str, Any], sour
                 "vehicle_id": vehicle_id,
                 "waypoints": mission_points,
             })
+
+    if cmd_type == "ship_relative_trajectory":
+        ship_vehicle_id = command.get("ship_vehicle_id")
+        local_waypoints = command.get("local_waypoints") or []
+        if ship_vehicle_id and local_waypoints:
+            plan = {"ship_vehicle_id": ship_vehicle_id, "local_waypoints": local_waypoints}
+            shared_ship_relative_plans[vehicle_id] = plan
+            await broadcast_ui({"op": "ship_relative_plan_overlay", "vehicle_id": vehicle_id, **plan})
 
     # Update deconfliction engine with the command
     if vehicle_id in vehicles and not is_temporary_avoidance:

@@ -78,6 +78,12 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(alt, 34.0)
         self.assertAlmostEqual(geometry.distance_m(38.9, -76.4, lat, lon), 500 ** 0.5, places=6)
 
+    def test_relative_yaw_rotates_with_ship_heading_and_wraps_360(self):
+        self.assertAlmostEqual(geometry.relative_yaw_to_global(90.0, 45.0), 135.0)
+        self.assertAlmostEqual(geometry.relative_yaw_to_global(0.0, 0.0), 0.0)
+        self.assertAlmostEqual(geometry.relative_yaw_to_global(300.0, 90.0), 30.0)
+        self.assertAlmostEqual(geometry.relative_yaw_to_global(10.0, -30.0), 340.0)
+
     def test_grid_alternates_tracks_without_changing_altitude(self):
         grid = missions.calculate_search_grid_waypoints(38.9, -76.4, 100, 25, 30)
         self.assertEqual(len(grid), 8)

@@ -62,4 +62,18 @@ describe("hardware-free telemetry and commands", () => {
     updateDemoVehicleColor(vehicles, vehicle.vehicle_id, "#123456");
     expect(demoVehicleSnapshot(vehicle)).toMatchObject({ marker_color: "#123456" });
   });
+
+  it("rotates to the dispatched ship-relative yaw once the waypoint is reached", () => {
+    const vehicles = createDemoVehicles();
+    const [yp, vehicle] = vehicles;
+    vehicle.lat = yp.lat;
+    vehicle.lon = yp.lon;
+    handleDemoCommand(vehicles, vehicle.vehicle_id, {
+      type: "ship_relative_trajectory", ship_vehicle_id: yp.vehicle_id,
+      local_waypoints: [{ x: 0, y: 0, z: vehicle.alt, yaw_deg: 90 }],
+    });
+    stepDemoVehicle(vehicle, 0.2, 1, vehicles);
+    expect(vehicle.mode).toBe("hold");
+    expect(vehicle.heading).toBeCloseTo((yp.heading + 90) % 360);
+  });
 });

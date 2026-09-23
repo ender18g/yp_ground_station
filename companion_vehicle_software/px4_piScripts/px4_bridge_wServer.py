@@ -46,13 +46,12 @@ def _resolve_webrtc_ip() -> str:
 
 # --- DEFAULT CONFIGURATION ---
 DEFAULT_CONFIG = {
-    "server_ws_url": os.getenv("SERVER_WS_URL", "ws://10.10.130.2:8000/ws/vehicle"),
-    "vehicle_id": os.getenv("VEHICLE_ID", "blueboat"),
-    "mavlink_url": os.getenv("MAVLINK_URL", "udpin:0.0.0.0:14551"),
+    "server_ws_url": os.getenv("SERVER_WS_URL", "ws://192.168.0.174:8000/ws/vehicle"),
+    "vehicle_id": os.getenv("VEHICLE_ID", "px4_quadrotor"),
+    "mavlink_url": os.getenv("MAVLINK_URL", "udp:127.0.0.1:14540"),
+    "mavlink_baud": int(os.getenv("MAVLINK_BAUD", "921600")),
     "send_hz": float(os.getenv("SEND_HZ", "5")),
     "web_port": 8080,
-    # Empty string means auto-derive from the resolved WebRTC IP below.
-    "video_url": os.getenv("VIDEO_URL", ""),
 }
 
 config = {}
@@ -67,15 +66,15 @@ system_status = {
     "gps_status": "No Fix",
     "satellites": 0,
     "last_hb_time": 0,
+    "last_gps_fix_forwarded_at": 0.0,
 }
 
 # SAR & Global Variables
-VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "usv")
+VEHICLE_TYPE = os.getenv("VEHICLE_TYPE", "uav")
 WEBRTC_IP = _resolve_webrtc_ip()
 SAR_TAKEOFF_ALT_M = float(os.getenv("SAR_TAKEOFF_ALT_M", "30.0"))
 SAR_CLIMB_SPEED_MS = float(os.getenv("SAR_CLIMB_SPEED_MS", "8.0"))
-# Set to "false" for surface vehicles (USV/UGV) that don't take off
-SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "false").lower() != "false"
+SAR_INCLUDE_TAKEOFF = os.getenv("SAR_INCLUDE_TAKEOFF", "true").lower() != "false"
 SAR_STREAMING_MODE = os.getenv("SAR_STREAMING_MODE", "true").lower() != "false"
 SAR_ARRIVAL_RADIUS_M = float(os.getenv("SAR_ARRIVAL_RADIUS_M", "10.0"))
 
@@ -95,10 +94,10 @@ _ship_state = {"vehicle_id": None, "lat": None, "lon": None, "alt": None, "headi
 _ship_relative_thread: threading.Thread | None = None
 _ship_relative_stop_event = threading.Event()
 _last_rtb_step_time = 0.0
-_rtb_guided_forced = False
+_rtb_offboard_forced = False
 _last_land_step_time = 0.0
-_land_step_guided_forced = False
-_landed_state = 0  # MAV_LANDED_STATE_UNDEFINED until EXTENDED_SYS_STATE arrives
+_land_step_offboard_forced = False
+_landed_state = 0  
 _land_touchdown_since: float | None = None
 _land_touchdown_sent = False
 
@@ -129,7 +128,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Blueboat Bridge - Telemetry Diagnostics & Config</title>
+    <title>PX4 Bridge - Telemetry Diagnostics & Config</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; max-width: 550px; margin: 0 auto; }}
@@ -144,7 +143,6 @@ HTML_TEMPLATE = """
         .badge-offline {{ background: #881337; color: #fda4af; }}
         label {{ display: block; margin-top: 15px; font-weight: 600; font-size: 0.9rem; color: #94a3b8; }}
         input, select {{ width: 100%; padding: 10px; margin-top: 5px; border-radius: 6px; border: 1px solid #475569; background: #1e293b; color: white; box-sizing: border-box; font-size: 1rem; }}
-        .hint {{ font-size: 0.8rem; color: #64748b; margin-top: 4px; }}
         button {{ width: 100%; margin-top: 25px; padding: 12px; background: #2563eb; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: bold; cursor: pointer; }}
         button:hover {{ background: #1d4ed8; }}
         .log-row {{ display: flex; gap: 10px; align-items: center; }}
@@ -158,7 +156,7 @@ HTML_TEMPLATE = """
     <div class="diag-card">
         <div class="diag-grid">
             <div class="diag-item">
-                <div class="diag-label">Flight Controller</div>
+                <div class="diag-label">PX4 Controller</div>
                 <div class="diag-value"><span id="cube_status" class="badge badge-offline">Offline</span></div>
             </div>
             <div class="diag-item">
@@ -184,19 +182,25 @@ HTML_TEMPLATE = """
         <label>Vehicle ID</label>
         <input type="text" name="vehicle_id" value="{vehicle_id}" required>
 
-        <label>MAVLink Network Endpoint (Companion Pi Bridge)</label>
+        <label>MAVLink URL (Connection)</label>
         <select id="mavlink_url_select" name="mavlink_url_select" onchange="toggleCustomUrl()">
-            <option value="udpin:0.0.0.0:14551" {s_udp}>udpin:0.0.0.0:14551 (UDP Listen Default)</option>
-            <option value="custom" {s_custom}>Custom UDP / TCP...</option>
+            <option value="udp:127.0.0.1:14540" {s_udp}>udp:127.0.0.1:14540 (PX4 SITL)</option>
+            <option value="/dev/ttyACM0" {s_acm0}>/dev/ttyACM0 (USB Flight Controller)</option>
+            <option value="/dev/ttyUSB0" {s_usb0}>/dev/ttyUSB0 (USB Telemetry Radio)</option>
+            <option value="custom" {s_custom}>Custom IP / Other...</option>
         </select>
-        <input type="text" id="mavlink_url_custom" name="mavlink_url_custom" value="{mavlink_url_custom}" style="display: {custom_display}; margin-top: 8px;" placeholder="e.g. tcp:192.168.1.50:5760 or udpout:192.168.1.50:14551">
+        <input type="text" id="mavlink_url_custom" name="mavlink_url_custom" value="{mavlink_url_custom}" style="display: {custom_display}; margin-top: 8px;" placeholder="e.g. tcp:192.168.1.50:5760">
+
+        <label>Baud Rate</label>
+        <select name="mavlink_baud">
+            <option value="921600" {b921600}>921600 (PiConnect Default)</option>
+            <option value="115200" {b115200}>115200 (USB Default)</option>
+            <option value="57600" {b57600}>57600 (Telemetry Radio)</option>
+            <option value="9600" {b9600}>9600</option>
+        </select>
 
         <label>Update Rate (Hz)</label>
         <input type="number" step="0.1" name="send_hz" value="{send_hz}" required>
-
-        <label>Video Endpoint URL</label>
-        <input type="text" name="video_url" value="{video_url}" placeholder="{video_url_placeholder}">
-        <div class="hint">Leave blank to auto-use the detected host IP ({webrtc_ip}) on port 8889.</div>
 
         <button type="submit">Save & Restart Telemetry Stream</button>
     </form>
@@ -290,25 +294,25 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def _default_video_url() -> str:
-    return f"http://{WEBRTC_IP}:8889/blueboat"
-
 async def handle_index(request):
     url = config["mavlink_url"]
-    known_endpoints = ["udpin:0.0.0.0:14551"]
-    is_custom = url not in known_endpoints
+    known_ports = ["udp:127.0.0.1:14540", "/dev/ttyACM0", "/dev/ttyUSB0"]
+    is_custom = url not in known_ports
 
     html = HTML_TEMPLATE.format(
         server_ws_url=config["server_ws_url"],
         vehicle_id=config["vehicle_id"],
-        s_udp="selected" if url == "udpin:0.0.0.0:14551" else "",
+        s_udp="selected" if url == "udp:127.0.0.1:14540" else "",
+        s_acm0="selected" if url == "/dev/ttyACM0" else "",
+        s_usb0="selected" if url == "/dev/ttyUSB0" else "",
         s_custom="selected" if is_custom else "",
         mavlink_url_custom=url if is_custom else "",
         custom_display="block" if is_custom else "none",
         send_hz=config["send_hz"],
-        video_url=config.get("video_url", ""),
-        video_url_placeholder=_default_video_url(),
-        webrtc_ip=WEBRTC_IP,
+        b921600="selected" if config["mavlink_baud"] == 921600 else "",
+        b115200="selected" if config["mavlink_baud"] == 115200 else "",
+        b57600="selected" if config["mavlink_baud"] == 57600 else "",
+        b9600="selected" if config["mavlink_baud"] == 9600 else "",
     )
     return web.Response(text=html, content_type="text/html")
 
@@ -330,8 +334,8 @@ async def handle_save(request):
         
     config["server_ws_url"] = data.get("server_ws_url", config["server_ws_url"]).strip()
     config["vehicle_id"] = data.get("vehicle_id", config["vehicle_id"]).strip()
+    config["mavlink_baud"] = int(data.get("mavlink_baud", config["mavlink_baud"]))
     config["send_hz"] = float(data.get("send_hz", config["send_hz"]))
-    config["video_url"] = data.get("video_url", config.get("video_url", "")).strip()
 
     save_config(config)
     reconnect_event.set()
@@ -350,7 +354,6 @@ async def handle_logs_api(request):
 
 async def handle_log_download(request):
     name = request.match_info.get("filename", "")
-    # Reject anything that isn't a bare filename to prevent path traversal out of LOG_DIR.
     if not name or name != Path(name).name:
         raise web.HTTPBadRequest(text="Invalid filename")
     path = LOG_DIR / name
@@ -420,13 +423,13 @@ def create_navsatfix_message(vehicle_id: str, lat: float, lon: float, alt: float
         payload["msg"]["heading"] = heading
     return payload
 
-def create_video_stream_message(vehicle_id: str, video_url: str) -> dict:
+def create_video_stream_message(vehicle_id: str, webrtc_ip: str) -> dict:
     return {
         "op": "video_stream_update",
         "video": {
             "vehicle_id": vehicle_id,
             "enabled": True,
-            "streams": [{"label": "Primary WebRTC", "url": video_url}]
+            "streams": [{"label": "Primary WebRTC", "url": f"http://{webrtc_ip}:8889/cam/whep"}]
         }
     }
 
@@ -436,7 +439,6 @@ def _ui_ws_url(base_url: str) -> str:
     if marker in base:
         return f"{base.split(marker, 1)[0]}/ws/ui"
     return base
-
 
 def _update_vehicle_state(lat: float, lon: float, alt: float, heading: float | None) -> None:
     with _vehicle_state_lock:
@@ -504,102 +506,60 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
         except Exception as exc:
             await asyncio.sleep(1.0)
 
-def _stop_ship_relative_mission() -> None:
-    global _ship_relative_thread
-    if _ship_relative_thread and _ship_relative_thread.is_alive():
-        _ship_relative_stop_event.set()
-        _ship_relative_thread.join(timeout=1.0)
-    _ship_relative_stop_event.clear()
-    _ship_relative_thread = None
+def set_px4_mode(master, mode_str: str) -> None:
+    """Safe wrapper for setting PX4 modes using pymavlink."""
+    try:
+        master.set_mode(mode_str)
+    except Exception as exc:
+        print(f"[WARN] Failed to set PX4 mode {mode_str}: {exc}")
 
-def _launch_ship_relative_mission(master, command_data: dict) -> None:
-    global _ship_relative_thread
-    if not command_data.get("ship_vehicle_id") or not command_data.get("local_waypoints"): return
-    _stop_ship_relative_mission()
-    _ship_relative_thread = threading.Thread(target=_run_ship_relative_mission, args=(master, command_data["ship_vehicle_id"], command_data["local_waypoints"], float(command_data.get("arrival_radius_m", SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M)), float(command_data.get("update_hz", SHIP_RELATIVE_DEFAULT_UPDATE_HZ)), _ship_relative_stop_event), daemon=True)
-    _ship_relative_thread.start()
-
-def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
-    update_period_s = 1.0 / max(update_hz, 1.0)
-    for index, waypoint in enumerate(local_waypoints, start=1):
-        while not stop_event.is_set():
-            ship_state, vehicle_state = _snapshot_ship_state(ship_vehicle_id), _snapshot_vehicle_state()
-            if not _ship_state_is_fresh(ship_state) or ship_state is None or vehicle_state.get("lat") is None:
-                time.sleep(update_period_s)
-                continue
-            ship_heading = float(ship_state.get("heading_deg") or 0.0)
-            target_lat, target_lon, target_alt = _relative_waypoint_to_global(float(ship_state["lat"]), float(ship_state["lon"]), ship_heading, float(ship_state.get("alt") or 0.0), waypoint)
-            if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
-            yaw_deg = waypoint.get("yaw_deg")
-            type_mask = int(0b100111000000) if yaw_deg is not None else int(0b110111000000)
-            target_yaw_rad = math.radians(_relative_yaw_to_global(ship_heading, float(yaw_deg))) if yaw_deg is not None else 0.0
-            master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, type_mask, int(target_lat * 1e7), int(target_lon * 1e7), target_alt, float(ship_state.get("vn_ms") or 0.0), float(ship_state.get("ve_ms") or 0.0), 0.0, 0, 0, 0, target_yaw_rad, 0.0)
-            alt_condition_met = True if VEHICLE_TYPE in ["usv", "ugv"] else abs(float(vehicle_state["alt"]) - target_alt) <= max(2.0, arrival_radius_m * 0.5)
-            if _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon) <= arrival_radius_m and alt_condition_met:
-                # Only break if there are more waypoints in the sequence
-                if index < len(local_waypoints):
-                    break
-            time.sleep(update_period_s)
-        if stop_event.is_set(): return
-
-def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_guided=True):
+def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_offboard=True):
     if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
-    if force_guided: master.set_mode('GUIDED')
+    
+    # PX4 REQUIREMENT: Stream setpoints >2Hz BEFORE enabling OFFBOARD mode
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
+    
+    if force_offboard:
+        set_px4_mode(master, 'OFFBOARD')
 
-
-def _rtb_waypoint_should_force_guided() -> bool:
-    """Force GUIDED once at the start of an RTB approach (the "waypoint" phase
-    before stern-capture) so a vehicle left in LOITER still responds; skip the
-    redundant mode switch on later ticks of the same continuous RTB sequence.
-    Shares state with follow_yp_velocity's gate so the whole RTB run only
-    forces the mode once."""
-    global _last_rtb_step_time, _rtb_guided_forced
+def _rtb_waypoint_should_force_offboard() -> bool:
+    global _last_rtb_step_time, _rtb_offboard_forced
     now = time.monotonic()
     if now - _last_rtb_step_time > 1.0:
-        _rtb_guided_forced = False
+        _rtb_offboard_forced = False
     _last_rtb_step_time = now
-    if _rtb_guided_forced:
+    if _rtb_offboard_forced:
         return False
-    _rtb_guided_forced = True
+    _rtb_offboard_forced = True
     return True
 
-
 def follow_yp_velocity(master, command_data: dict) -> None:
-    """Stream the post-capture YP velocity, position target, and heading."""
-    global _last_rtb_step_time, _rtb_guided_forced
+    global _last_rtb_step_time, _rtb_offboard_forced
     target = command_data.get("target", {})
     lat, lon = target.get("latitude"), target.get("longitude")
     if lat is None or lon is None:
         return
 
-    # A gap in updates means the sequence just (re)started, so force GUIDED
-    # once. While updates are continuous, never force the mode back -- if the
-    # safety pilot switches modes to take control, respect it and stop guiding.
     now = time.monotonic()
     if now - _last_rtb_step_time > 1.0:
-        _rtb_guided_forced = False
+        _rtb_offboard_forced = False
     _last_rtb_step_time = now
 
+    # PX4 REQUIREMENT: Send setpoints BEFORE asserting the OFFBOARD mode change
+    master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
+
     try:
-        if not _rtb_guided_forced:
-            master.set_mode("GUIDED")
-            _rtb_guided_forced = True
-        elif master.flightmode != "GUIDED":
+        if not _rtb_offboard_forced:
+            set_px4_mode(master, "OFFBOARD")
+            _rtb_offboard_forced = True
+        elif master.flightmode != "OFFBOARD":
             print("[RTB] Safety pilot has taken control; halting RTB-follow guidance")
             return
     except Exception as exc:
-        print(f"[WARN] Could not set GUIDED mode for RTB follow: {exc}")
-    master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
+        pass
 
 def execute_land_step(master, command_data: dict) -> bool:
-    """Stream a moving pad target, including descent or hover velocity.
-
-    Returns True once the flight controller's own onboard landing detector
-    (EXTENDED_SYS_STATE.landed_state) confirms real ground contact and this
-    call has disarmed the vehicle -- independent of any preset altitude.
-    """
-    global _last_land_step_time, _land_step_guided_forced, _land_touchdown_since, _land_touchdown_sent
+    global _last_land_step_time, _land_step_offboard_forced, _land_touchdown_since, _land_touchdown_sent
     target = command_data.get("target", {})
     lat = target.get("latitude")
     lon = target.get("longitude")
@@ -610,16 +570,12 @@ def execute_land_step(master, command_data: dict) -> bool:
 
     vn = float(command_data.get("velocity_north_ms", 0.0))
     ve = float(command_data.get("velocity_east_ms", 0.0))
-    vd = float(command_data.get("sink_rate_ms", 0.0))  # Positive = downward velocity
+    vd = float(command_data.get("sink_rate_ms", 0.0))  
     yaw_rad = math.radians(float(command_data.get("heading", 0.0)))
 
-    # A gap in steps means the sequence just (re)started, so force GUIDED once
-    # and reset touchdown tracking for the new attempt. While steps are
-    # continuous, never force the mode back -- if the safety pilot switches
-    # modes to take control, respect it and stop guiding.
     now = time.monotonic()
     if now - _last_land_step_time > 1.0:
-        _land_step_guided_forced = False
+        _land_step_offboard_forced = False
         _land_touchdown_since = None
         _land_touchdown_sent = False
     _last_land_step_time = now
@@ -637,41 +593,71 @@ def execute_land_step(master, command_data: dict) -> bool:
         return False
     _land_touchdown_since = None
 
+    # PX4 REQUIREMENT: Send setpoints BEFORE asserting the OFFBOARD mode change
+    master.mav.set_position_target_global_int_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        0b100111000000,
+        int(float(lat) * 1e7), int(float(lon) * 1e7), float(alt),
+        vn, ve, vd, 0, 0, 0, yaw_rad, 0 
+    )
+
     try:
-        if not _land_step_guided_forced:
-            master.set_mode("GUIDED")
-            _land_step_guided_forced = True
-        elif master.flightmode != "GUIDED":
+        if not _land_step_offboard_forced:
+            set_px4_mode(master, "OFFBOARD")
+            _land_step_offboard_forced = True
+        elif master.flightmode != "OFFBOARD":
             print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
             return False
     except Exception:
         pass
 
-    master.mav.set_position_target_global_int_send(
-        0,
-        master.target_system,
-        master.target_component,
-        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-        0b100111000000,
-        int(float(lat) * 1e7),
-        int(float(lon) * 1e7),
-        float(alt),
-        vn, ve, vd,
-        0, 0, 0,
-        yaw_rad, 0
-    )
     return False
 
+def _stop_ship_relative_mission() -> None:
+    global _ship_relative_thread
+    if _ship_relative_thread and _ship_relative_thread.is_alive():
+        _ship_relative_stop_event.set()
+        _ship_relative_thread.join(timeout=1.0)
+    _ship_relative_stop_event.clear()
+    _ship_relative_thread = None
 
-def disarm_vehicle(master) -> None:
-    """Disarm only when an explicit future landing-completion command arrives."""
-    master.mav.command_long_send(
-        master.target_system,
-        master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0, 0, 21196, 0, 0, 0, 0, 0,
-    )
+def _launch_ship_relative_mission(master, command_data: dict) -> None:
+    global _ship_relative_thread
+    if not command_data.get("ship_vehicle_id") or not command_data.get("local_waypoints"): return
+    _stop_ship_relative_mission()
+    _ship_relative_thread = threading.Thread(target=_run_ship_relative_mission, args=(master, command_data["ship_vehicle_id"], command_data["local_waypoints"], float(command_data.get("arrival_radius_m", SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M)), float(command_data.get("update_hz", SHIP_RELATIVE_DEFAULT_UPDATE_HZ)), _ship_relative_stop_event), daemon=True)
+    _ship_relative_thread.start()
 
+def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
+    update_period_s = 1.0 / max(update_hz, 1.0)
+    offboard_forced = False
+    
+    for index, waypoint in enumerate(local_waypoints, start=1):
+        while not stop_event.is_set():
+            ship_state, vehicle_state = _snapshot_ship_state(ship_vehicle_id), _snapshot_vehicle_state()
+            if not _ship_state_is_fresh(ship_state) or ship_state is None or vehicle_state.get("lat") is None:
+                time.sleep(update_period_s)
+                continue
+            ship_heading = float(ship_state.get("heading_deg") or 0.0)
+            target_lat, target_lon, target_alt = _relative_waypoint_to_global(float(ship_state["lat"]), float(ship_state["lon"]), ship_heading, float(ship_state.get("alt") or 0.0), waypoint)
+            if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
+            yaw_deg = waypoint.get("yaw_deg")
+            type_mask = int(0b100111000000) if yaw_deg is not None else int(0b110111000000)
+            target_yaw_rad = math.radians(_relative_yaw_to_global(ship_heading, float(yaw_deg))) if yaw_deg is not None else 0.0
+            
+            master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, type_mask, int(target_lat * 1e7), int(target_lon * 1e7), target_alt, float(ship_state.get("vn_ms") or 0.0), float(ship_state.get("ve_ms") or 0.0), 0.0, 0, 0, 0, target_yaw_rad, 0.0)
+            
+            if not offboard_forced:
+                set_px4_mode(master, "OFFBOARD")
+                offboard_forced = True
+                
+            alt_condition_met = True if VEHICLE_TYPE in ["usv", "ugv"] else abs(float(vehicle_state["alt"]) - target_alt) <= max(2.0, arrival_radius_m * 0.5)
+            if _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon) <= arrival_radius_m and alt_condition_met:
+                if index < len(local_waypoints):
+                    break
+            time.sleep(update_period_s)
+        if stop_event.is_set(): return
 
 # --- SAR MISSIONS THREAD TARGETS ---
 
@@ -694,12 +680,13 @@ def _run_mob_search(master, track_points: list, corridor_half_width_m: float, sw
 def _run_takeoff(master, altitude_m: float) -> None:
     with _sar_mission_lock:
         try:
-            sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+            set_px4_mode(master, "AUTO.LOITER")
             time.sleep(0.3)
             if not sar_missions.arm_vehicle(master):
                 print("[MISSION] Takeoff arm failed")
                 return
             time.sleep(0.3)
+            # Send standard takeoff command which automatically triggers AUTO.TAKEOFF mode in PX4
             master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, float("nan"), 0, 0, altitude_m)
             print(f"[MISSION] Takeoff command sent to {altitude_m}m")
         except Exception as exc:
@@ -715,29 +702,20 @@ def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guide
                 parameter_overrides=False,
             )
             if not mission_items:
-                print("[MISSION] mission_plan has no valid waypoints.")
                 return
 
             if not sar_missions.upload_mission(master, mission_items): return
             if auto_arm_start:
-                # Arm in GUIDED first: ArduPilot refuses to arm from a disarmed AUTO mode.
-                sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+                set_px4_mode(master, "AUTO.LOITER")
                 time.sleep(0.2)
                 sar_missions.arm_vehicle(master)
                 time.sleep(0.2)
-                sar_missions.set_mode(master, "AUTO", wait_for_ack=False)
+                set_px4_mode(master, "AUTO.MISSION")
                 time.sleep(0.2)
                 sar_missions.start_mission(master)
         except Exception as exc: pass
 
-
 def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
-    """Fetch the flight controller's most recently closed dataflash log over MAVLink.
-
-    Runs in a background thread, holding _sar_mission_lock so the telemetry
-    loop pauses its own reads of `master` for the (slow, chunked) duration of
-    the download.
-    """
     with _sar_mission_lock:
         try:
             master.mav.log_request_list_send(master.target_system, master.target_component, 0, 0xFFFF)
@@ -778,12 +756,12 @@ def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
 
             master.mav.log_request_end_send(master.target_system, master.target_component)
             LOG_DIR.mkdir(parents=True, exist_ok=True)
-            filename = f"{vehicle_id}_log{log_id}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.bin"
+            # PX4 Uses the .ulg file extension for ULog formatted logs
+            filename = f"{vehicle_id}_log{log_id}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.ulg"
             (LOG_DIR / filename).write_bytes(bytes(data))
             print(f"[LOG] Auto-downloaded flight log on disarm: {filename} ({log_size} bytes)")
         except Exception as exc:
             print(f"[LOG] Auto-download failed for {vehicle_id}: {exc}")
-
 
 # --- MAIN TELEMETRY LOOP ---
 
@@ -793,17 +771,16 @@ async def telemetry_loop(current_config: dict) -> None:
     vehicle_id = current_config["vehicle_id"]
     server_ws_url = current_config["server_ws_url"]
     mavlink_url = current_config["mavlink_url"]
+    mavlink_baud = current_config["mavlink_baud"]
     send_hz = current_config["send_hz"]
-    video_url = current_config.get("video_url") or _default_video_url()
 
     system_status["cube_status"] = "Connecting..."
     system_status["cube_connected"] = False
 
     ws = None  # declared here so the finally block can always close it
     try:
-        master = mavutil.mavlink_connection(mavlink_url)
+        master = mavutil.mavlink_connection(mavlink_url, baud=mavlink_baud)
         
-        # Non-blocking heartbeat loop
         msg = None
         while not msg:
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
@@ -824,7 +801,6 @@ async def telemetry_loop(current_config: dict) -> None:
         
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_POSITION, int(send_hz), 1)
         master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS, 2, 1)
-        # Explicitly request EXTENDED_SYS_STATE for real ground-contact detection (landed_state).
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, int(1e6 / 2), 0, 0, 0, 0, 0)
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
@@ -833,7 +809,7 @@ async def telemetry_loop(current_config: dict) -> None:
         ws_last_connect_attempt = 0.0
         last_send_time = time.time()
         last_video_send_time = 0.0
-
+       
         while True:
             now = time.time()
 
@@ -875,7 +851,7 @@ async def telemetry_loop(current_config: dict) -> None:
                                         "stamp": time.time(),
                                     }))
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
-                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_guided=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_guided()))
+                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_offboard=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_offboard()))
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
                             elif cmd_type == "mob" and len(command_data.get("track_points", [])) >= 2:
@@ -894,18 +870,18 @@ async def telemetry_loop(current_config: dict) -> None:
                                 raw_data = command_data.get("data", [])
                                 if master and data_len > 0:
                                     padded_payload = bytearray(raw_data + [0] * (180 - len(raw_data)))
-                                    try:
-                                        master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
-                                    except Exception as e:
-                                        print(f"[RTCM] MAVLink send error: {e}")
+                                    master.mav.gps_rtcm_data_send(flags, data_len, padded_payload)
                             elif cmd_type == "ship_relative_trajectory":
                                 _launch_ship_relative_mission(master, command_data)
                             elif cmd_type == "mission_plan" and isinstance(command_data.get("waypoints", []), list):
                                 threading.Thread(target=_run_mission_plan, args=(master, command_data["waypoints"], bool(command_data.get("auto_arm_start", True)), bool(command_data.get("force_guided_on_complete", False))), daemon=True).start()
                             elif cmd_type == "set_mode" and command_data.get("mode"):
-                                sar_missions.set_mode(master, str(command_data["mode"]), wait_for_ack=False)
+                                mode_str = str(command_data["mode"])
+                                px4_mode_map = {"GUIDED": "OFFBOARD", "AUTO": "AUTO.MISSION", "RTL": "AUTO.RTL", "LOITER": "AUTO.LOITER"}
+                                px4_mode = px4_mode_map.get(mode_str.upper(), mode_str.upper())
+                                set_px4_mode(master, px4_mode)
                     except json.JSONDecodeError: pass
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError: 
                     pass
                 except (websockets.exceptions.ConnectionClosed, ConnectionError) as e:
                     print(f"[WS] Connection dropped: {e}")
@@ -917,13 +893,13 @@ async def telemetry_loop(current_config: dict) -> None:
             msg = None
             if not _sar_mission_lock.locked():
                 msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW", "EXTENDED_SYS_STATE"], blocking=False)
-
+           
             now = time.time()
             if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
                 print("\n[WARNING] Heartbeat timeout or socket dead. Forcing reconnect...")
                 reconnect_event.set()
                 break
-
+                
             telemetry_sample = None
             if msg is not None:
                 msg_type = msg.get_type()
@@ -944,6 +920,9 @@ async def telemetry_loop(current_config: dict) -> None:
                         try:
                             await ws.send(json.dumps(create_gps_fix_message(vehicle_id, msg)))
                         except Exception: pass
+                    if now - system_status["last_gps_fix_forwarded_at"] >= 10.0:
+                        system_status["last_gps_fix_forwarded_at"] = now
+                        print(f"[GPS] Forwarded {msg_type}: {system_status['gps_status']} ({system_status['satellites']} sats)")
                 elif msg_type == "GLOBAL_POSITION_INT":
                     lat, lon, alt = msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
                     heading_raw = getattr(msg, "hdg", None)
@@ -964,7 +943,7 @@ async def telemetry_loop(current_config: dict) -> None:
                         last_send_time = now
 
                     if now - last_video_send_time >= 60.0:
-                        await ws.send(json.dumps(create_video_stream_message(vehicle_id, video_url)))
+                        await ws.send(json.dumps(create_video_stream_message(vehicle_id, WEBRTC_IP)))
                         last_video_send_time = now
                 except Exception as e:
                     print(f"[WS] Data send failed: {e}")
@@ -981,7 +960,6 @@ async def telemetry_loop(current_config: dict) -> None:
     except Exception as exc:
         system_status["ws_connected"] = False
         system_status["ws_status"] = "Disconnected"
-        traceback.print_exc()
     finally:
         # Guarantee the socket is released on break, exception, or task cancellation.
         if ws is not None:
@@ -989,6 +967,7 @@ async def telemetry_loop(current_config: dict) -> None:
                 await ws.close()
             except Exception:
                 pass
+
 
 async def main():
     global config

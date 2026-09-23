@@ -31,6 +31,10 @@ def relative_waypoint_to_global(ship_lat: float, ship_lon: float, ship_heading: 
     return target_lat, target_lon, ship_alt + local_z
 
 
+def relative_yaw_to_global(ship_heading_deg: float, yaw_deg: float) -> float:
+    return (ship_heading_deg + yaw_deg) % 360.0
+
+
 def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)

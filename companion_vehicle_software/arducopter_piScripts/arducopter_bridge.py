@@ -14,6 +14,7 @@ import sar_missions
 from yp_common.geometry import (
     destination_point as _destination_point,
     relative_waypoint_to_global as _relative_waypoint_to_global,
+    relative_yaw_to_global as _relative_yaw_to_global,
     distance_m as _distance_m,
     north_east_delta_m as _north_east_delta_m,
 )
@@ -354,12 +355,20 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
             if VEHICLE_TYPE in ["usv", "ugv"]:
                 target_alt = 0.0
 
+            yaw_deg = waypoint.get("yaw_deg")
+            if yaw_deg is not None:
+                type_mask = int(0b100111000000)
+                target_yaw_rad = math.radians(_relative_yaw_to_global(ship_heading, float(yaw_deg)))
+            else:
+                type_mask = int(0b110111000000)
+                target_yaw_rad = 0.0
+
             master.mav.set_position_target_global_int_send(
                 0,
                 master.target_system,
                 master.target_component,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                int(0b110111000000),
+                type_mask,
                 int(target_lat * 1e7),
                 int(target_lon * 1e7),
                 target_alt,
@@ -369,8 +378,8 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
                 0,
                 0,
                 0,
-                0,
-                0,
+                target_yaw_rad,
+                0.0,
             )
 
             distance_m = _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon)

@@ -17,6 +17,8 @@ export interface RelativeWaypoint {
   x: number;
   y: number;
   z: number;
+  // Degrees relative to ship heading, 0 = ship's bow, clockwise positive.
+  yaw_deg?: number;
 }
 
 export interface Vehicle {

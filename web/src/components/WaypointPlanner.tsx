@@ -7,7 +7,7 @@ import { Trash2 } from "lucide-react";
 import { WaypointScene } from "./3d/WaypointScene";
 import type { Command, RelativeWaypoint, Vehicle } from "../types";
 
-type LocalWaypoint = { id: string; x: number; y: number; z: number };
+type LocalWaypoint = { id: string; x: number; y: number; z: number; yaw: number };
 
 export function WaypointPlanner({
   yp,
@@ -42,10 +42,11 @@ export function WaypointPlanner({
       alert("Please select a vehicle to dispatch.");
       return;
     }
-    const localWaypoints: RelativeWaypoint[] = waypoints.map(({ x, y, z }) => ({
+    const localWaypoints: RelativeWaypoint[] = waypoints.map(({ x, y, z, yaw }) => ({
       x,
       y,
       z,
+      yaw_deg: yaw,
     }));
     onCommand(selectedVehicleId, {
       type: "ship_relative_trajectory",
@@ -146,7 +147,7 @@ export function WaypointPlanner({
               onSelect={setSelectedId}
               onAdd={(x, y) => {
                 const id = Date.now().toString();
-                setWaypoints((items) => [...items, { id, x, y, z: 15 }]);
+                setWaypoints((items) => [...items, { id, x, y, z: 15, yaw: 0 }]);
                 setSelectedId(id);
               }}
               onUpdate={updateWaypoint}
@@ -289,6 +290,31 @@ function InteractiveWaypoint2D({
     target.addEventListener("pointermove", move);
     target.addEventListener("pointerup", up);
   };
+  // Yaw is measured clockwise from "up" (ship-forward), matching the backend's compass-style bearing convention.
+  const rotate = (id: string, event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    onSelect(id);
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const move = (item: PointerEvent) => {
+      if (!ref.current) return;
+      const waypoint = waypoints.find((candidate) => candidate.id === id);
+      if (!waypoint) return;
+      const rect = ref.current.getBoundingClientRect();
+      const centerX = (waypoint.x / width + 0.5) * rect.width;
+      const centerY = (-waypoint.y / height + 0.5) * rect.height;
+      const dx = item.clientX - rect.left - centerX;
+      const dy = item.clientY - rect.top - centerY;
+      const yaw = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
+      onUpdate(id, { yaw });
+    };
+    const up = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
   return (
     <div
       ref={ref}
@@ -327,32 +353,72 @@ function InteractiveWaypoint2D({
       {waypoints.map((waypoint, index) => (
         <div
           key={waypoint.id}
-          onPointerDown={(event) => drag(waypoint.id, event)}
           style={{
             position: "absolute",
             left: `${(waypoint.x / width + 0.5) * 100}%`,
             top: `${(-waypoint.y / height + 0.5) * 100}%`,
-            width: 18,
-            height: 18,
-            backgroundColor: waypoint.id === selectedId ? "#38bdf8" : "#ef4444",
-            border:
-              waypoint.id === selectedId
-                ? "2px solid white"
-                : "1px solid #7f1d1d",
-            borderRadius: "50%",
-            transform: "translate(-50%, -50%)",
-            cursor: "grab",
-            zIndex: waypoint.id === selectedId ? 10 : 1,
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            fontSize: 10,
-            color: "white",
-            fontWeight: "bold",
-            userSelect: "none",
+            width: 0,
+            height: 0,
           }}
         >
-          {index + 1}
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              top: -22,
+              width: 2,
+              height: 22,
+              backgroundColor: waypoint.id === selectedId ? "#38bdf8" : "#f59e0b",
+              transformOrigin: "bottom center",
+              transform: `translateX(-50%) rotate(${waypoint.yaw}deg)`,
+              pointerEvents: "none",
+            }}
+          />
+          <div
+            onPointerDown={(event) => rotate(waypoint.id, event)}
+            title="Drag to set yaw relative to ship heading"
+            style={{
+              position: "absolute",
+              left: Math.sin((waypoint.yaw * Math.PI) / 180) * 22,
+              top: -Math.cos((waypoint.yaw * Math.PI) / 180) * 22,
+              width: 12,
+              height: 12,
+              backgroundColor: waypoint.id === selectedId ? "#38bdf8" : "#f59e0b",
+              border: "1px solid #78350f",
+              borderRadius: "50%",
+              transform: "translate(-50%, -50%)",
+              cursor: "grab",
+              zIndex: waypoint.id === selectedId ? 11 : 2,
+            }}
+          />
+          <div
+            onPointerDown={(event) => drag(waypoint.id, event)}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              width: 18,
+              height: 18,
+              backgroundColor: waypoint.id === selectedId ? "#38bdf8" : "#ef4444",
+              border:
+                waypoint.id === selectedId
+                  ? "2px solid white"
+                  : "1px solid #7f1d1d",
+              borderRadius: "50%",
+              transform: "translate(-50%, -50%)",
+              cursor: "grab",
+              zIndex: waypoint.id === selectedId ? 10 : 1,
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              fontSize: 10,
+              color: "white",
+              fontWeight: "bold",
+              userSelect: "none",
+            }}
+          >
+            {index + 1}
+          </div>
         </div>
       ))}
     </div>

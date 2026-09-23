@@ -21,7 +21,8 @@ class APIContractTests(DatabaseTestCase):
     def setUp(self):
         super().setUp()
         for name in ("vehicles", "vehicle_queues", "ros_connections", "shared_waypoints",
-                     "shared_sar_patterns", "shared_mission_plans", "shared_mission_completion_targets"):
+                     "shared_sar_patterns", "shared_mission_plans", "shared_mission_completion_targets",
+                     "shared_ship_relative_plans"):
             patcher = patch.dict(getattr(main, name), {}, clear=True)
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -23,6 +23,7 @@ export interface DemoVehicle {
   marker_color: string;
   manualWaypoint: boolean;
   target: { latitude: number; longitude: number; altitude: number };
+  targetYawDeg?: number;
   missionWaypoints: Array<{ latitude: number; longitude: number; altitude: number }>;
   mode: string;
   history: Vehicle["history"];
@@ -86,8 +87,10 @@ export function stepDemoVehicle(vehicle: DemoVehicle, dt: number, stamp: number,
       const nextWaypoint = vehicle.missionWaypoints.shift();
       if (nextWaypoint) vehicle.target = nextWaypoint;
       else vehicle.mode = "hold";
-    } else if (vehicle.manualWaypoint) vehicle.mode = "hold";
-    else vehicle.target = yp ? randomDemoTargetNearYp(yp, vehicle) : randomDemoTarget(vehicle.lat, vehicle.lon, vehicle.alt);
+    } else if (vehicle.manualWaypoint) {
+      vehicle.mode = "hold";
+      if (vehicle.targetYawDeg != null) vehicle.heading = vehicle.targetYawDeg;
+    } else vehicle.target = yp ? randomDemoTargetNearYp(yp, vehicle) : randomDemoTarget(vehicle.lat, vehicle.lon, vehicle.alt);
   } else {
     const bearing = bearingDegrees(vehicle.lat, vehicle.lon, vehicle.target.latitude, vehicle.target.longitude);
     vehicle.heading = smoothDegrees(vehicle.heading, bearing, Math.min(1, dt * 1.6));
@@ -115,19 +118,20 @@ export function handleDemoCommand(vehicles: DemoVehicle[], vehicleId: string, co
   if (!vehicle) return;
   const yp = vehicles.find((candidate) => candidate.vehicle_id === command.ship_vehicle_id) ?? vehicles.find((candidate) => candidate.vehicle_type === "yp");
   const ypPosition = yp ? { latitude: yp.lat, longitude: yp.lon, altitude: yp.alt } : null;
-  if (command.type === "rtb") { vehicle.mode = "rtb"; vehicle.manualWaypoint = false; vehicle.missionWaypoints = []; vehicle.target = yp ? sternTargetForYp(yp, vehicle) : { latitude: 38.984764, longitude: -76.478643, altitude: vehicle.vehicle_type === "uuv" ? -4 : vehicle.vehicle_type === "uav" ? 45 : 0 }; }
-  if (command.type === "waypoint" && command.target) { vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = []; vehicle.target = command.target; }
+  if (command.type === "rtb") { vehicle.mode = "rtb"; vehicle.manualWaypoint = false; vehicle.missionWaypoints = []; vehicle.targetYawDeg = undefined; vehicle.target = yp ? sternTargetForYp(yp, vehicle) : { latitude: 38.984764, longitude: -76.478643, altitude: vehicle.vehicle_type === "uuv" ? -4 : vehicle.vehicle_type === "uav" ? 45 : 0 }; }
+  if (command.type === "waypoint" && command.target) { vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = []; vehicle.targetYawDeg = undefined; vehicle.target = command.target; }
   if (command.type === "mission_plan" && command.waypoints?.length) {
     const missionWaypoints = command.waypoints.map((waypoint) => ({ latitude: waypoint.latitude, longitude: waypoint.longitude, altitude: waypoint.altitude }));
     const [firstWaypoint, ...remainingWaypoints] = missionWaypoints;
-    if (firstWaypoint) { vehicle.mode = "mission_plan"; vehicle.manualWaypoint = true; vehicle.target = firstWaypoint; vehicle.missionWaypoints = remainingWaypoints; }
+    if (firstWaypoint) { vehicle.mode = "mission_plan"; vehicle.manualWaypoint = true; vehicle.targetYawDeg = undefined; vehicle.target = firstWaypoint; vehicle.missionWaypoints = remainingWaypoints; }
   }
   if (command.type === "ship_relative_trajectory" && yp && ypPosition && command.local_waypoints?.length) {
     const firstWaypoint = command.local_waypoints[0];
     vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = [];
     vehicle.target = localToGlobalWaypoint(ypPosition.latitude, ypPosition.longitude, yp.heading, ypPosition.altitude, firstWaypoint.x, firstWaypoint.y, firstWaypoint.z);
+    vehicle.targetYawDeg = firstWaypoint.yaw_deg != null ? (yp.heading + firstWaypoint.yaw_deg + 360) % 360 : undefined;
   }
-  if (command.type === "takeoff") { vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = []; vehicle.target = { latitude: vehicle.lat, longitude: vehicle.lon, altitude: command.altitude_m ?? 15 }; }
+  if (command.type === "takeoff") { vehicle.mode = "waypoint"; vehicle.manualWaypoint = true; vehicle.missionWaypoints = []; vehicle.targetYawDeg = undefined; vehicle.target = { latitude: vehicle.lat, longitude: vehicle.lon, altitude: command.altitude_m ?? 15 }; }
 }
 
 export function updateDemoVehicleColor(vehicles: DemoVehicle[], vehicleId: string, color: string): void {

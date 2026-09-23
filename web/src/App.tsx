@@ -25,10 +25,10 @@ import { MapContainer, Polyline, TileLayer, useMap, useMapEvents } from "react-l
 
 import { connectSITL, disconnectSITL, exportFlightLog, fetchSettings, fetchRtcmStatus, getCurrentUser, listAxisCameras, listSITLBridges, sendCommand, setYpRole, triggerMOB, updateSettings, logout as logoutUser, fetchDeconflictionSettings, updateDeconflictionSettings } from "./api";
 import type { AxisCamera, CameraDetectionUpdate, CurrentUser, SITLBridge, RtcmStatus } from "./api";
-import type { Command, Position, Vehicle, VehicleType } from "./types";
+import type { Command, Position, RelativeWaypoint, Vehicle, VehicleType } from "./types";
 import Login from "./Login";
 const UserManagement = lazy(() => import("./UserManagement"));
-import { destinationPoint } from "./utils/geo";
+import { destinationPoint, localToGlobalWaypoint } from "./utils/geo";
 import { useTelemetrySocket } from "./hooks/useTelemetrySocket";
 import { MessageDrawer, type StreamMessage } from "./components/MessageDrawer";
 import { SITLPanel } from "./components/SITLPanel";
@@ -217,6 +217,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
   const [ypRoleVehicleId, setYpRoleVehicleId] = useState<string | null>(null);
   const [sarPatterns, setSarPatterns] = useState<Record<string, { patternType: string; waypoints: [number, number][] }>>({});
   const [missionPlans, setMissionPlans] = useState<Record<string, [number, number][]>>({});
+  const [shipRelativePlans, setShipRelativePlans] = useState<Record<string, { shipVehicleId: string; localWaypoints: RelativeWaypoint[] }>>({});
   const [sarMissionActiveByVehicle, setSarMissionActiveByVehicle] = useState<Record<string, boolean>>({});
   const [rtbFollowState, setRtbFollowState] = useState<Record<string, boolean>>({});
   const followBeforeWaypointDragRef = useRef(false);
@@ -234,6 +235,7 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
         setWaypointMarkers(Object.fromEntries((payload.waypoints as WaypointMarker[] | undefined ?? []).map((waypoint) => [waypoint.vehicle_id, waypoint])));
         setSarPatterns(Object.fromEntries(Object.entries(payload.sar_patterns as Record<string, { pattern_type: string; waypoints: [number, number][] }> | undefined ?? {}).map(([vehicleId, pattern]) => [vehicleId, { patternType: pattern.pattern_type, waypoints: pattern.waypoints }])));
         setMissionPlans(payload.mission_plans as Record<string, [number, number][]> ?? {});
+        setShipRelativePlans(Object.fromEntries(Object.entries(payload.ship_relative_plans as Record<string, { ship_vehicle_id: string; local_waypoints: RelativeWaypoint[] }> | undefined ?? {}).map(([vehicleId, plan]) => [vehicleId, { shipVehicleId: plan.ship_vehicle_id, localWaypoints: plan.local_waypoints }])));
         setRtbFollowState(payload.rtb_follow_state as Record<string, boolean> ?? {});
       }
       if (payload.op === "rtb_follow_state") {
@@ -303,6 +305,13 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
       }
       if (payload.op === "mission_plan_cleared") {
         setMissionPlans((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
+      }
+      if (payload.op === "ship_relative_plan_overlay") {
+        const vehicleId = payload.vehicle_id as string;
+        setShipRelativePlans((current) => ({ ...current, [vehicleId]: { shipVehicleId: payload.ship_vehicle_id as string, localWaypoints: payload.local_waypoints as RelativeWaypoint[] } }));
+      }
+      if (payload.op === "ship_relative_plan_cleared") {
+        setShipRelativePlans((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
       }
       if (payload.op === "sar_pattern_cleared") {
         setSarPatterns((current) => { const next = { ...current }; delete next[payload.vehicle_id as string]; return next; });
@@ -840,6 +849,15 @@ function GroundStation({ currentUser, onLogout }: { currentUser: CurrentUser; on
           {Object.entries(missionPlans).map(([vehicleId, waypoints]) => (
             waypoints.length > 1 && <Polyline key={`mission-${vehicleId}`} positions={waypoints} pathOptions={{ color: "#2563eb", weight: 3, opacity: 0.9 }} />
           ))}
+          {Object.entries(shipRelativePlans).map(([vehicleId, plan]) => {
+            const ship = vehicles[plan.shipVehicleId];
+            if (!ship?.position || ship.heading == null) return null;
+            const positions: [number, number][] = plan.localWaypoints.map((waypoint) => {
+              const global = localToGlobalWaypoint(ship.position!.latitude, ship.position!.longitude, ship.heading!, ship.position!.altitude, waypoint.x, waypoint.y, waypoint.z);
+              return [global.latitude, global.longitude];
+            });
+            return positions.length > 1 && <Polyline key={`ship-relative-${vehicleId}`} positions={positions} pathOptions={{ color: "#f59e0b", weight: 3, opacity: 0.9 }} />;
+          })}
           {Object.values(waypointMarkers)
             .filter((waypoint) => !VIEW_MODE || isSimVehicle(waypoint.vehicle_id))
             .map((waypoint) => (
