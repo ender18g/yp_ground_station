@@ -1,0 +1,8 @@
+{
+  "server_ws_url": "ws://192.168.1.45:8000/ws/vehicle",
+  "vehicle_id": "px4_quadrotor",
+  "mavlink_url": "udp:127.0.0.1:14553",
+  "mavlink_baud": 115200,
+  "send_hz": 5.0,
+  "web_port": 8081
+}

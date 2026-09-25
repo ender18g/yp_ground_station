@@ -170,7 +170,7 @@ def _ui_ws_url() -> str:
     base = SERVER_WS_URL.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 
@@ -325,6 +325,9 @@ def _launch_ship_relative_mission(master, command_data: dict) -> None:
 def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
     update_period_s = 1.0 / max(update_hz, 1.0)
     print(f"[SHIP-REL] Starting mission with {len(local_waypoints)} waypoints relative to {ship_vehicle_id}")
+    # SET_POSITION_TARGET_GLOBAL_INT is silently ignored unless already armed in GUIDED.
+    sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+    sar_missions.arm_vehicle(master)
 
     for index, waypoint in enumerate(local_waypoints, start=1):
         while not stop_event.is_set():

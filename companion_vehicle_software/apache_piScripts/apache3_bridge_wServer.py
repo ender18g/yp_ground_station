@@ -484,7 +484,7 @@ def _ui_ws_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 # --- MAIN TELEMETRY & COMMAND LOOP ---

@@ -3,17 +3,22 @@ import json
 import math
 import os
 import socket
+import sys
 import threading
 import time
 import traceback
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from aiohttp import web
 from pymavlink import mavutil
 import websockets
 
-import sar_missions
+from yp_common import behaviors_agnostic
 from yp_common.geometry import (
     destination_point as _destination_point,
     relative_waypoint_to_global as _relative_waypoint_to_global,
@@ -51,7 +56,7 @@ DEFAULT_CONFIG = {
     "mavlink_url": os.getenv("MAVLINK_URL", "udp:127.0.0.1:14540"),
     "mavlink_baud": int(os.getenv("MAVLINK_BAUD", "921600")),
     "send_hz": float(os.getenv("SEND_HZ", "5")),
-    "web_port": 8080,
+    "web_port": 8081,
 }
 
 config = {}
@@ -80,6 +85,7 @@ SAR_ARRIVAL_RADIUS_M = float(os.getenv("SAR_ARRIVAL_RADIUS_M", "10.0"))
 
 _sar_mission_lock = threading.Lock()
 _sar_stop_event = threading.Event()
+_pause_telemetry = threading.Event()
 _sar_telemetry_lock = threading.Lock()
 _sar_latest_nav = {"lat": None, "lon": None, "alt": None, "heading": None, "stamp": 0.0}
 
@@ -370,9 +376,9 @@ async def start_web_server():
     app.router.add_get("/logs/{filename}", handle_log_download)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8081))
     await site.start()
-    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8080)}")
+    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8081)}")
 
 # --- HELPER FUNCTIONS ---
 
@@ -437,7 +443,7 @@ def _ui_ws_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 def _update_vehicle_state(lat: float, lon: float, alt: float, heading: float | None) -> None:
@@ -492,6 +498,7 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
     while True:
         try:
             async with websockets.connect(ui_ws_url, ping_interval=10, ping_timeout=10) as ws:
+                print(f"[INFO] Ship-state listener connected to {ui_ws_url}", flush=True)
                 async for raw_message in ws:
                     try:
                         message = json.loads(raw_message)
@@ -504,21 +511,77 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
                         v = message.get("vehicle") or {}
                         if v.get("vehicle_type") == "yp": _update_ship_state(v)
         except Exception as exc:
+            print(f"[WARN] Ship-state listener disconnected from {ui_ws_url}: {exc}", flush=True)
             await asyncio.sleep(1.0)
 
+def get_px4_mode(custom_mode: int) -> str:
+    main_mode = (custom_mode >> 16) & 0xFF
+    sub_mode = (custom_mode >> 24) & 0xFF
+    #print(main_mode, sub_mode)
+    mode_map = {
+        1: "MANUAL", 2: "ALTCTL", 3: "POSCTL",
+        5: "ACRO", 6: "OFFBOARD", 7: "STABILIZED"
+    }
+    if main_mode == 4:
+        sub_map = {2: "AUTO.TAKEOFF", 3: "AUTO.LOITER", 4: "AUTO.MISSION", 5: "AUTO.RTL", 6: "AUTO.LAND"}
+        return sub_map.get(sub_mode, "AUTO")
+    #print(mode_map.get(main_mode, "UNKNOWN")) 
+    return mode_map.get(main_mode, "UNKNOWN")
+
 def set_px4_mode(master, mode_str: str) -> None:
-    """Safe wrapper for setting PX4 modes using pymavlink."""
-    try:
-        master.set_mode(mode_str)
-    except Exception as exc:
-        print(f"[WARN] Failed to set PX4 mode {mode_str}: {exc}")
+    """Safe wrapper for setting PX4 modes using binary MAV_CMD_DO_SET_MODE flags."""
+    mode_map = {
+        "MANUAL": (1, 0), "ALTCTL": (2, 0), "POSCTL": (3, 0),
+        "AUTO.MISSION": (4, 4), "AUTO.LOITER": (4, 3), "AUTO.RTL": (4, 5),
+        "AUTO.TAKEOFF": (4, 2), "AUTO.LAND": (4, 6),
+        "ACRO": (5, 0), "OFFBOARD": (6, 0), "STABILIZED": (7, 0),
+    }
+    
+    aliases = {"GUIDED": "OFFBOARD", "AUTO": "AUTO.MISSION", "RTL": "AUTO.RTL", "LOITER": "AUTO.LOITER", "TAKEOFF": "AUTO.TAKEOFF"}
+    target_mode = aliases.get(mode_str.upper(), mode_str.upper())
+
+    if target_mode in mode_map:
+        main_mode, sub_mode = mode_map[target_mode]
+        try:
+            master.mav.command_long_send(
+                master.target_system, master.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                main_mode, sub_mode, 0, 0, 0, 0
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to send mode command: {exc}")
+    else:
+        print(f"[WARN] Unknown PX4 mode {mode_str}")
 
 def goto_waypoint(master, target_lat, target_lon, target_alt, timeout=30, force_offboard=True):
     if VEHICLE_TYPE in ["usv", "ugv"]: target_alt = 0.0
-    
-    # PX4 REQUIREMENT: Stream setpoints >2Hz BEFORE enabling OFFBOARD mode
-    master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, int(0b110111111000), int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 0, 0, 0, 0, 0, 0, 0, 0)
-    
+
+    # Calculate bearing to target to explicitly command yaw
+    state = _snapshot_vehicle_state()
+    cur_lat = state.get("lat")
+    cur_lon = state.get("lon")
+
+    yaw_rad = 0.0
+    if cur_lat is not None and cur_lon is not None:
+        lat1 = math.radians(cur_lat)
+        lon1 = math.radians(cur_lon)
+        lat2 = math.radians(target_lat)
+        lon2 = math.radians(target_lon)
+        dlon = lon2 - lon1
+        y = math.sin(dlon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        yaw_rad = math.atan2(y, x)
+
+    # 0b100111111000 enables pos XYZ + Yaw, and ignores velocities, accelerations, and yaw rate
+    master.mav.set_position_target_global_int_send(
+        0, master.target_system, master.target_component, 
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 
+        int(0b100111111000), 
+        int(target_lat * 1e7), int(target_lon * 1e7), target_alt, 
+        0, 0, 0, 0, 0, 0, yaw_rad, 0
+    )
+        
     if force_offboard:
         set_px4_mode(master, 'OFFBOARD')
 
@@ -545,14 +608,13 @@ def follow_yp_velocity(master, command_data: dict) -> None:
         _rtb_offboard_forced = False
     _last_rtb_step_time = now
 
-    # PX4 REQUIREMENT: Send setpoints BEFORE asserting the OFFBOARD mode change
     master.mav.set_position_target_global_int_send(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 0b100111000000, int(float(lat) * 1e7), int(float(lon) * 1e7), float(target.get("altitude") or 0.0), float(command_data.get("velocity_north_ms") or 0.0), float(command_data.get("velocity_east_ms") or 0.0), 0.0, 0, 0, 0, math.radians(float(command_data.get("heading") or 0.0)), 0.0)
 
     try:
         if not _rtb_offboard_forced:
             set_px4_mode(master, "OFFBOARD")
             _rtb_offboard_forced = True
-        elif master.flightmode != "OFFBOARD":
+        elif getattr(master, "flightmode", "") not in ("OFFBOARD", "GUIDED"):
             print("[RTB] Safety pilot has taken control; halting RTB-follow guidance")
             return
     except Exception as exc:
@@ -593,7 +655,6 @@ def execute_land_step(master, command_data: dict) -> bool:
         return False
     _land_touchdown_since = None
 
-    # PX4 REQUIREMENT: Send setpoints BEFORE asserting the OFFBOARD mode change
     master.mav.set_position_target_global_int_send(
         0, master.target_system, master.target_component,
         mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
@@ -606,7 +667,7 @@ def execute_land_step(master, command_data: dict) -> bool:
         if not _land_step_offboard_forced:
             set_px4_mode(master, "OFFBOARD")
             _land_step_offboard_forced = True
-        elif master.flightmode != "OFFBOARD":
+        elif getattr(master, "flightmode", "") not in ("OFFBOARD", "GUIDED"):
             print("[LAND] Safety pilot has taken control; halting land-on-boat guidance")
             return False
     except Exception:
@@ -661,62 +722,168 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
 
 # --- SAR MISSIONS THREAD TARGETS ---
 
+def _stream_waypoints_offboard(master, waypoints: list, arrival_radius_m: float) -> None:
+    """Stream coordinates sequentially to PX4 using OFFBOARD mode."""
+    for wp_lat, wp_lon, wp_alt in waypoints:
+        if _sar_stop_event.is_set():
+            break
+            
+        goto_waypoint(master, wp_lat, wp_lon, wp_alt, force_offboard=True)
+        
+        while not _sar_stop_event.is_set():
+            state = _snapshot_vehicle_state()
+            cur_lat = state.get("lat")
+            cur_lon = state.get("lon")
+            cur_alt = state.get("alt")
+            
+            if cur_lat is not None and cur_lon is not None:
+                dist = _distance_m(cur_lat, cur_lon, wp_lat, wp_lon)
+                if VEHICLE_TYPE in ["usv", "ugv"] or cur_alt is None:
+                    arrived = dist <= arrival_radius_m
+                else:
+                    alt_err = abs(cur_alt - wp_alt)
+                    arrived = dist <= arrival_radius_m and alt_err <= max(3.0, arrival_radius_m * 0.5)
+                    
+                if arrived:
+                    break
+                    
+            # Continue streaming setpoints at ~10Hz to satisfy PX4 OFFBOARD timeout
+            goto_waypoint(master, wp_lat, wp_lon, wp_alt, force_offboard=False)
+            time.sleep(0.1)
+
+def _execute_takeoff_raw(master, altitude_m: float) -> None:
+    """Non-locking helper to force arm and takeoff."""
+    global _armed_state
+
+    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0)
+    arm_deadline = time.time() + 5.0
+    while not _armed_state and time.time() < arm_deadline:
+        if _sar_stop_event.is_set():
+            return
+        time.sleep(0.1)
+    if not _armed_state:
+        print("[MISSION] PX4 did not arm; takeoff command was not sent.", flush=True)
+        return
+
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, float("nan"), float("nan"), float("nan"), altitude_m
+    )
+    print(f"[MISSION] PX4 Takeoff command sent to {altitude_m}m")
+    
+    # Wait for altitude to rise
+    for _ in range(150):
+        if _sar_stop_event.is_set():
+            break
+        state = _snapshot_vehicle_state()
+        if state.get("alt") is not None and state["alt"] >= altitude_m * 0.85:
+            break
+        time.sleep(0.1)
+
+def _run_single_waypoint(master, lat, lon, alt):
+    with _sar_mission_lock:
+        _sar_stop_event.clear()
+        _stream_waypoints_offboard(master, [[lat, lon, alt]], SAR_ARRIVAL_RADIUS_M)
+
 def _run_search_grid(master, lat: float, lon: float, grid_size_m: float, swath_m: float, altitude_m: float) -> None:
     if VEHICLE_TYPE in ["usv", "ugv"]: altitude_m = 0.0
     with _sar_mission_lock:
         _sar_stop_event.clear()
         try:
-            sar_missions.execute_search_grid_streaming(master, lat, lon, grid_size_m, swath_m, altitude_m, include_takeoff=SAR_INCLUDE_TAKEOFF, takeoff_altitude_m=SAR_TAKEOFF_ALT_M, climb_speed_ms=SAR_CLIMB_SPEED_MS, arrival_radius_m=SAR_ARRIVAL_RADIUS_M, stop_event=_sar_stop_event, telemetry_callback=_capture_sar_telemetry)
-        except Exception as exc: pass
+            waypoints = behaviors_agnostic.calculate_search_grid_waypoints(lat, lon, grid_size_m, swath_m, altitude_m)
+            
+            if SAR_INCLUDE_TAKEOFF and VEHICLE_TYPE not in ["usv", "ugv"]:
+                _execute_takeoff_raw(master, altitude_m)
+                
+            _stream_waypoints_offboard(master, waypoints, SAR_ARRIVAL_RADIUS_M)
+        except Exception as exc: 
+            print(f"SAR Error: {exc}")
 
 def _run_mob_search(master, track_points: list, corridor_half_width_m: float, swath_m: float, altitude_m: float, takeoff_altitude_m: float, climb_speed_ms: float) -> None:
     if VEHICLE_TYPE in ["usv", "ugv"]: altitude_m, takeoff_altitude_m = 0.0, 0.0
     with _sar_mission_lock:
         _sar_stop_event.clear()
         try:
-            sar_missions.execute_mob_search_streaming(master, track_points, corridor_half_width_m=corridor_half_width_m, swath_m=swath_m, altitude_m=altitude_m, takeoff_altitude_m=takeoff_altitude_m, climb_speed_ms=climb_speed_ms, include_takeoff=SAR_INCLUDE_TAKEOFF, arrival_radius_m=SAR_ARRIVAL_RADIUS_M, stop_event=_sar_stop_event, telemetry_callback=_capture_sar_telemetry)
-        except Exception as exc: pass
+            start_from_newest = False
+            state = _snapshot_vehicle_state()
+            v_lat, v_lon = state.get("lat"), state.get("lon")
+            if v_lat is not None and v_lon is not None and len(track_points) >= 2:
+                dist_oldest = _distance_m(v_lat, v_lon, float(track_points[0][0]), float(track_points[0][1]))
+                dist_newest = _distance_m(v_lat, v_lon, float(track_points[-1][0]), float(track_points[-1][1]))
+                start_from_newest = dist_newest < dist_oldest
+
+            waypoints = behaviors_agnostic.calculate_mob_waypoints(
+                track_points, corridor_half_width_m, swath_m, altitude_m,
+                start_from_newest=start_from_newest
+            )
+            
+            if SAR_INCLUDE_TAKEOFF and VEHICLE_TYPE not in ["usv", "ugv"]:
+                _execute_takeoff_raw(master, takeoff_altitude_m)
+                
+            _stream_waypoints_offboard(master, waypoints, SAR_ARRIVAL_RADIUS_M)
+        except Exception as exc: 
+            print(f"SAR Error: {exc}")
 
 def _run_takeoff(master, altitude_m: float) -> None:
     with _sar_mission_lock:
         try:
-            set_px4_mode(master, "AUTO.LOITER")
-            time.sleep(0.3)
-            if not sar_missions.arm_vehicle(master):
-                print("[MISSION] Takeoff arm failed")
-                return
-            time.sleep(0.3)
-            # Send standard takeoff command which automatically triggers AUTO.TAKEOFF mode in PX4
-            master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, float("nan"), 0, 0, altitude_m)
-            print(f"[MISSION] Takeoff command sent to {altitude_m}m")
+            _execute_takeoff_raw(master, altitude_m)
         except Exception as exc:
             print(f"[MISSION] takeoff error: {exc}")
 
 def _run_mission_plan(master, waypoints: list, auto_arm_start: bool, force_guided_on_complete: bool) -> None:
+    """PX4 specific custom mission uploader to bypass ArduPilot formatting."""
     with _sar_mission_lock:
+        _pause_telemetry.set()
         try:
-            mission_items = sar_missions.build_mission_items(
-                waypoints,
-                force_guided_on_complete=force_guided_on_complete,
-                surface_vehicle=VEHICLE_TYPE in ("usv", "ugv"),
-                parameter_overrides=False,
-            )
-            if not mission_items:
+            master.mav.mission_clear_all_send(master.target_system, master.target_component)
+            master.recv_match(type='MISSION_ACK', blocking=True, timeout=2.0)
+            
+            count = len(waypoints)
+            if count == 0:
                 return
-
-            if not sar_missions.upload_mission(master, mission_items): return
-            if auto_arm_start:
-                set_px4_mode(master, "AUTO.LOITER")
-                time.sleep(0.2)
-                sar_missions.arm_vehicle(master)
-                time.sleep(0.2)
-                set_px4_mode(master, "AUTO.MISSION")
-                time.sleep(0.2)
-                sar_missions.start_mission(master)
-        except Exception as exc: pass
+                
+            master.mav.mission_count_send(master.target_system, master.target_component, count)
+            
+            for i in range(count):
+                req = master.recv_match(type='MISSION_REQUEST', blocking=True, timeout=2.0)
+                if not req:
+                    print(f"[MISSION] PX4 timeout requesting item {i}")
+                    return
+                    
+                seq = req.seq
+                wp = waypoints[seq]
+                
+                cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+                if seq == 0 and VEHICLE_TYPE not in ("usv", "ugv"):
+                    cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+                    
+                master.mav.mission_item_int_send(
+                    master.target_system, master.target_component, seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT, cmd,
+                    0, 1, 
+                    0, 15.0, 0, float("nan"), 
+                    int(wp["latitude"] * 1e7), int(wp["longitude"] * 1e7), float(wp.get("altitude", 30.0))
+                )
+            
+            ack = master.recv_match(type='MISSION_ACK', blocking=True, timeout=2.0)
+            if ack and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                print("[MISSION] PX4 mission uploaded successfully")
+                if auto_arm_start:
+                    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0)
+                    time.sleep(0.2)
+                    set_px4_mode(master, "AUTO.MISSION")
+            else:
+                print(f"[MISSION] PX4 rejected mission: {ack}")
+        except Exception as exc:
+            print(f"[MISSION] Upload error: {exc}")
+        finally:
+            _pause_telemetry.clear()
 
 def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
     with _sar_mission_lock:
+        _pause_telemetry.set()
         try:
             master.mav.log_request_list_send(master.target_system, master.target_component, 0, 0xFFFF)
             log_id = None
@@ -733,7 +900,7 @@ def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
                     break
 
             if not log_id or not log_size:
-                print(f"[LOG] No dataflash log available on {vehicle_id} to auto-download.")
+                print(f"[LOG] No ULog available on {vehicle_id} to auto-download.")
                 return
 
             data = bytearray(log_size)
@@ -756,12 +923,14 @@ def _download_latest_dataflash_log(master, vehicle_id: str) -> None:
 
             master.mav.log_request_end_send(master.target_system, master.target_component)
             LOG_DIR.mkdir(parents=True, exist_ok=True)
-            # PX4 Uses the .ulg file extension for ULog formatted logs
             filename = f"{vehicle_id}_log{log_id}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.ulg"
             (LOG_DIR / filename).write_bytes(bytes(data))
             print(f"[LOG] Auto-downloaded flight log on disarm: {filename} ({log_size} bytes)")
         except Exception as exc:
             print(f"[LOG] Auto-download failed for {vehicle_id}: {exc}")
+        finally:
+            _pause_telemetry.clear()
+
 
 # --- MAIN TELEMETRY LOOP ---
 
@@ -777,7 +946,7 @@ async def telemetry_loop(current_config: dict) -> None:
     system_status["cube_status"] = "Connecting..."
     system_status["cube_connected"] = False
 
-    ws = None  # declared here so the finally block can always close it
+    ws = None
     try:
         master = mavutil.mavlink_connection(mavlink_url, baud=mavlink_baud)
         
@@ -792,7 +961,7 @@ async def telemetry_loop(current_config: dict) -> None:
         system_status["last_hb_time"] = time.time()
         _armed_state = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
         try:
-            system_status["flight_mode"] = master.flightmode
+            system_status["flight_mode"] = get_px4_mode(msg.custom_mode)
         except Exception: pass
 
         if msg.type in [10, 22]:
@@ -805,7 +974,6 @@ async def telemetry_loop(current_config: dict) -> None:
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, int(1e6 / 2), 0, 0, 0, 0, 0)
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_GPS2_RAW, int(1e6 / 2), 0, 0, 0, 0, 0)
 
-        # Non-blocking WebSocket state variables
         ws_last_connect_attempt = 0.0
         last_send_time = time.time()
         last_video_send_time = 0.0
@@ -813,11 +981,9 @@ async def telemetry_loop(current_config: dict) -> None:
         while True:
             now = time.time()
 
-            # --- 1. Manage WebSocket Reconnection ---
             if ws is None and (now - ws_last_connect_attempt > 5.0):
                 ws_last_connect_attempt = now
                 try:
-                    # Try to connect with a short 2-second timeout so it doesn't block MAVLink reading
                     ws = await asyncio.wait_for(
                         websockets.connect(f"{server_ws_url.rstrip('/')}/{vehicle_id}", ping_interval=10, ping_timeout=10),
                         timeout=2.0
@@ -830,7 +996,6 @@ async def telemetry_loop(current_config: dict) -> None:
                     system_status["ws_status"] = "Server Offline (Retrying)"
                     ws = None
 
-            # --- 2. Read WebSocket Commands ---
             if ws is not None:
                 try:
                     response = await asyncio.wait_for(ws.recv(), timeout=0.01)
@@ -851,7 +1016,13 @@ async def telemetry_loop(current_config: dict) -> None:
                                         "stamp": time.time(),
                                     }))
                             elif cmd_type == "waypoint" and None not in (command_data.get("target", {}).get("latitude"), command_data.get("target", {}).get("longitude"), command_data.get("target", {}).get("altitude")):
-                                goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_offboard=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_offboard()))
+                                # PX4 requires offboard computer to continuously send waypoint setpoints at atleast 2 Hz
+                                # goto_waypoint(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"], force_offboard=(True if server_msg.get("source") != "rtb_follow" else _rtb_waypoint_should_force_offboard()))
+                                threading.Thread(
+                                    target=_run_single_waypoint, 
+                                    args=(master, command_data["target"]["latitude"], command_data["target"]["longitude"], command_data["target"]["altitude"]), 
+                                    daemon=True
+                                    ).start()
                             elif cmd_type == "search_grid" and None not in (command_data.get("lat"), command_data.get("lon")):
                                 threading.Thread(target=_run_search_grid, args=(master, float(command_data["lat"]), float(command_data["lon"]), float(command_data.get("grid_size_m", 200)), float(command_data.get("swath_m", 20)), float(command_data.get("altitude_m", 30))), daemon=True).start()
                             elif cmd_type == "mob" and len(command_data.get("track_points", [])) >= 2:
@@ -861,7 +1032,7 @@ async def telemetry_loop(current_config: dict) -> None:
                             elif cmd_type == "disarm":
                                 master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0)
                             elif cmd_type == "arm":
-                                sar_missions.arm_vehicle(master)
+                                master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0)
                             elif cmd_type == "takeoff" and VEHICLE_TYPE not in ("usv", "ugv"):
                                 threading.Thread(target=_run_takeoff, args=(master, float(command_data.get("altitude_m", 15.0))), daemon=True).start()
                             elif cmd_type == "rtcm_data":
@@ -876,10 +1047,7 @@ async def telemetry_loop(current_config: dict) -> None:
                             elif cmd_type == "mission_plan" and isinstance(command_data.get("waypoints", []), list):
                                 threading.Thread(target=_run_mission_plan, args=(master, command_data["waypoints"], bool(command_data.get("auto_arm_start", True)), bool(command_data.get("force_guided_on_complete", False))), daemon=True).start()
                             elif cmd_type == "set_mode" and command_data.get("mode"):
-                                mode_str = str(command_data["mode"])
-                                px4_mode_map = {"GUIDED": "OFFBOARD", "AUTO": "AUTO.MISSION", "RTL": "AUTO.RTL", "LOITER": "AUTO.LOITER"}
-                                px4_mode = px4_mode_map.get(mode_str.upper(), mode_str.upper())
-                                set_px4_mode(master, px4_mode)
+                                set_px4_mode(master, command_data["mode"])
                     except json.JSONDecodeError: pass
                 except asyncio.TimeoutError: 
                     pass
@@ -889,10 +1057,9 @@ async def telemetry_loop(current_config: dict) -> None:
                     system_status["ws_connected"] = False
                     system_status["ws_status"] = "Disconnected"
 
-            # --- 3. Read MAVLink (Always runs) ---
             msg = None
-            if not _sar_mission_lock.locked():
-                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW", "EXTENDED_SYS_STATE"], blocking=False)
+            if not _pause_telemetry.is_set():
+                msg = master.recv_match(type=["GLOBAL_POSITION_INT", "HEARTBEAT", "GPS_RAW_INT", "GPS2_RAW", "EXTENDED_SYS_STATE", "COMMAND_ACK", "STATUSTEXT"], blocking=False)
            
             now = time.time()
             if system_status["cube_connected"] and (now - system_status["last_hb_time"] > 5.0):
@@ -911,8 +1078,20 @@ async def telemetry_loop(current_config: dict) -> None:
                         threading.Thread(target=_download_latest_dataflash_log, args=(master, vehicle_id), daemon=True).start()
                     _armed_state = armed
                     try:
-                        system_status["flight_mode"] = master.flightmode
+                        system_status["flight_mode"] = get_px4_mode(msg.custom_mode)
                     except Exception: pass
+                elif msg_type == "COMMAND_ACK":
+                    if msg.command in (
+                        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                        mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                    ):
+                        print(f"[PX4] Command {msg.command} result: {mavutil.mavlink.enums['MAV_RESULT'][msg.result].name if msg.result in mavutil.mavlink.enums['MAV_RESULT'] else msg.result}", flush=True)
+                elif msg_type == "STATUSTEXT":
+                    severity = getattr(msg, "severity", 6)
+                    text = getattr(msg, "text", "").rstrip("\\x00")
+                    if severity <= mavutil.mavlink.MAV_SEVERITY_WARNING or "arm" in text.lower() or "health" in text.lower():
+                        print(f"[PX4] STATUSTEXT: {text}", flush=True)
                 elif msg_type in ("GPS_RAW_INT", "GPS2_RAW"):
                     system_status["gps_status"] = get_gps_fix_label(getattr(msg, "fix_type", 0))
                     system_status["satellites"] = getattr(msg, "satellites_visible", 0)
@@ -935,7 +1114,6 @@ async def telemetry_loop(current_config: dict) -> None:
                 telemetry_sample = _snapshot_sar_telemetry()
                 if telemetry_sample is not None: _update_vehicle_state(*telemetry_sample)
 
-            # --- 4. Send WebSocket Telemetry ---
             if ws is not None:
                 try:
                     if telemetry_sample is not None and (now - last_send_time) >= (1.0 / send_hz):
@@ -961,7 +1139,6 @@ async def telemetry_loop(current_config: dict) -> None:
         system_status["ws_connected"] = False
         system_status["ws_status"] = "Disconnected"
     finally:
-        # Guarantee the socket is released on break, exception, or task cancellation.
         if ws is not None:
             try:
                 await ws.close()

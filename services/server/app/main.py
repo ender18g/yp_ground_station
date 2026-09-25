@@ -1926,6 +1926,34 @@ async def ui_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
         ui_connections.discard(websocket)
 
 
+@app.websocket("/ws/ship_state")
+async def ship_state_ws(websocket: WebSocket) -> None:
+    """Unauthenticated, read-only vehicle position feed for companion bridges' ship-relative
+    tracking (e.g. arducopter_bridge_wServer.py). Same trust boundary as /ws/vehicle -- these
+    connections originate from the trusted vehicle network, not a browser, and cannot obtain
+    the interactive-user JWT that /ws/ui requires."""
+    await websocket.accept()
+    ui_connections.add(websocket)
+    try:
+        async with state_lock:
+            # Omit "history" (up to HISTORY_MAX_POINTS per vehicle) -- companion
+            # bridges only need current position, and the full snapshot can
+            # exceed the websockets client library's default 1MB frame limit.
+            await websocket.send_json({
+                "op": "snapshot",
+                "vehicles": [
+                    {k: v for k, v in public_vehicle(vehicle).items() if k != "history"}
+                    for vehicle in vehicles.values()
+                ],
+            })
+        while True:
+            await websocket.receive_text()  # keep-alive; inbound messages are ignored
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ui_connections.discard(websocket)
+
+
 def _check_command_permission(user: "User", cmd_type: Optional[str]) -> bool:
     """Check if a user has permission to execute a specific command type."""
     if not user or not user.active:

@@ -434,7 +434,7 @@ def _ui_ws_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 
@@ -490,6 +490,7 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
     while True:
         try:
             async with websockets.connect(ui_ws_url, ping_interval=10, ping_timeout=10) as ws:
+                print(f"[INFO] Ship-state listener connected to {ui_ws_url}", flush=True)
                 async for raw_message in ws:
                     try:
                         message = json.loads(raw_message)
@@ -502,6 +503,7 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
                         v = message.get("vehicle") or {}
                         if v.get("vehicle_type") == "yp": _update_ship_state(v)
         except Exception as exc:
+            print(f"[WARN] Ship-state listener disconnected from {ui_ws_url}: {exc}", flush=True)
             await asyncio.sleep(1.0)
 
 def _stop_ship_relative_mission() -> None:
@@ -521,6 +523,9 @@ def _launch_ship_relative_mission(master, command_data: dict) -> None:
 
 def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
     update_period_s = 1.0 / max(update_hz, 1.0)
+    # SET_POSITION_TARGET_GLOBAL_INT is silently ignored unless already armed in GUIDED.
+    sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+    sar_missions.arm_vehicle(master)
     for index, waypoint in enumerate(local_waypoints, start=1):
         while not stop_event.is_set():
             ship_state, vehicle_state = _snapshot_ship_state(ship_vehicle_id), _snapshot_vehicle_state()

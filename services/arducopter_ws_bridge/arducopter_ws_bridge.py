@@ -142,7 +142,7 @@ def _ui_ws_url() -> str:
     base = SERVER_WS_URL.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 

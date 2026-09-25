@@ -138,38 +138,38 @@ services:
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
 
-  yolo-detector:
-    build:
-      context: ./services/yolo_detector
-      network: host
-    # AMD GPU (ROCm) passthrough - render/video are the host's group IDs owning
-    # /dev/kfd and /dev/dri; falls back to CPU automatically if unavailable.
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - "992"
-      - "44"
-    ipc: host
-    shm_size: "8g"
-    environment:
-      SERVER_WS_URL: ws://yp-server:8000/ws/detector
-      SERVER_HTTP_URL: http://yp-server:8000
+  # yolo-detector:
+  #   build:
+  #     context: ./services/yolo_detector
+  #     network: host
+    # Optional AMD GPU (ROCm) passthrough. Uncomment on a host that provides
+    # both /dev/kfd and /dev/dri; otherwise the detector runs on CPU.
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # group_add:
+    #   - "992"
+    #   - "44"
+  #   ipc: host
+  #   shm_size: "8g"
+  #   environment:
+  #     SERVER_WS_URL: ws://yp-server:8000/ws/detector
+  #     SERVER_HTTP_URL: http://yp-server:8000
       # Auto-discovers online Axis cameras from /api/cameras every
       # YOLO_DISCOVERY_INTERVAL_SECONDS; set YOLO_CAMERA_IDS (comma list) to
       # pin specific cameras instead.
-      YOLO_CAMERA_IDS: ""
-      YOLO_MODEL_PATH: yolov8n.pt
-      YOLO_MODELS_DIR: /data/yolo_models
-      YOLO_CONF_THRESHOLD: "0.4"
-      YOLO_INFER_INTERVAL_SECONDS: "0.5"
-      YOLO_DISCOVERY_INTERVAL_SECONDS: "15"
-      YOLO_CLASSES: ""
-    volumes:
-      - ./data/yolo_models:/data/yolo_models
-    depends_on:
-      yp-server:
-        condition: service_healthy
+  #     YOLO_CAMERA_IDS: ""
+  #     YOLO_MODEL_PATH: yolov8n.pt
+  #     YOLO_MODELS_DIR: /data/yolo_models
+  #     YOLO_CONF_THRESHOLD: "0.4"
+  #     YOLO_INFER_INTERVAL_SECONDS: "0.5"
+  #     YOLO_DISCOVERY_INTERVAL_SECONDS: "15"
+  #     YOLO_CLASSES: ""
+  #   volumes:
+  #     - ./data/yolo_models:/data/yolo_models
+  #   depends_on:
+  #     yp-server:
+  #       condition: service_healthy
 
   sim-uav1:
     build:

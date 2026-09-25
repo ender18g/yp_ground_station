@@ -85,7 +85,7 @@ _sar_latest_nav = {"lat": None, "lon": None, "alt": None, "heading": None, "stam
 
 SHIP_STATE_TIMEOUT_S = float(os.getenv("SHIP_STATE_TIMEOUT_S", "2.0"))
 SHIP_RELATIVE_DEFAULT_UPDATE_HZ = float(os.getenv("SHIP_RELATIVE_UPDATE_HZ", "10.0"))
-SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M = float(os.getenv("SHIP_RELATIVE_ARRIVAL_RADIUS_M", "6.0"))
+SHIP_RELATIVE_DEFAULT_ARRIVAL_RADIUS_M = float(os.getenv("SHIP_RELATIVE_ARRIVAL_RADIUS_M", "10.0"))
 
 _vehicle_state_lock = threading.Lock()
 _vehicle_state = {"lat": None, "lon": None, "alt": None, "heading_deg": None, "stamp": 0.0}
@@ -371,9 +371,9 @@ async def start_web_server():
     app.router.add_get("/logs/{filename}", handle_log_download)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", config.get("web_port", 8082))
     await site.start()
-    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8080)}")
+    print(f"Web interface running at http://0.0.0.0:{config.get('web_port', 8082)}")
 
 # --- HELPER FUNCTIONS ---
 
@@ -438,7 +438,7 @@ def _ui_ws_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     marker = "/ws/vehicle"
     if marker in base:
-        return f"{base.split(marker, 1)[0]}/ws/ui"
+        return f"{base.split(marker, 1)[0]}/ws/ship_state"
     return base
 
 
@@ -494,6 +494,7 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
     while True:
         try:
             async with websockets.connect(ui_ws_url, ping_interval=10, ping_timeout=10) as ws:
+                print(f"[INFO] Ship-state listener connected to {ui_ws_url}", flush=True)
                 async for raw_message in ws:
                     try:
                         message = json.loads(raw_message)
@@ -506,6 +507,7 @@ async def ship_state_listener_loop(server_ws_url: str) -> None:
                         v = message.get("vehicle") or {}
                         if v.get("vehicle_type") == "yp": _update_ship_state(v)
         except Exception as exc:
+            print(f"[WARN] Ship-state listener disconnected from {ui_ws_url}: {exc}", flush=True)
             await asyncio.sleep(1.0)
 
 def _stop_ship_relative_mission() -> None:
@@ -525,6 +527,9 @@ def _launch_ship_relative_mission(master, command_data: dict) -> None:
 
 def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: list, arrival_radius_m: float, update_hz: float, stop_event: threading.Event) -> None:
     update_period_s = 1.0 / max(update_hz, 1.0)
+    # SET_POSITION_TARGET_GLOBAL_INT is silently ignored unless already armed in GUIDED.
+    sar_missions.set_mode(master, "GUIDED", wait_for_ack=False)
+    sar_missions.arm_vehicle(master)
     for index, waypoint in enumerate(local_waypoints, start=1):
         while not stop_event.is_set():
             ship_state, vehicle_state = _snapshot_ship_state(ship_vehicle_id), _snapshot_vehicle_state()
@@ -542,7 +547,10 @@ def _run_ship_relative_mission(master, ship_vehicle_id: str, local_waypoints: li
             if _distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon) <= arrival_radius_m and alt_condition_met:
                 # Only break if there are more waypoints in the sequence
                 if index < len(local_waypoints):
+                    print(f"[INFO] Waypoint {index} reached, proceeding to next waypoint.", flush=True)
                     break
+            else:
+                print(f"[INFO] Waypoint {index} not reached, current distance to target: {_distance_m(float(vehicle_state["lat"]), float(vehicle_state["lon"]), target_lat, target_lon):.2f} m, {alt_condition_met}", flush=True)
             time.sleep(update_period_s)
         if stop_event.is_set(): return
 
@@ -953,7 +961,7 @@ async def telemetry_loop(current_config: dict) -> None:
                         except Exception: pass
                     if now - system_status["last_gps_fix_forwarded_at"] >= 10.0:
                         system_status["last_gps_fix_forwarded_at"] = now
-                        print(f"[GPS] Forwarded {msg_type}: {system_status['gps_status']} ({system_status['satellites']} sats)")
+                        #print(f"[GPS] Forwarded {msg_type}: {system_status['gps_status']} ({system_status['satellites']} sats)")
                 elif msg_type == "GLOBAL_POSITION_INT":
                     lat, lon, alt = msg.lat / 1e7, msg.lon / 1e7, msg.relative_alt / 1000.0
                     heading_raw = getattr(msg, "hdg", None)
