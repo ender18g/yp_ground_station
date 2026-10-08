@@ -692,3 +692,6 @@ npm run dev
 - Add authentication before putting this on anything other than a trusted local shipboard network.
 - Validate waypoint commands on the vehicle side before forwarding to the Cube/Pixhawk.
 - Keep a manual RC/safety pilot path independent of the web UI.
+
+## The repo has been moved to:
+https://github.com/USNA-WRCE/TRIDENT-YP.git
